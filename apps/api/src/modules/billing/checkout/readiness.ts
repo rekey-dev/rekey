@@ -16,41 +16,30 @@ import { prisma } from '../../../lib/prisma.js';
 import { env } from '../../../config/env.js';
 import { publicApiOrigin } from '../../../lib/public-api-origin.js';
 import { registeredOrigins } from '../../../lib/app-url.js';
-import { billingCredentialsService, hasWebhookConfigured, type BillingMode, type BillingProviderName } from '../credentials.service.js';
+import { billingCredentialsService, type BillingMode, type BillingProviderName } from '../credentials.service.js';
 import { getModule } from '../providers/registry.js';
 import { isOneTimePlan } from '../plan-kind.js';
 import { planCheckoutReadiness } from '../../plans/plan-readiness.js';
 import { checkReturnUrls } from '../checkout-return-url.js';
 import { probePortal, type ProbeResult } from './portal-probe.js';
+import { stripePublishableKeyFailure } from './stripe-readiness.js';
+import { razorpayKeyIdCheck } from './razorpay-readiness.js';
+import { label, modeWord, pass, type Kind } from './readiness-shared.js';
+import { latestVerifiedWebhook, secretsSavedAt, webhookCheck } from './readiness-webhook.js';
+
+export { webhookCheck };
 
 type Check = CheckoutReadinessCheck;
-type Kind = 'recurring' | 'one_time';
 
-const WEBHOOK_LOOKBACK_DAYS = 30;
-const WEBHOOK_STALE_DAYS = 7;
-/** The receipt note the webhook pipeline records for a mode-mismatch refusal. */
-const MODE_MISMATCH_PREFIX = 'WEBHOOK_MODE_MISMATCH';
-const DAY_MS = 24 * 60 * 60 * 1000;
 const PROBE_REFRESH_MS = 5 * 60 * 1000;
 
 const KILL_SWITCH_FIX =
   'The deployment has switched the Rekey checkout page off (CHECKOUT_EMBEDDED_ENABLED=false). Remove that setting from the API environment and restart it.';
 
-function label(provider: string): string {
-  return getModule(provider)?.display.label ?? provider;
-}
-
 function other(mode: BillingMode): BillingMode {
   return mode === 'live' ? 'test' : 'live';
 }
 
-function modeWord(mode: BillingMode): string {
-  return mode === 'live' ? 'live' : 'sandbox';
-}
-
-function pass(id: Check['id'], provider: string | null, message: string): Check {
-  return { id, provider, status: 'PASS', message, fix: null };
-}
 
 /** The stored probe result, or null when none has run. */
 export function storedProbe(app: Pick<Application, 'checkoutReadiness'>): ProbeResult | null {
@@ -170,89 +159,6 @@ async function providerProven(applicationId: string, provider: BillingProviderNa
   return (await latestVerifiedWebhook(applicationId, provider, mode)).receivedAt !== null;
 }
 
-/** When this provider's secret or mode last changed; null when none is stored. */
-async function secretsSavedAt(applicationId: string, provider: BillingProviderName): Promise<Date | null> {
-  const credential = await prisma.billingCredentials.findUnique({
-    where: { applicationId_provider: { applicationId, provider } },
-    select: { secretsUpdatedAt: true },
-  });
-  return credential?.secretsUpdatedAt ?? null;
-}
-
-/** The newest webhook verified with this mode's credentials since they were saved, within the lookback. */
-async function latestVerifiedWebhook(
-  applicationId: string,
-  provider: BillingProviderName,
-  mode: BillingMode,
-): Promise<{ receivedAt: Date | null; lookbackDays: number }> {
-  const lookbackDays =
-    env.WEBHOOK_EVENT_RETENTION_DAYS > 0 ? Math.min(WEBHOOK_LOOKBACK_DAYS, env.WEBHOOK_EVENT_RETENTION_DAYS) : WEBHOOK_LOOKBACK_DAYS;
-  // Only events verified with THIS mode's credentials, and only since their
-  // secret or mode last changed: a sandbox delivery proves nothing about the
-  // live webhook, and neither does an event verified with credentials since
-  // replaced. An enable or routing edit does not restart the window.
-  const savedAt = await secretsSavedAt(applicationId, provider);
-  const since = new Date(Math.max(Date.now() - lookbackDays * DAY_MS, savedAt?.getTime() ?? 0));
-  // A mode-mismatch refusal proves the webhook is wired to the other mode.
-  // Matched by code, not by `processedAt`: an event that verified and then
-  // failed to apply still proves delivery.
-  const latest = await prisma.webhookEvent.findFirst({
-    where: {
-      applicationId,
-      provider,
-      mode,
-      receivedAt: { gte: since },
-      OR: [{ processingError: null }, { NOT: { processingError: { startsWith: MODE_MISMATCH_PREFIX } } }],
-    },
-    orderBy: { receivedAt: 'desc' },
-    select: { receivedAt: true },
-  });
-  return { receivedAt: latest?.receivedAt ?? null, lookbackDays };
-}
-
-/** Check 3: a webhook is registered and, in live mode, has delivered a verified event. */
-export async function webhookCheck(
-  applicationId: string,
-  provider: BillingProviderName,
-  mode: BillingMode,
-  creds: unknown,
-): Promise<Check> {
-  const where = `Panel → Application → Billing → Setup → Providers → ${label(provider)}`;
-  if (!hasWebhookConfigured(provider, creds)) {
-    return {
-      id: 'webhook',
-      provider,
-      status: 'FAIL',
-      message: `No ${label(provider)} webhook is registered, and subscriptions activate only from the provider's webhook.`,
-      fix: `Register the webhook in ${where} (Auto-configure, or paste its id in Edit).`,
-    };
-  }
-  const { receivedAt: latest, lookbackDays } = await latestVerifiedWebhook(applicationId, provider, mode);
-  const firstPurchase =
-    mode === 'live'
-      ? `complete one checkout on the provider's page so an event arrives`
-      : `complete one sandbox checkout (on the provider's page or on the Rekey page) so an event arrives`;
-  if (latest === null) {
-    return {
-      id: 'webhook',
-      provider,
-      status: mode === 'live' ? 'FAIL' : 'WARN',
-      message: `${label(provider)} has not delivered a webhook verified with these ${modeWord(mode)} credentials in the last ${lookbackDays} days, or since they were last saved.`,
-      fix: `Check the webhook in ${where}, then ${firstPurchase}.`,
-    };
-  }
-  if (latest.getTime() < Date.now() - WEBHOOK_STALE_DAYS * DAY_MS) {
-    return {
-      id: 'webhook',
-      provider,
-      status: 'WARN',
-      message: `The last verified ${label(provider)} webhook arrived on ${latest.toISOString().slice(0, 10)}.`,
-      fix: `Check that the webhook in ${where} is still active at ${label(provider)}.`,
-    };
-  }
-  return pass('webhook', provider, `${label(provider)} delivered a verified webhook on ${latest.toISOString().slice(0, 10)}.`);
-}
-
 function registrationMode(
   plan: Pick<Plan, 'metadata'>,
   provider: BillingProviderName,
@@ -344,6 +250,7 @@ export function requestReturnUrlsCheck(
 /** Check 6: the public browser credential the provider's component needs. */
 export function browserCredentialCheck(provider: BillingProviderName, creds: unknown): Check {
   const data = (creds ?? {}) as Record<string, unknown>;
+  if (provider === 'razorpay') return razorpayKeyIdCheck(data);
   if (provider === 'paypal' && !(typeof data.clientId === 'string' && data.clientId.length > 0)) {
     return {
       id: 'browser_credential',
@@ -352,6 +259,11 @@ export function browserCredentialCheck(provider: BillingProviderName, creds: unk
       message: 'The PayPal client ID is missing. It is a public value, sent only to the checkout page for this Application\'s sessions.',
       fix: 'Enter the Client ID in Panel → Application → Billing → Setup → Providers → PayPal → Edit.',
     };
+  }
+  if (provider === 'stripe') {
+    const stripe = stripePublishableKeyFailure(data);
+    if (stripe !== null) return { id: 'browser_credential', provider, status: 'FAIL', ...stripe };
+    return pass('browser_credential', provider, 'Stripe has the publishable key its payment form needs.');
   }
   return pass('browser_credential', provider, `${label(provider)} has the public credential its buttons need.`);
 }
@@ -432,7 +344,7 @@ export async function runCheckoutReadiness(app: Application): Promise<CheckoutRe
     for (const { provider } of inMode) {
       const creds = await billingCredentialsService.loadDecrypted(app.id, provider).catch(() => null);
       checks.push(providerCheck(provider, mode, kinds, app.environment, true, await providerProven(app.id, provider, mode)));
-      checks.push(await webhookCheck(app.id, provider, mode, creds));
+      checks.push(await webhookCheck(app.id, provider, mode, creds, kinds));
       checks.push(await plansCheck(app.id, provider, mode, plans));
       checks.push(browserCredentialCheck(provider, creds));
     }
@@ -498,7 +410,7 @@ export async function guardEmbeddedCheckout(args: {
   const credential = browserCredentialCheck(provider, creds);
   if (credential.status === 'FAIL') return credential;
 
-  const webhook = await webhookCheck(app.id, provider, mode, creds);
+  const webhook = await webhookCheck(app.id, provider, mode, creds, kinds);
   if (webhook.status === 'FAIL') return webhook;
 
   const plans = await plansCheck(app.id, provider, mode, [plan]);

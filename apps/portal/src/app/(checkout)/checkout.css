@@ -26,6 +26,33 @@ body {
   text-underline-offset: 2px;
 }
 
+/* The page's own pay button, for a processor whose button Rekey draws.
+   White text on the accent: readableAccent only passes an accent with 4.5:1
+   contrast against white. */
+.ck-button {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--ck-accent);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.ck-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ck-button-skeleton {
+  min-height: 48px;
+  border-radius: 8px;
+  background: var(--ck-muted);
+}
+
 a:focus-visible,
 summary:focus-visible,
 button:focus-visible {

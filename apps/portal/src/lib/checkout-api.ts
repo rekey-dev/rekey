@@ -7,7 +7,7 @@
 
 import 'server-only';
 import type { CheckoutPageView } from '@rekey.dev/shared-types';
-import { CHECKOUT_TOKEN_PATTERN } from '@rekey.dev/shared-types/checkout';
+import { CHECKOUT_TOKEN_PATTERN, type PaypalApprovalBody } from '@rekey.dev/shared-types/checkout';
 import { rekeyApiUrl } from './env';
 import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
 
@@ -24,7 +24,8 @@ interface Envelope<T> {
   error?: { code?: string };
 }
 
-async function call<T>(
+/** One call to `/api/v1/checkout-sessions/<path>` with the visitor's forwarded address. */
+export async function call<T>(
   method: 'GET' | 'POST',
   path: string,
   body?: unknown,
@@ -93,13 +94,11 @@ export async function checkoutFallback(token: string): Promise<string | null> {
  */
 export async function confirmApproval(
   token: string,
-  subscriptionId: string,
+  approval: PaypalApprovalBody,
 ): Promise<{ status: number; body: { status?: string; error?: string } }> {
   if (!isCheckoutToken(token)) return { status: 404, body: { error: 'not_found' } };
   try {
-    const { status, json } = await call<{ status: string }>('POST', `${encodeURIComponent(token)}/paypal/approved`, {
-      subscriptionId,
-    });
+    const { status, json } = await call<{ status: string }>('POST', `${encodeURIComponent(token)}/paypal/approved`, approval);
     if (status === 200 && json?.data) return { status: 200, body: { status: json.data.status } };
     return { status: status >= 400 && status < 500 ? status : 502, body: { error: json?.error?.code ?? 'unavailable' } };
   } catch {
@@ -120,5 +119,26 @@ export async function confirmProbe(nonce: string): Promise<string | null> {
     return res.status === 200 && json?.data ? json.data.slug : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Forward Stripe's completed Checkout Session to the API, which checks it with
+ * Stripe. Same answer shape as `confirmApproval`. `via: 'return'` marks the
+ * page's own check on a return from Stripe, whose refusals the API does not
+ * count toward the session's limit.
+ */
+export async function confirmStripe(
+  token: string,
+  sessionId: string,
+  via: 'page' | 'return' = 'page',
+): Promise<{ status: number; body: { status?: string; error?: string } }> {
+  if (!isCheckoutToken(token)) return { status: 404, body: { error: 'not_found' } };
+  try {
+    const { status, json } = await call<{ status: string }>('POST', `${encodeURIComponent(token)}/stripe/confirmed`, { sessionId, via });
+    if (status === 200 && json?.data) return { status: 200, body: { status: json.data.status } };
+    return { status: status >= 400 && status < 500 ? status : 502, body: { error: json?.error?.code ?? 'unavailable' } };
+  } catch {
+    return { status: 502, body: { error: 'unavailable' } };
   }
 }

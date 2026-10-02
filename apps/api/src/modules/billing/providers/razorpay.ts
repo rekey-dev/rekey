@@ -17,6 +17,7 @@
  * `test/fakes/billing-providers.ts` via a module mock in `test/setup.ts`.
  */
 
+import { randomUUID } from 'node:crypto';
 import Razorpay from 'razorpay';
 import type { Plan } from '@prisma/client';
 import type {
@@ -24,7 +25,11 @@ import type {
   CancelSubscriptionInput,
   CheckoutSessionInput,
   CheckoutSessionResult,
+  EmbeddedCheckoutInput,
+  EmbeddedCheckoutResult,
+  ProviderPaymentSnapshot,
   ProviderPlanRef,
+  ProviderSubscriptionSnapshot,
   RefundPaymentInput,
   RefundPaymentResult,
 } from './types.js';
@@ -50,11 +55,19 @@ interface RazorpayInternals {
   api?: { rq?: { defaults?: { timeout?: number } } };
 }
 
+/** Razorpay answers an unknown id with a 400 whose description says so. */
+function isUnknownId(e: unknown): boolean {
+  const err = e as { statusCode?: number; error?: { description?: string } };
+  return err.statusCode === 400 && /does not exist/i.test(err.error?.description ?? '');
+}
+
 export class RealRazorpayProvider implements BillingProvider {
   readonly name = 'razorpay';
   private readonly client: Razorpay;
+  private readonly keyId: string;
 
   constructor(creds: RazorpayCredentials) {
+    this.keyId = creds.keyId;
     this.client = new Razorpay({
       key_id: creds.keyId,
       key_secret: creds.keySecret,
@@ -113,6 +126,43 @@ export class RealRazorpayProvider implements BillingProvider {
   }
 
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
+    const sub = await this.createSubscription(input);
+    // The buyer authorizes at `short_url`. Razorpay subscriptions take no
+    // return or cancel URL, so `successUrl` and `cancelUrl` are NOT used here
+    // and the buyer finishes on Razorpay's page rather than back in the app.
+    // The Rekey checkout page (`createEmbeddedCheckout`) keeps them on our page.
+    return { url: sub.shortUrl, sessionId: sub.id };
+  }
+
+  /**
+   * The Rekey-hosted page opens Standard Checkout on what this creates: the
+   * same subscription `createCheckoutSession` makes, or an Order for a
+   * one-time purchase, because checkout.js cannot open a Payment Link.
+   *
+   * Fallbacks: a subscription's `short_url`; an order has none to link to, so
+   * the page posts it to Razorpay Hosted Checkout instead (`fallbackUrl` is
+   * empty and the fallback route answers CHECKOUT_FALLBACK_UNAVAILABLE).
+   */
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    if (input.kind === 'recurring') {
+      const sub = await this.createSubscription(input);
+      return {
+        sessionId: sub.id,
+        client: { provider: 'razorpay', keyId: this.keyId, sdk: 'razorpay-checkout', target: { kind: 'subscription', subscriptionId: sub.id } },
+        fallbackUrl: sub.shortUrl,
+        providerPlanId: sub.planId,
+      };
+    }
+    const order = await this.createOrder(input);
+    return {
+      sessionId: order.id,
+      client: { provider: 'razorpay', keyId: this.keyId, sdk: 'razorpay-checkout', target: { kind: 'order', orderId: order.id } },
+      fallbackUrl: '',
+      providerPlanId: null,
+    };
+  }
+
+  private async createSubscription(input: CheckoutSessionInput): Promise<{ id: string; shortUrl: string; planId: string }> {
     if (input.discount) {
       // A Razorpay subscription bills straight off the plan. The only discount
       // surface is an Offer (`offer_id`), created in the dashboard rather than
@@ -144,12 +194,86 @@ export class RealRazorpayProvider implements BillingProvider {
       }),
       'subscriptions.create',
     );
-    // The buyer authorizes at `short_url`. Razorpay subscriptions take no
-    // return or cancel URL, so `successUrl` and `cancelUrl` are NOT used here
-    // and the buyer finishes on Razorpay's page rather than back in the app.
-    // The hosted checkout spec (#641) plans the fix: Razorpay's modal on our page.
     const subTyped = sub as { id: string; short_url: string };
-    return { url: subTyped.short_url, sessionId: subTyped.id };
+    return { id: subTyped.id, shortUrl: subTyped.short_url, planId: rzpPlanId };
+  }
+
+  /**
+   * An Order for one embedded one-time purchase. Fulfilment lands on
+   * `order.paid`, which the translate only accepts for an order carrying
+   * `rekey_checkout: 'embedded'`, so the order Razorpay makes behind every
+   * Payment Link is never mistaken for one of these.
+   */
+  private async createOrder(input: CheckoutSessionInput): Promise<{ id: string }> {
+    const create = this.client.orders.create as (body: unknown) => Promise<unknown>;
+    const order = (await this.withTimeout(
+      create({
+        amount: input.plan.amount - (input.discount?.amount ?? 0),
+        currency: input.plan.currency,
+        receipt: `rk_${randomUUID().replace(/-/g, '').slice(0, 32)}`,
+        notes: {
+          rekey_checkout: 'embedded',
+          rekey_application_id: input.application.id,
+          rekey_end_user_id: input.endUser.id,
+          rekey_plan_id: input.plan.id,
+          ...(input.discount && {
+            rekey_coupon_code: input.discount.code,
+            rekey_discount_amount: String(input.discount.amount),
+          }),
+        },
+      }),
+      'orders.create',
+    )) as { id: string };
+    return { id: order.id };
+  }
+
+  /** Razorpay's record of one subscription, through this credential set's keys. */
+  async getSubscription(providerSubscriptionId: string): Promise<ProviderSubscriptionSnapshot | null> {
+    let sub: { id?: unknown; status?: unknown; plan_id?: unknown };
+    try {
+      sub = (await this.withTimeout(this.client.subscriptions.fetch(providerSubscriptionId), 'subscriptions.fetch')) as typeof sub;
+    } catch (e) {
+      if (isUnknownId(e)) return null;
+      throw e;
+    }
+    return {
+      id: typeof sub.id === 'string' ? sub.id : '',
+      status: typeof sub.status === 'string' ? sub.status : '',
+      planId: typeof sub.plan_id === 'string' ? sub.plan_id : null,
+      customId: null,
+    };
+  }
+
+  /** Razorpay's record of one payment, through this credential set's keys. */
+  async getPayment(providerPaymentId: string): Promise<ProviderPaymentSnapshot | null> {
+    let payment: { id?: unknown; status?: unknown; order_id?: unknown; amount?: unknown; currency?: unknown };
+    try {
+      payment = (await this.withTimeout(this.client.payments.fetch(providerPaymentId), 'payments.fetch')) as typeof payment;
+    } catch (e) {
+      if (isUnknownId(e)) return null;
+      throw e;
+    }
+    return {
+      id: typeof payment.id === 'string' ? payment.id : '',
+      status: typeof payment.status === 'string' ? payment.status : '',
+      orderId: typeof payment.order_id === 'string' ? payment.order_id : null,
+      amount: typeof payment.amount === 'number' ? payment.amount : -1,
+      currency: typeof payment.currency === 'string' ? payment.currency.toUpperCase() : '',
+    };
+  }
+
+  /**
+   * Capture an authorized payment. Only reached for an account set to manual
+   * capture; Razorpay auto-captures order payments by default.
+   */
+  async capturePayment(providerPaymentId: string, amount: number, currency: string): Promise<void> {
+    try {
+      await this.withTimeout(this.client.payments.capture(providerPaymentId, amount, currency), 'payments.capture');
+    } catch (e) {
+      const text = (e as { error?: { description?: string } })?.error?.description ?? '';
+      if (/already been captured/i.test(text)) return;
+      throw e;
+    }
   }
 
   /**

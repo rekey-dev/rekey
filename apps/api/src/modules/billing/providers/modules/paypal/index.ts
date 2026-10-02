@@ -522,9 +522,10 @@ export const paypalModule: ProviderModule = {
     // Doing this properly needs an intro TRIAL cycle minted onto the plan,
     // which is a plan-registration feature, not a checkout one.
     discounts: { oneTime: true, recurring: false },
-    // Subscriptions only: v5 Buttons with a server-created subscription. One-time
-    // purchases on the page need card fields on v6, which is Phase 1b.
-    embeddedCheckout: { recurring: true, oneTime: false },
+    // v5 Buttons over a server-created subscription or Orders v2 order. The
+    // v5 Buttons carry PayPal's own "Debit or Credit Card" guest button for
+    // orders without Advanced Card Processing approval, which v6 card fields need.
+    embeddedCheckout: { recurring: true, oneTime: true },
   },
   browser: CHECKOUT_BROWSER_ORIGINS.paypal!,
   credentialSchema: [

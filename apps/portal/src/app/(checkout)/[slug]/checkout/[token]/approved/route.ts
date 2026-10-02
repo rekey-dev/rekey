@@ -10,10 +10,9 @@
 import { NextResponse } from 'next/server';
 import { confirmApproval } from '@/lib/checkout-api';
 import { portalBaseUrl } from '@/lib/env';
+import { parsePaypalApproval } from '@rekey.dev/shared-types/checkout';
 
 export const dynamic = 'force-dynamic';
-
-const SUBSCRIPTION_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 function sameOrigin(req: Request): boolean {
   const origin = req.headers.get('origin');
@@ -28,12 +27,9 @@ export async function POST(
   if (!(req.headers.get('content-type') ?? '').startsWith('application/json')) {
     return NextResponse.json({ error: 'content-type' }, { status: 415 });
   }
-  const body = (await req.json().catch(() => null)) as { subscriptionId?: unknown } | null;
-  const subscriptionId = body?.subscriptionId;
-  if (typeof subscriptionId !== 'string' || !SUBSCRIPTION_ID.test(subscriptionId)) {
-    return NextResponse.json({ error: 'body' }, { status: 400 });
-  }
+  const approval = parsePaypalApproval(await req.json().catch(() => null));
+  if (approval === null) return NextResponse.json({ error: 'body' }, { status: 400 });
   const { token } = await params;
-  const result = await confirmApproval(token, subscriptionId);
+  const result = await confirmApproval(token, approval);
   return NextResponse.json(result.body, { status: result.status, headers: { 'Cache-Control': 'no-store' } });
 }

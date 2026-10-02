@@ -39,7 +39,7 @@
  */
 
 import type { FastifyBaseLogger } from 'fastify';
-import type { Subscription } from '@prisma/client';
+import type { Prisma, Subscription } from '@prisma/client';
 import { isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES, BillingConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
@@ -54,6 +54,7 @@ import {
 } from '../checkout-sessions.js';
 import { advanceBillingPeriod } from './period.js';
 import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
+import { applyCheckoutPaymentFailed } from './apply-checkout-payment-failed.js';
 import { kickDeliveries } from '../../webhooks/webhook.service.js';
 import { openUnappliedPaymentCase } from '../unapplied-payments.service.js';
 import { subscriptionGrantsService } from '../grant.service.js';
@@ -72,6 +73,7 @@ import type {
 } from '../providers/module-types.js';
 import type { BillingProviderName } from '../credentials.service.js';
 import { completionModeAllowed, markCheckoutSessionComplete } from '../checkout/sessions.service.js';
+import { orderCaptureRefusal } from '../checkout/order-match.js';
 
 export interface ApplyContext {
   log: FastifyBaseLogger;
@@ -328,6 +330,8 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
       return applyCheckoutCompleted(ev, ctx);
     case 'checkout.approved':
       return applyCheckoutApproved(ev, ctx);
+    case 'checkout.payment_failed':
+      return applyCheckoutPaymentFailed(ev, ctx);
     case 'payment.succeeded':
       return applyPaymentSucceeded(ev, ctx);
     case 'payment.failed':
@@ -1340,6 +1344,18 @@ export async function applyCheckoutApproved(
     );
     return;
   }
+  // Before the capture: a sandbox order must not take money for a session the
+  // credentials have since moved to live from, or the reverse.
+  if (!(await completionModeAllowed(ev.applicationId, ev.checkoutSessionId, ctx.mode))) {
+    ctx.log.error(
+      { applicationId: ev.applicationId, sessionId: ev.checkoutSessionId, verifiedMode: ctx.mode, code: 'CHECKOUT_MODE_MISMATCH' },
+      'order approval verified in a different payment mode than its checkout was started in, not captured',
+    );
+    ctx.note?.(
+      `CHECKOUT_MODE_MISMATCH: not captured, the checkout for ${ev.checkoutSessionId} was started in the other payment mode`,
+    );
+    return;
+  }
   const sub = await prisma.subscription.findFirst({
     where: checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId),
     include: { plan: true },
@@ -1368,6 +1384,14 @@ export async function applyCheckoutApproved(
   });
   const provider = await getProviderForApplication(application, ev.provider as BillingProviderName);
   if (provider.captureOneTime) {
+    const refused = await orderCaptureRefusal({ provider, application, subscription: sub, orderId: ev.checkoutSessionId });
+    if (refused !== null) {
+      ctx.log.error({ orderId: ev.checkoutSessionId, reason: refused }, 'checkout.approved: order does not match its checkout, not captured');
+      ctx.note?.(
+        `CHECKOUT_CAPTURE_REFUSED: order ${ev.checkoutSessionId} not captured (${refused}); PayPal's record does not match what the checkout charged`,
+      );
+      return;
+    }
     const { captured } = await provider.captureOneTime(ev.checkoutSessionId);
     if (!captured) {
       ctx.log.warn({ orderId: ev.checkoutSessionId }, 'checkout.approved: capture did not complete — leaving PENDING');
@@ -1375,14 +1399,16 @@ export async function applyCheckoutApproved(
     }
   }
 
-  // Status flip + its outbox row in one transaction. `sub` is the pre-update
-  // row, so the transition test reads the status the row had before this event.
+  // Status flip + its outbox row in one transaction. The write is conditional
+  // on the status read above, because concurrent deliveries of one approval
+  // all read PENDING: only the delivery whose write still sees that status
+  // announces `subscription.activated`.
   const deliveryIds = await prisma.$transaction(async (tx) => {
-    await tx.subscription.updateMany({
-      where: { id: sub.id },
+    const flipped = await tx.subscription.updateMany({
+      where: { id: sub.id, status: sub.status },
       data: { status: 'ACTIVE', providerSubId: ev.checkoutSessionId },
     });
-    return sub.status !== 'ACTIVE'
+    return flipped.count > 0 && sub.status !== 'ACTIVE'
       ? enqueueSubscriptionEvent(tx, 'subscription.activated', sub.id)
       : [];
   });
@@ -1397,6 +1423,7 @@ export async function applyCheckoutApproved(
   // simply never recorded, a single-use code discounted every subsequent
   // purchase by the same buyer, forever.
   await redeemSessionCoupon({ subscription: sub, checkoutSessionId: ev.checkoutSessionId }, ctx);
+  await markCheckoutSessionComplete(ev.applicationId, ev.checkoutSessionId);
   // Delivery kickoff, at the point the emit used to sit, after provisioning,
   // so a consumer sees the same ordering it always did.
   kickDeliveries(deliveryIds);
@@ -1462,6 +1489,96 @@ async function findOwnedSubscription(
 }
 
 /**
+ * Statuses a successful payment moves to ACTIVE: a checkout completing
+ * (PENDING) and dunning recovery (PAST_DUE). Never TRIALING, whose first
+ * invoice is the trial's own and whose conversion the status mirror reports,
+ * and never a terminal status (see transitionAllowed).
+ */
+const ACTIVATED_BY_PAYMENT: ReadonlySet<Subscription['status']> = new Set(['PENDING', 'PAST_DUE']);
+
+/**
+ * The subscription side of a payment becoming SUCCEEDED, inside its
+ * transaction: status, period anchor and the outbox rows. Returns delivery ids.
+ */
+async function mirrorSucceededPayment(
+  tx: Prisma.TransactionClient,
+  paymentId: string,
+  localSub: Subscription | null,
+  ev: PaymentSucceededEvent,
+): Promise<string[]> {
+  // Flip the subscription ACTIVE (and mirror a payload-carried period
+  // anchor, e.g. Razorpay current_end) in the SAME transaction as the
+  // payment, a committed payment must never be left with a stale
+  // status or stranded from its period change.
+  if (localSub) {
+    // The payment is recorded either way, money that moved is a fact,
+    // but a charge arriving against a CANCELED/EXPIRED row does not bring
+    // it back to life. See transitionAllowed.
+    const mayActivate = ACTIVATED_BY_PAYMENT.has(localSub.status);
+    const subData = {
+      ...(mayActivate && { status: 'ACTIVE' as const }),
+      ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+      // A PENDING row going live on its payment is a checkout completing,
+      // and a resubscribe reuses the cancelled row, so the old dates have
+      // to go (see `clearedOnReactivation`). This path matters because the
+      // two events are not ordered: when a provider's sale lands before its
+      // activation, the activation then finds the row already ACTIVE and
+      // clears nothing, so without this the stale `cancelAt` survives.
+      //
+      // Deliberately NOT extended to PAST_DUE → ACTIVE. That is dunning
+      // recovery, where a cancellation the buyer scheduled is still theirs;
+      // clearing it there would quietly restart a subscription they had
+      // stopped, which is the failure that costs them money.
+      ...(mayActivate && localSub.status === 'PENDING' ? clearedOnReactivation : {}),
+    };
+    if (Object.keys(subData).length > 0) {
+      await tx.subscription.update({ where: { id: localSub.id }, data: subData });
+    }
+  }
+  // Outbox rows, same transaction as the money, only when a payment newly
+  // became SUCCEEDED (a replay throws P2002 and rolls the whole thing
+  // back, a promotion only gets here when it won the FAILED row).
+  const ids = await enqueuePaymentEvent(tx, 'payment.succeeded', paymentId);
+  if (localSub && ACTIVATED_BY_PAYMENT.has(localSub.status)) {
+    // Recovery/activation via payment, a real status transition. Refused
+    // above for a terminal row, so nothing is announced for one either.
+    ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', localSub.id)));
+  }
+  return ids;
+}
+
+/**
+ * Turn the FAILED row of a payment the provider has now collected into the
+ * SUCCEEDED one, with the same subscription mirror and announcements a new
+ * payment gets. Compare-and-set on the FAILED status, so a replay or a
+ * concurrent promoter changes nothing and returns null.
+ */
+async function promoteFailedPayment(
+  ev: PaymentSucceededEvent,
+  localSub: Subscription | null,
+  amount: number,
+  currency: string,
+): Promise<{ payment: { id: string }; deliveryIds: string[] } | null> {
+  return prisma.$transaction(async (tx) => {
+    const where = { applicationId: ev.applicationId, providerPaymentId: ev.providerPaymentId };
+    const won = await tx.payment.updateMany({
+      where: { ...where, status: 'FAILED' },
+      data: {
+        status: 'SUCCEEDED',
+        amount,
+        currency,
+        ...(localSub && { subscriptionId: localSub.id, endUserId: localSub.endUserId }),
+        ...(ev.providerSubscriptionId && { providerSubscriptionId: ev.providerSubscriptionId }),
+        ...(ev.description != null && { description: ev.description }),
+      },
+    });
+    if (won.count !== 1) return null;
+    const payment = await tx.payment.findFirstOrThrow({ where, select: { id: true } });
+    return { payment, deliveryIds: await mirrorSucceededPayment(tx, payment.id, localSub, ev) };
+  });
+}
+
+/**
  * Successful recurring payment: record the SUCCEEDED Payment row and the
  * subscription's status/period in one transaction, then, strictly after the
  * commit, redeem the checkout's coupon if it has not been already, recover
@@ -1480,6 +1597,15 @@ export async function applyPaymentSucceeded(
   // Find local subscription if present so the Payment links to it.
   const where = localSubscriptionWhere(ev.applicationId, ev.providerSubscriptionId, ev.checkoutSessionId);
   const localSub = where ? await findOwnedSubscription(where, ctx) : null;
+  if (!localSub && ev.deferUntilLinked) {
+    // Thrown before anything is written, so the receipt stays unprocessed and
+    // the provider's redelivery, after the checkout links the subscription,
+    // records it against the right row instead of opening an unapplied case.
+    throw new Error(
+      `payment ${ev.providerPaymentId} pays the first period of provider subscription ` +
+        `${ev.providerSubscriptionId ?? '(none)'}, whose checkout has not been applied yet; retry later.`,
+    );
+  }
   // `requireLocalSubscription` is deliberately NOT honoured on this path any
   // more, and Razorpay is the only module that sets it.
   //
@@ -1535,61 +1661,28 @@ export async function applyPaymentSucceeded(
         },
         select: { id: true },
       });
-      // Flip the subscription ACTIVE (and mirror a payload-carried period
-      // anchor, e.g. Razorpay current_end) in the SAME transaction as the
-      // payment, a committed payment must never be left with a stale
-      // status or stranded from its period change.
-      if (localSub) {
-        // The payment is recorded either way, money that moved is a fact,
-        // but a charge arriving against a CANCELED/EXPIRED row does not bring
-        // it back to life. See transitionAllowed.
-        const mayActivate =
-          localSub.status !== 'ACTIVE' && transitionAllowed(localSub.status, 'ACTIVE');
-        const subData = {
-          ...(mayActivate && { status: 'ACTIVE' as const }),
-          ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
-          // A PENDING row going live on its payment is a checkout completing,
-          // and a resubscribe reuses the cancelled row, so the old dates have
-          // to go (see `clearedOnReactivation`). This path matters because the
-          // two events are not ordered: when a provider's sale lands before its
-          // activation, the activation then finds the row already ACTIVE and
-          // clears nothing, so without this the stale `cancelAt` survives.
-          //
-          // Deliberately NOT extended to PAST_DUE → ACTIVE. That is dunning
-          // recovery, where a cancellation the buyer scheduled is still theirs;
-          // clearing it there would quietly restart a subscription they had
-          // stopped, which is the failure that costs them money.
-          ...(mayActivate && localSub.status === 'PENDING' ? clearedOnReactivation : {}),
-        };
-        if (Object.keys(subData).length > 0) {
-          await tx.subscription.update({ where: { id: localSub.id }, data: subData });
-        }
-      }
-      // Outbox rows, same transaction as the money, only when a NEW payment
-      // row was committed, which by construction is every path that reaches
-      // here (a replay throws P2002 above and rolls the whole thing back).
-      const ids = await enqueuePaymentEvent(tx, 'payment.succeeded', payment.id);
-      if (localSub && localSub.status !== 'ACTIVE' && transitionAllowed(localSub.status, 'ACTIVE')) {
-        // Recovery/activation via payment, a real status transition. Refused
-        // above for a terminal row, so nothing is announced for one either.
-        ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', localSub.id)));
-      }
-      return { payment, deliveryIds: ids };
+      return { payment, deliveryIds: await mirrorSucceededPayment(tx, payment.id, localSub, ev) };
     });
     createdPayment = committed.payment;
     deliveryIds = committed.deliveryIds;
   } catch (e) {
     // P2002 = this provider payment id already has a Payment row for this
-    // application (webhook replay), the original transaction committed
-    // payment + status + outbox rows together, so skipping here is safe.
-    // Anything else rolls all back and rethrows.
-    if ((e as { code?: string }).code === 'P2002') {
+    // application. Either a webhook replay (the original transaction committed
+    // payment + status + outbox rows together, so skipping is safe), or a
+    // provider retry that collected an invoice whose earlier attempt failed:
+    // Stripe retries the SAME invoice, so its FAILED row becomes this
+    // SUCCEEDED one. Anything else rolls all back and rethrows.
+    if ((e as { code?: string }).code !== 'P2002') throw e;
+    const recovered = await promoteFailedPayment(ev, localSub, amount, currency);
+    if (recovered) {
+      createdPayment = recovered.payment;
+      deliveryIds = recovered.deliveryIds;
+      ctx.log.info({ providerPaymentId: ev.providerPaymentId }, 'payment.succeeded: failed payment now paid');
+    } else {
       ctx.log.info(
         { providerPaymentId: ev.providerPaymentId },
         'payment.succeeded: payment already recorded',
       );
-    } else {
-      throw e;
     }
   }
 
@@ -1707,6 +1800,9 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
     field: 'amount_due',
   });
   if (failedAmount === null) return;
+  // A failure against a CANCELED or EXPIRED row is recorded, but it does not
+  // bring the row back into an entitling status or open dunning for it.
+  const mayGoPastDue = localSub !== null && transitionAllowed(localSub.status, 'PAST_DUE');
 
   // Record the FAILED payment, flip the subscription to PAST_DUE, and write
   // the outbox rows atomically: a committed payment must never be left behind
@@ -1714,8 +1810,7 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   // event that announces it. Idempotent, (application_id,
   // provider_payment_id) is unique, so a webhook replay hits P2002 and the
   // whole transaction rolls back cleanly.
-  let createdPayment: { id: string } | null = null;
-  let deliveryIds: string[] = [];
+  let deliveryIds: string[];
   try {
     const committed = await prisma.$transaction(async (tx) => {
       const payment = await tx.payment.create({
@@ -1728,44 +1823,85 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
           status: 'FAILED',
           providerPaymentId: ev.providerPaymentId,
           description: ev.description ?? null,
+          metadata: { failureEventIds: [ev.providerEventId] },
         },
         select: { id: true },
       });
-      if (localSub) {
+      if (localSub && mayGoPastDue) {
         await tx.subscription.update({
           where: { id: localSub.id },
           data: { status: 'PAST_DUE' },
         });
       }
       const ids = await enqueuePaymentEvent(tx, 'payment.failed', payment.id);
-      if (localSub && localSub.status !== 'PAST_DUE') {
+      if (localSub && mayGoPastDue && localSub.status !== 'PAST_DUE') {
         ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.past_due', localSub.id)));
       }
       return { payment, deliveryIds: ids };
     });
-    createdPayment = committed.payment;
     deliveryIds = committed.deliveryIds;
   } catch (e) {
-    // P2002 = this provider payment id already recorded a FAILED payment
-    // (replay), the original transaction committed payment + status
-    // together, so skipping is safe. Anything else rolls both back and
-    // rethrows for the provider to retry.
-    if ((e as { code?: string }).code === 'P2002') {
-      ctx.log.info({ providerPaymentId: ev.providerPaymentId }, 'payment.failed: already recorded');
+    // P2002 = this provider payment id already has a row. Anything else rolls
+    // both back and rethrows for the provider to retry.
+    if ((e as { code?: string }).code !== 'P2002') throw e;
+    if (await recordRepeatFailure(ev)) {
+      // Stripe retries the SAME invoice, so a second failed attempt lands
+      // here under a new event id. It is a real failure and counts on the
+      // open dunning case; nothing new is recorded or announced.
+      if (localSub && mayGoPastDue) {
+        await dunningService.recordPaymentFailure({ subscriptionId: localSub.id, log: ctx.log });
+      }
+      ctx.log.info({ providerPaymentId: ev.providerPaymentId }, 'payment.failed: repeat attempt counted');
     } else {
-      throw e;
+      ctx.log.info({ providerPaymentId: ev.providerPaymentId }, 'payment.failed: already recorded');
     }
+    return;
   }
 
   // Side effects fire only after the transaction commits, and only when a NEW
   // failed payment was recorded (replays deliver nothing / don't re-bump
   // dunning).
   kickDeliveries(deliveryIds);
-  if (createdPayment && localSub) {
+  if (localSub && mayGoPastDue) {
     // Open (or bump) the dunning case. The provider keeps retrying the card
     // itself, the case tracks state + notifies; it never re-charges.
     await dunningService.recordPaymentFailure({ subscriptionId: localSub.id, log: ctx.log });
   }
+}
+
+/** How many failure event ids a FAILED payment remembers, for replay safety. */
+const REMEMBERED_FAILURE_EVENTS = 50;
+
+/** Re-reads before a contended repeat-failure count gives up and asks for a retry. */
+const REPEAT_FAILURE_CAS_ATTEMPTS = 5;
+
+/**
+ * Note another failed attempt on a payment already recorded FAILED. True only
+ * for an event id the row has not seen, so a replay of the same event is not
+ * counted twice; false for a replay, or for a payment that has since
+ * succeeded (a late failure must not undo the collection). Compare-and-set on
+ * `updatedAt`, re-read on contention, so two concurrent deliveries of one
+ * event count once and two different failures both count.
+ */
+async function recordRepeatFailure(ev: PaymentFailedEvent): Promise<boolean> {
+  for (let attempt = 0; attempt < REPEAT_FAILURE_CAS_ATTEMPTS; attempt += 1) {
+    const row = await prisma.payment.findFirst({
+      where: { applicationId: ev.applicationId, providerPaymentId: ev.providerPaymentId },
+      select: { id: true, status: true, metadata: true, updatedAt: true },
+    });
+    if (!row || row.status !== 'FAILED') return false;
+    const meta = (row.metadata ?? {}) as Record<string, unknown>;
+    const seen = Array.isArray(meta.failureEventIds) ? meta.failureEventIds.filter((x) => typeof x === 'string') : [];
+    if (seen.includes(ev.providerEventId)) return false;
+    const updated = await prisma.payment.updateMany({
+      where: { id: row.id, status: 'FAILED', updatedAt: row.updatedAt },
+      data: {
+        metadata: { ...meta, failureEventIds: [...seen, ev.providerEventId].slice(-REMEMBERED_FAILURE_EVENTS) },
+      },
+    });
+    if (updated.count === 1) return true;
+  }
+  throw new Error(`payment ${ev.providerPaymentId}: could not record failure ${ev.providerEventId} under contention; retry.`);
 }
 
 /** Payment statuses a refund can be recorded against. */

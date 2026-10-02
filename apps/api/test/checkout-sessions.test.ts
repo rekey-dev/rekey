@@ -473,17 +473,12 @@ describe('hosted checkout sessions', () => {
       expect(data.warnings[0]!.check).toBe('browser_credential');
     });
 
-    it('falls back when the provider cannot take this flow on the page', async () => {
+    it('falls back when the provider has no browser credential for the page', async () => {
       await enableEmbedded();
-      await billingCredentialsService.upsertRaw(
-        applicationId,
-        'razorpay',
-        { keyId: 'rzp_test_ci', keySecret: 'secret', webhookSecret: 'whsec' },
-        { mode: 'test' },
-      );
-      const data = (await checkout({ provider: 'razorpay' })).json().data as { mode: string; warnings: Array<{ check?: string }> };
+      await billingCredentialsService.upsertRaw(applicationId, 'stripe', { apiKey: 'sk_test_ci', webhookSecret: 'whsec_ci' }, { mode: 'test' });
+      const data = (await checkout({ provider: 'stripe' })).json().data as { mode: string; warnings: Array<{ check?: string }> };
       expect(data.mode).toBe('redirect');
-      expect(data.warnings[0]!.check).toBe('provider');
+      expect(data.warnings[0]!.check).toBe('browser_credential');
     });
 
     it('falls back when a return URL is on an unregistered origin', async () => {

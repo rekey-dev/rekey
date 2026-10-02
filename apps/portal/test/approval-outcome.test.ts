@@ -5,7 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { afterApproval, afterPolling, UNCONFIRMED_MESSAGE } from '@/lib/approval-outcome';
+import { afterApproval, afterPolling, unconfirmedMessage } from '@/lib/approval-outcome';
+
+const UNCONFIRMED_MESSAGE = unconfirmedMessage('PayPal');
 
 describe('afterPolling', () => {
   it('keeps a buyer whose approval landed after the link expired on the page, never reloading into "expired"', () => {

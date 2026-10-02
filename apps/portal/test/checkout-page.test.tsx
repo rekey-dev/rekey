@@ -114,7 +114,7 @@ describe('checkout route', () => {
       }),
     ).rejects.toThrow(`REDIRECT /acme/checkout/${TOKEN}`);
     expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm).toHaveBeenCalledWith(TOKEN, 'I-RETURNED1');
+    expect(confirm).toHaveBeenCalledWith(TOKEN, { subscriptionId: 'I-RETURNED1' });
 
     confirm.mockClear();
     await expect(
@@ -128,6 +128,27 @@ describe('checkout route', () => {
     redirected.mockClear();
     await CheckoutPage({ params: Promise.resolve({ slug: 'acme', token: TOKEN }), searchParams: Promise.resolve({}) });
     expect(redirected).not.toHaveBeenCalled();
+  });
+
+  it('checks an approved one-time order return once, and strips a cancelled one without asking', async () => {
+    lookup.mockResolvedValue({ kind: 'view', view: openView() });
+    confirm.mockClear();
+    await expect(
+      CheckoutPage({
+        params: Promise.resolve({ slug: 'acme', token: TOKEN }),
+        searchParams: Promise.resolve({ token: '5O190127TN364715T', PayerID: 'PAYER1' }),
+      }),
+    ).rejects.toThrow(`REDIRECT /acme/checkout/${TOKEN}`);
+    expect(confirm).toHaveBeenCalledWith(TOKEN, { orderId: '5O190127TN364715T' });
+
+    confirm.mockClear();
+    await expect(
+      CheckoutPage({
+        params: Promise.resolve({ slug: 'acme', token: TOKEN }),
+        searchParams: Promise.resolve({ token: '5O190127TN364715T' }),
+      }),
+    ).rejects.toThrow('REDIRECT');
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it('treats a mode mismatch as expired', async () => {

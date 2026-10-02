@@ -124,6 +124,25 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
 }
 
 /**
+ * Count a failure on the subscription's OPEN case, if it has one. Returns
+ * whether a case was open.
+ */
+async function bumpOpenCase(subscriptionId: string, countFailure: boolean, now: Date): Promise<boolean> {
+  const existing = await prisma.dunningCase.findFirst({
+    where: { subscriptionId, status: 'OPEN' },
+    select: { id: true },
+  });
+  if (!existing) return false;
+  if (countFailure) {
+    await prisma.dunningCase.update({
+      where: { id: existing.id },
+      data: { failedAttempts: { increment: 1 }, lastFailureAt: now },
+    });
+  }
+  return true;
+}
+
+/**
  * Open a case for a subscription that just went PAST_DUE, or, when one is
  * already OPEN (provider retry failed again while in dunning), bump its
  * failure counters instead. Idempotent per OPEN case.
@@ -140,18 +159,7 @@ async function openForPastDue(args: {
   log?: FastifyBaseLogger;
 }): Promise<DunningCase | null> {
   const now = new Date();
-  const existing = await prisma.dunningCase.findFirst({
-    where: { subscriptionId: args.subscriptionId, status: 'OPEN' },
-  });
-  if (existing) {
-    if (args.countFailure) {
-      await prisma.dunningCase.update({
-        where: { id: existing.id },
-        data: { failedAttempts: { increment: 1 }, lastFailureAt: now },
-      });
-    }
-    return null;
-  }
+  if (await bumpOpenCase(args.subscriptionId, args.countFailure, now)) return null;
 
   const sub = await prisma.subscription.findUnique({ where: { id: args.subscriptionId } });
   if (!sub) return null;
@@ -175,24 +183,35 @@ async function openForPastDue(args: {
   }
 
   // Case row + its outbox row in one transaction, see webhooks/apply.ts.
-  const { created, deliveryIds } = await prisma.$transaction(async (tx) => {
-    const row = await tx.dunningCase.create({
-      data: {
-        applicationId: sub.applicationId,
-        subscriptionId: sub.id,
-        endUserId: sub.endUserId,
-        organizationId: sub.beneficiaryOrgId,
-        status: 'OPEN',
-        failedAttempts: args.countFailure ? 1 : 0,
-        lastFailureAt: args.countFailure ? now : null,
-        openedAt: now,
-        // Reminder #1 goes out right now; the scheduler owns day 3 onward.
-        remindersSent: 1,
-        nextActionAt: nextActionAfter(now, 1),
-      },
+  // A concurrent opener (invoice.payment_failed and the past_due status mirror
+  // arrive together) loses on the one-open-case index and counts as "already
+  // open" instead of opening a second case and a second day-0 reminder.
+  let opened: { created: DunningCase; deliveryIds: string[] };
+  try {
+    opened = await prisma.$transaction(async (tx) => {
+      const row = await tx.dunningCase.create({
+        data: {
+          applicationId: sub.applicationId,
+          subscriptionId: sub.id,
+          endUserId: sub.endUserId,
+          organizationId: sub.beneficiaryOrgId,
+          status: 'OPEN',
+          failedAttempts: args.countFailure ? 1 : 0,
+          lastFailureAt: args.countFailure ? now : null,
+          openedAt: now,
+          // Reminder #1 goes out right now; the scheduler owns day 3 onward.
+          remindersSent: 1,
+          nextActionAt: nextActionAfter(now, 1),
+        },
+      });
+      return { created: row, deliveryIds: await enqueueDunningEvent(tx, 'dunning.case_opened', row.id) };
     });
-    return { created: row, deliveryIds: await enqueueDunningEvent(tx, 'dunning.case_opened', row.id) };
-  });
+  } catch (e) {
+    if ((e as { code?: string }).code !== 'P2002') throw e;
+    await bumpOpenCase(args.subscriptionId, args.countFailure, now);
+    return null;
+  }
+  const { created, deliveryIds } = opened;
 
   kickDeliveries(deliveryIds);
   // Day-0 reminder, off the inbound-webhook critical path.
@@ -207,7 +226,7 @@ async function openForPastDue(args: {
 }
 
 /**
- * Close the subscription's OPEN case, if any. RECOVERED announces
+ * Close the subscription's OPEN cases, if any. RECOVERED announces
  * `dunning.case_recovered`; CANCELED (subscription died while in dunning,
  * user cancel, provider cancel) closes silently.
  */
@@ -215,24 +234,28 @@ async function closeCase(
   subscriptionId: string,
   outcome: 'RECOVERED' | 'CANCELED',
 ): Promise<void> {
-  const open = await prisma.dunningCase.findFirst({
+  // Every OPEN case, not just the first: a subscription with two open cases
+  // from before the one-open-case index must not keep one running after it
+  // recovered.
+  const open = await prisma.dunningCase.findMany({
     where: { subscriptionId, status: 'OPEN' },
     select: { id: true },
   });
-  if (!open) return;
-  // Guarded update, a concurrent closer/scheduler loses the race cleanly,
+  // Guarded per case, a concurrent closer/scheduler loses the race cleanly,
   // with the outbox row in the same transaction, so the loser of that race
   // announces nothing and the winner cannot announce nothing.
-  const deliveryIds = await prisma.$transaction(async (tx) => {
-    const updated = await tx.dunningCase.updateMany({
-      where: { id: open.id, status: 'OPEN' },
-      data: { status: outcome, closedAt: new Date(), nextActionAt: null },
+  for (const { id } of open) {
+    const deliveryIds = await prisma.$transaction(async (tx) => {
+      const updated = await tx.dunningCase.updateMany({
+        where: { id, status: 'OPEN' },
+        data: { status: outcome, closedAt: new Date(), nextActionAt: null },
+      });
+      return updated.count === 1 && outcome === 'RECOVERED'
+        ? enqueueDunningEvent(tx, 'dunning.case_recovered', id)
+        : [];
     });
-    return updated.count === 1 && outcome === 'RECOVERED'
-      ? enqueueDunningEvent(tx, 'dunning.case_recovered', open.id)
-      : [];
-  });
-  kickDeliveries(deliveryIds);
+    kickDeliveries(deliveryIds);
+  }
 }
 
 /**

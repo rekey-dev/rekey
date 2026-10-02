@@ -69,6 +69,22 @@ describe('checkout page', () => {
     expect((html.match(/<h1[ >]/g) ?? []).length).toBe(1);
   });
 
+  it('shows a one-time order without a renewal or cancel sentence, in the same layout', () => {
+    const base = order();
+    const oneTime: CheckoutPageOrder = {
+      ...base,
+      plan: { ...base.plan, interval: null, kind: 'one_time' },
+      client: { provider: 'paypal', clientId: 'client-id', orderId: '5O190127TN364715T', sdk: 'v5-order', currency: 'USD' },
+    };
+    const html = render('test', oneTime);
+    expect(html).toContain('Buy Cloud Standard');
+    expect(html).not.toContain('Subscribe to');
+    expect(html).not.toMatch(/Renews automatically|cancel any time|per month/);
+    expect(html).toContain('Total due today');
+    expect(html).toContain('Payments are processed securely by PayPal.');
+    expect(html).toContain('Test mode: no real money moves. Pay with a PayPal sandbox account.');
+  });
+
   it('puts the nonce on every inline script and style it renders', () => {
     const html = render('test');
     const tags = html.match(/<(script|style)\b[^>]*>/g) ?? [];

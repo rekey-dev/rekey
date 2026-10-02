@@ -39,6 +39,7 @@
  */
 
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../../src/modules/billing/providers/stripe-api-version.js';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import { prisma } from '../../src/lib/prisma.js';
@@ -255,7 +256,7 @@ export async function deliverStripeEvent(
   options?: { tamper?: boolean; secret?: string },
 ): Promise<{ statusCode: number; body: Record<string, unknown> }> {
   const signer = new Stripe('sk_test_signing_only_never_dialled', {
-    apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+    apiVersion: STRIPE_API_VERSION,
   });
   const payload = JSON.stringify(event);
   const signature = signer.webhooks.generateTestHeaderString({

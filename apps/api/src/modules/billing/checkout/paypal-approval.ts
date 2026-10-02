@@ -1,118 +1,115 @@
 /**
  * The checkout page's "PayPal said yes": verify it with PayPal and move the
- * session from OPEN to CONFIRMING. It activates nothing. Only PayPal's signed
- * `BILLING.SUBSCRIPTION.ACTIVATED` webhook does, through the unchanged applier.
+ * session from OPEN to CONFIRMING. It activates and captures nothing. Only
+ * PayPal's signed webhooks do, through the unchanged appliers:
+ * `BILLING.SUBSCRIPTION.ACTIVATED` for a subscription, and
+ * `CHECKOUT.ORDER.APPROVED` (which captures, then fulfils) for a one-time order.
  *
  * What a caller holding the token could try, and what stops it:
- *   - a subscription id from another checkout, Application or mode: the id
- *     must be the one this session created, and PayPal's own record of it must
- *     name this session's plan and `${applicationId}:${endUserId}`;
- *   - an id the buyer never approved: PayPal must report APPROVED or ACTIVE;
+ *   - an id from another checkout, Application or mode: the id must be the
+ *     one this session created, and PayPal's own record of it must carry
+ *     `${applicationId}:${endUserId}` and this session's plan (subscription)
+ *     or exact amount and currency (order);
+ *   - a subscription id on a one-time session, or the reverse: refused;
+ *   - an id the buyer never approved: PayPal must report it approved;
  *   - a sandbox id after the credentials moved to live: the session's mode is
- *     checked first, and PayPal is read through the current credential set;
- *   - hammering: after five refused confirmations the session refuses more;
- *   - racing: the move is a compare-and-set, so concurrent confirmations make
- *     one transition and the rest see it.
+ *     checked first, and PayPal is read through the current credential set.
+ *
+ * The refusal limit, security events and the compare-and-set to CONFIRMING
+ * are shared with every provider (confirm-approval.ts).
  */
 
-import type { CheckoutSession } from '@prisma/client';
-import { prisma } from '../../../lib/prisma.js';
-import { RekeyError } from '../../../lib/error.js';
-import { recordSecurityEvent } from '../../../lib/security-events.js';
+import type { PaypalApprovalBody } from '@rekey.dev/shared-types/checkout';
 import { getProviderForApplication } from '../providers/index.js';
+import type { BillingProvider } from '../providers/types.js';
+import { confirmApproval, type ConfirmationSession, type Refusal } from './confirm-approval.js';
 import type { EmbeddedSessionMetadata } from './sessions.service.js';
-import { settleSessionForToken } from './sessions.service.js';
+import { orderMismatch } from './order-match.js';
 
-export const MAX_REFUSED_CONFIRMATIONS = 5;
-const APPROVED_STATUSES = new Set(['APPROVED', 'ACTIVE']);
+const SUBSCRIPTION_APPROVED = new Set(['APPROVED', 'ACTIVE']);
+const ORDER_APPROVED = new Set(['APPROVED', 'COMPLETED']);
+
+/** What the page reports PayPal approved: a subscription, or a one-time order. */
+export type PaypalApproval = PaypalApprovalBody;
 
 type Outcome = { status: 'confirming' | 'complete' };
 
-function refusedCount(session: CheckoutSession): number {
-  const value = (session.metadata as Record<string, unknown>).refusedConfirmations;
-  return typeof value === 'number' ? value : 0;
+function approvedId(approval: PaypalApproval): { id: string; idKey: 'providerSubscriptionId' | 'providerOrderId' } {
+  return 'orderId' in approval
+    ? { id: approval.orderId, idKey: 'providerOrderId' }
+    : { id: approval.subscriptionId, idKey: 'providerSubscriptionId' };
 }
 
-async function refuse(
-  session: CheckoutSession & { application: { tenantId: string } },
-  reason: string,
-  providerSubscriptionId: string,
-  countsTowardLimit = true,
-): Promise<RekeyError> {
-  // Increment inside the JSON column with one statement, so concurrent
-  // refusals cannot lose a count.
-  if (countsTowardLimit) {
-    await prisma.$executeRaw`
-      UPDATE checkout_sessions
-      SET metadata = jsonb_set(metadata, '{refusedConfirmations}', to_jsonb(COALESCE((metadata->>'refusedConfirmations')::int, 0) + 1)),
-          updated_at = NOW()
-      WHERE id = ${session.id}`;
-  }
-  void recordSecurityEvent({
-    type: 'app.checkout_confirmation_refused',
-    actorType: 'system',
-    tenantId: session.application.tenantId,
-    applicationId: session.applicationId,
-    metadata: { checkoutSessionId: session.id, reason, providerSubscriptionId: providerSubscriptionId.slice(0, 64) },
-  });
-  return new RekeyError({
-    statusCode: 409,
-    code: 'CHECKOUT_CONFIRMATION_REFUSED',
-    message: 'PayPal does not confirm this approval for this checkout.',
-    fix: 'Approve the payment again with the PayPal button on this page, or continue on PayPal.',
-  });
-}
-
-/**
- * @example
- * await confirmPaypalApproval('chk_live_…', 'I-BW452GLLEP1G'); // { status: 'confirming' }
- */
-export async function confirmPaypalApproval(token: string, subscriptionId: string): Promise<Outcome> {
-  const session = await settleSessionForToken(token);
-  if (session.status === 'COMPLETE') return { status: 'complete' };
-  if (session.status === 'CONFIRMING') return { status: 'confirming' };
-  if (session.status !== 'OPEN' || session.provider !== 'paypal') {
-    throw new RekeyError({
-      statusCode: 409,
-      code: 'CHECKOUT_SESSION_EXPIRED',
-      message: 'This checkout can no longer be paid here.',
-      fix: 'Return to the app you were buying in and start the checkout again.',
-    });
-  }
-  if (refusedCount(session) >= MAX_REFUSED_CONFIRMATIONS) {
-    throw new RekeyError({
-      statusCode: 409,
-      code: 'CHECKOUT_CONFIRMATION_LIMIT',
-      message: 'This checkout has refused too many confirmations.',
-      fix: 'Return to the app you were buying in and start the checkout again.',
-    });
-  }
-  if (subscriptionId !== session.providerSessionId) {
-    throw await refuse(session, 'subscription_id_mismatch', subscriptionId);
-  }
-
-  const provider = await getProviderForApplication(session.application, 'paypal');
-  if (!provider.getSubscription) throw await refuse(session, 'provider_cannot_verify', subscriptionId);
-  const snapshot = await provider.getSubscription(subscriptionId);
-  const meta = session.metadata as unknown as EmbeddedSessionMetadata;
-  const expectedCustomId = `${session.applicationId}:${session.endUserId}`;
-  if (snapshot === null || snapshot.id !== subscriptionId) {
-    throw await refuse(session, 'unknown_at_paypal', subscriptionId);
-  }
-  if (snapshot.customId !== expectedCustomId) throw await refuse(session, 'custom_id_mismatch', subscriptionId);
-  if (snapshot.planId !== meta.providerPlanId) throw await refuse(session, 'plan_mismatch', subscriptionId);
+async function verifySubscription(
+  provider: BillingProvider,
+  id: string,
+  expectedCustomId: string,
+  meta: EmbeddedSessionMetadata,
+): Promise<Refusal | null> {
+  if (!provider.getSubscription) return { reason: 'provider_cannot_verify', counted: true };
+  const snapshot = await provider.getSubscription(id);
+  if (snapshot === null || snapshot.id !== id) return { reason: 'unknown_at_paypal', counted: true };
+  if (snapshot.customId !== expectedCustomId) return { reason: 'custom_id_mismatch', counted: true };
+  if (meta.providerPlanId === null || snapshot.planId !== meta.providerPlanId) return { reason: 'plan_mismatch', counted: true };
   // Not counted toward the limit: this is the session's own subscription, just
   // not approved (yet), which is what a cancelled PayPal window or a refresh
   // of the return URL looks like. Counting it would let those lock out the
   // genuine approval that follows.
-  if (!APPROVED_STATUSES.has(snapshot.status)) {
-    throw await refuse(session, `status_${snapshot.status}`, subscriptionId, false);
-  }
+  if (!SUBSCRIPTION_APPROVED.has(snapshot.status)) return { reason: `status_${snapshot.status}`, counted: false };
+  return null;
+}
 
-  await prisma.checkoutSession.updateMany({
-    where: { id: session.id, status: 'OPEN' },
-    data: { status: 'CONFIRMING' },
+async function verifyOrder(
+  provider: BillingProvider,
+  id: string,
+  expectedCustomId: string,
+  meta: EmbeddedSessionMetadata,
+): Promise<Refusal | null> {
+  const expected = meta.expectedCharge;
+  if (!provider.getOrder || expected === undefined) return { reason: 'provider_cannot_verify', counted: true };
+  const snapshot = await provider.getOrder(id);
+  const mismatch = orderMismatch(snapshot, id, expectedCustomId, expected);
+  if (mismatch !== null || snapshot === null) return { reason: mismatch ?? 'unknown_at_paypal', counted: true };
+  // Not counted, for the same reason as a subscription's: the session's own
+  // order, not approved yet. COMPLETED means the webhook already captured it.
+  if (!ORDER_APPROVED.has(snapshot.status)) return { reason: `status_${snapshot.status}`, counted: false };
+  return null;
+}
+
+async function verify(session: ConfirmationSession, approval: PaypalApproval): Promise<Refusal | null> {
+  const oneTime = session.kind === 'ONE_TIME';
+  if (oneTime !== ('orderId' in approval)) return { reason: 'approval_kind_mismatch', counted: true };
+  const { id } = approvedId(approval);
+  if (id !== session.providerSessionId) {
+    return { reason: oneTime ? 'order_id_mismatch' : 'subscription_id_mismatch', counted: true };
+  }
+  const provider = await getProviderForApplication(session.application, 'paypal');
+  const meta = session.metadata as unknown as EmbeddedSessionMetadata;
+  const expectedCustomId = `${session.applicationId}:${session.endUserId}`;
+  const refusal = oneTime
+    ? await verifyOrder(provider, id, expectedCustomId, meta)
+    : await verifySubscription(provider, id, expectedCustomId, meta);
+  // Only the session's own not-yet-approved id can still be approved on this page.
+  if (refusal !== null && !refusal.counted) {
+    return { ...refusal, fix: 'Approve the payment again with the PayPal button on this page, or continue on PayPal.' };
+  }
+  return refusal;
+}
+
+/**
+ * @example
+ * await confirmPaypalApproval('chk_live_…', { subscriptionId: 'I-BW452GLLEP1G' }); // { status: 'confirming' }
+ * await confirmPaypalApproval('chk_live_…', { orderId: '5O190127TN364715T' }); // { status: 'confirming' }
+ */
+export async function confirmPaypalApproval(token: string, approval: PaypalApproval): Promise<Outcome> {
+  const { id, idKey } = approvedId(approval);
+  return confirmApproval(token, {
+    provider: 'paypal',
+    refused: {
+      message: 'PayPal does not confirm this approval for this checkout.',
+      fix: 'Return to the app you were buying in and start the checkout again.',
+    },
+    eventIds: { [idKey]: id },
+    verify: (session) => verify(session, approval),
   });
-  const now = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: session.id }, select: { status: true } });
-  return { status: now.status === 'COMPLETE' ? 'complete' : 'confirming' };
 }

@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
@@ -28,7 +29,7 @@ const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
 
 const stripe = new Stripe('sk_for_signing_only', {
-  apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION,
 });
 
 function stripeSigned(body: object): { payload: string; headers: Record<string, string> } {

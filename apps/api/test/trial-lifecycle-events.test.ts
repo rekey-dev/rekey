@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createHmac, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
@@ -211,7 +212,7 @@ describe('Trial lifecycle webhooks', () => {
   });
 
   describe('subscription.trial_started from hosted checkout', () => {
-    const stripe = new Stripe('sk_for_signing_only', { apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion });
+    const stripe = new Stripe('sk_for_signing_only', { apiVersion: STRIPE_API_VERSION });
 
     it('a checkout that completes on a trial announces it', async () => {
       await configureSandboxStripe(appId);

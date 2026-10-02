@@ -8,15 +8,26 @@
  * the behavior. Outbound provider construction is NOT here: that stayed in
  * providers/index.ts (see the note on `ProviderModule`).
  *
- * Credential JSON keys (`apiKey`, `webhookSecret`) match the stored
+ * Credential JSON keys (`apiKey`, `webhookSecret`, `publishableKey`) match the stored
  * encrypted blobs exactly, zero data migration (see StripeCredentials in
  * credentials.service.ts, the source of truth until P3 derives it from
  * this schema).
  */
 
 import Stripe from 'stripe';
+import { CHECKOUT_BROWSER_ORIGINS } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../../../lib/error.js';
 import { STRIPE_API_VERSION } from '../../stripe-api-version.js';
+import { createStripeClient } from '../../stripe-client.js';
+import { detectStripeMode, stripeCredentialSchema, validateStripeCredentials } from './credentials.js';
+import { invoiceIdForPaymentIntent } from '../../stripe-invoice-payments.js';
+import {
+  applicationIdIn,
+  chargePaymentRef,
+  invoiceSubscriptionId,
+  periodEndOf,
+  scopedApplicationId,
+} from './payload-shapes.js';
 import type {
   AppRef,
   CheckoutCompletedEvent,
@@ -37,21 +48,12 @@ import type {
 // uses each Application's own BYO credentials, and a deployment-wide key would
 // be a cross-tenant trust boundary.
 const stripeForVerification = new Stripe('sk_signature_verification_only', {
-  apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION,
 });
 
-/** Payload objects that may carry our app-scoping metadata. */
-interface ApplicationScopedObject {
-  metadata?: { applicationId?: string | null } | null;
-}
-
-function extractApplicationId(obj: ApplicationScopedObject | undefined | null): string | null {
-  // The payload is attacker-writable until signature verification passes, and
-  // the interface type above is a cast, not a guarantee, so runtime-check the
-  // shape. A non-string (array/object/number via a crafted body) must resolve
-  // to "no id", never flow onward as an AppRef.
-  const id = obj?.metadata?.applicationId;
-  return typeof id === 'string' && id.length > 0 && id.length <= 128 ? id : null;
+/** The object's own `metadata.applicationId`, runtime-checked. */
+function extractApplicationId(obj: { metadata?: unknown } | undefined | null): string | null {
+  return applicationIdIn(obj?.metadata);
 }
 
 /** Map Stripe subscription status strings to our enum values. */
@@ -114,8 +116,8 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   // Slug-less generic-route fallback: the one payload field the spec allows
   // reading pre-verify. Verification with THAT app's secret then proves the
   // claim, a forged payload naming app X still needs X's signing secret.
-  const event = req.payload as { data?: { object?: ApplicationScopedObject } } | null;
-  const applicationId = extractApplicationId(event?.data?.object);
+  const event = req.payload as { data?: { object?: unknown } } | null;
+  const applicationId = scopedApplicationId(event?.data?.object);
   if (applicationId) return { applicationId };
   // No slug and no metadata → nothing to scope credentials by. 401, an
   // unverifiable request is unauthenticated.
@@ -202,36 +204,13 @@ function oneTimeCharge(
   };
 }
 
-/**
- * The subscription's current period end, from whichever shape the event's API
- * version uses. From `2025-03-31.basil` Stripe moved `current_period_end` off
- * the subscription onto each item, and an endpoint registered without a pinned
- * version delivers in the account's default. Items share one period on the
- * subscriptions Rekey creates, so the first is the subscription's.
- */
-export function periodEndOf(sub: Stripe.Subscription): Date | null {
-  const onItem = (sub.items?.data?.[0] as { current_period_end?: number } | undefined)
-    ?.current_period_end;
-  const seconds = sub.current_period_end ?? onItem;
-  return typeof seconds === 'number' && seconds > 0 ? new Date(seconds * 1000) : null;
-}
+/** How long a first invoice waits for its checkout before it is filed as unapplied. */
+const DEFER_FIRST_INVOICE_SECONDS = 24 * 60 * 60;
 
-/**
- * The invoice's subscription id, from either API shape: `invoice.subscription`
- * before `2025-03-31.basil`, `invoice.parent.subscription_details.subscription`
- * from it on.
- */
-function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
-  if (typeof invoice.subscription === 'string') return invoice.subscription;
-  if (invoice.subscription?.id) return invoice.subscription.id;
-  const parent = (invoice as { parent?: { subscription_details?: { subscription?: unknown } | null } | null })
-    .parent;
-  const fromParent = parent?.subscription_details?.subscription;
-  if (typeof fromParent === 'string') return fromParent;
-  if (fromParent && typeof fromParent === 'object' && 'id' in fromParent && typeof fromParent.id === 'string') {
-    return fromParent.id;
-  }
-  return null;
+function isRecentEvent(createdSeconds: unknown): boolean {
+  return (
+    typeof createdSeconds === 'number' && Date.now() / 1000 - createdSeconds < DEFER_FIRST_INVOICE_SECONDS
+  );
 }
 
 /**
@@ -242,7 +221,7 @@ function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
  * is `charge.refunded`, whose renewal charges carry no metadata and fall back
  * to the Application whose secret verified the request.
  */
-function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null {
+async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBillingEvent[] | null> {
   const event = payload as Stripe.Event;
   switch (event.type) {
     case 'checkout.session.completed':
@@ -277,6 +256,24 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
               ? session.subscription
               : session.subscription?.id ?? null,
           ...(oneTimeCharge(session) ?? {}),
+          raw: payload,
+        },
+      ];
+    }
+    case 'checkout.session.async_payment_failed': {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const applicationId = extractApplicationId(session);
+      if (!applicationId) {
+        ctx.log.warn({ sessionId: session.id }, `${event.type} without applicationId metadata, cannot route`);
+        return [];
+      }
+      return [
+        {
+          type: 'checkout.payment_failed',
+          providerEventId: event.id,
+          applicationId,
+          checkoutSessionId: session.id,
+          providerSubscriptionId: typeof session.subscription === 'string' ? session.subscription : (session.subscription?.id ?? null),
           raw: payload,
         },
       ];
@@ -329,9 +326,18 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'invoice.paid':
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object as Stripe.Invoice;
-      const applicationId = extractApplicationId(invoice);
+      const applicationId = scopedApplicationId(invoice);
       if (!applicationId) {
         ctx.log.warn({ invoiceId: invoice.id }, 'invoice.paid without applicationId metadata');
+        return [];
+      }
+      const firstPeriod = invoice.billing_reason === 'subscription_create';
+      if (firstPeriod && invoice.amount_paid === 0) {
+        // A trial's first invoice: nothing was charged, checkout already
+        // provisioned the period, and the status mirror owns what the row is.
+        // A $0 RENEWAL is not skipped: it is the only thing that refills
+        // credits and extends a TIMED licence for the new period.
+        ctx.log.info({ invoiceId: invoice.id }, 'first invoice charged nothing, no payment recorded');
         return [];
       }
       return [
@@ -347,14 +353,20 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           // The FIRST invoice (billing_reason: subscription_create) pays for
           // the period checkout already provisioned, the applier anchors it
           // 'initial' to prevent a double grant.
-          firstPeriod: invoice.billing_reason === 'subscription_create',
+          firstPeriod,
+          // Nothing orders this before checkout.session.completed, which is
+          // what links the subscription. Filing it as unapplied in that gap
+          // would email the operator about a payment that is about to apply.
+          // Only while the event is young: a checkout that never reaches
+          // Rekey must still end up in front of the operator.
+          deferUntilLinked: firstPeriod && isRecentEvent(event.created),
           raw: payload,
         },
       ];
     }
     case 'invoice.payment_failed': {
       const invoice = event.data.object as Stripe.Invoice;
-      const applicationId = extractApplicationId(invoice);
+      const applicationId = scopedApplicationId(invoice);
       if (!applicationId) {
         ctx.log.warn(
           { invoiceId: invoice.id },
@@ -392,7 +404,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           type: 'payment.refunded',
           providerEventId: event.id,
           applicationId,
-          providerPaymentId: chargePaymentId(charge),
+          providerPaymentId: await chargePaymentId(charge, ctx),
           providerSubscriptionId: null,
           amount: charge.amount_refunded,
           refundedTotal: charge.amount_refunded,
@@ -411,15 +423,27 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
  * The id a refunded charge's Payment row was recorded under: the invoice for
  * a subscription charge (`invoice.paid`), the payment intent for a one-time
  * checkout (`oneTimeCharge`), the charge itself when neither is present.
+ *
+ * A basil-or-later charge no longer names its invoice. One carrying our
+ * metadata is a one-time checkout's (its payment intent's metadata is copied
+ * onto the charge), recorded under the intent, so no lookup. Otherwise the
+ * invoice is asked of Stripe with the credentials that verified this event. A
+ * failed or impossible lookup throws, which answers 500 and Stripe retries;
+ * recording the refund against the payment intent instead would match no
+ * renewal and lose it.
  */
-function chargePaymentId(charge: Stripe.Charge): string {
-  const invoice = (charge as { invoice?: string | { id?: string } | null }).invoice;
-  if (typeof invoice === 'string') return invoice;
-  if (invoice?.id) return invoice.id;
-  const intent = charge.payment_intent;
-  if (typeof intent === 'string') return intent;
-  if (intent?.id) return intent.id;
-  return charge.id;
+async function chargePaymentId(charge: Stripe.Charge, ctx: TranslateCtx): Promise<string> {
+  const ref = chargePaymentRef(charge);
+  if ('recorded' in ref) return ref.recorded;
+  if (extractApplicationId(charge)) return ref.lookupByIntent;
+  const apiKey = ctx.credentials?.apiKey;
+  if (!apiKey) {
+    throw new Error(
+      `Stripe charge ${charge.id} names no invoice, and finding it needs the Application's Stripe secret key, which this translation was not given.`,
+    );
+  }
+  const invoiceId = await invoiceIdForPaymentIntent(createStripeClient(apiKey), ref.lookupByIntent);
+  return invoiceId ?? ref.lookupByIntent;
 }
 
 export const stripeModule: ProviderModule = {
@@ -452,7 +476,12 @@ export const stripeModule: ProviderModule = {
     // bank rather than Stripe. `null` says that honestly instead of inventing
     // a limit to look symmetrical with the other two.
     refunds: { partial: true, windowDays: null },
+    // The same Checkout Session in `ui_mode: 'elements'`, with the Payment
+    // Element on the Rekey page. Needs the optional `publishableKey`, which
+    // readiness check 6 asks for.
+    embeddedCheckout: { recurring: true, oneTime: true },
   },
+  browser: CHECKOUT_BROWSER_ORIGINS.stripe!,
   // Stripe checkout takes a `price` id and nothing else, so a plan with no
   // stored price cannot be bought and never will be until someone registers
   // it. `createCheckoutSession` already refuses with the same repair; saying
@@ -476,39 +505,9 @@ export const stripeModule: ProviderModule = {
       fix: `Plans register with Stripe when they are created, so a plan created before these credentials existed was never registered. Repair it in place: POST /api/v1/tenant/applications/${plan.applicationId}/plans/${plan.slug}/register`,
     };
   },
-  credentialSchema: [
-    {
-      key: 'apiKey',
-      label: 'Secret key',
-      secret: true,
-      placeholder: 'sk_live_… / sk_test_…',
-      help: 'Stripe Dashboard → Developers → API keys.',
-      pattern: { prefix: 'sk_', message: 'Stripe `apiKey` must start with `sk_` (live or test).' },
-    },
-    {
-      key: 'webhookSecret',
-      label: 'Webhook signing secret',
-      secret: true,
-      optional: true,
-      placeholder: 'whsec_…',
-      help: 'Leave blank and auto-configure the webhook, or paste it from Stripe → Developers → Webhooks.',
-      pattern: {
-        prefix: 'whsec_',
-        message: 'Stripe `webhookSecret`, when provided, must start with `whsec_`.',
-      },
-      webhookRole: 'secret',
-    },
-  ],
-  detectMode(creds) {
-    // Stripe secret keys are self-describing. Anything else, a restricted
-    // key, a typo, a future prefix, is `null`, NOT 'test': claiming "test"
-    // for a key we don't recognise is how a live credential ends up stored
-    // against a development application.
-    const apiKey = creds.apiKey ?? '';
-    if (apiKey.startsWith('sk_live_')) return 'live';
-    if (apiKey.startsWith('sk_test_')) return 'test';
-    return null;
-  },
+  credentialSchema: stripeCredentialSchema,
+  validateCredentials: validateStripeCredentials,
+  detectMode: detectStripeMode,
   webhook: {
     resolveApplication,
     verify,

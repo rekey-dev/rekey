@@ -28,6 +28,10 @@ export {
   CHECKOUT_BROWSER_ORIGINS,
   CHECKOUT_READINESS_CHECK_IDS,
   checkoutTokenMode,
+  STRIPE_JS_RELEASE_TRAIN,
+  STRIPE_RETURN_PARAM,
+  STRIPE_CHECKOUT_SESSION_ID_PATTERN,
+  CHECKOUT_PAGE_PROVIDERS,
   type CheckoutBrowserOrigins,
   type CheckoutPaymentMode,
   type CheckoutReadinessCheckId,
@@ -1770,7 +1774,7 @@ export type CheckoutResultDto = z.infer<typeof CheckoutResultDtoSchema>;
  * `expired` session carries no order details and no email, only where to send
  * the buyer back to.
  */
-export const CheckoutPageClientSchema = z.object({
+const PaypalSubscriptionClientSchema = z.object({
   provider: z.literal('paypal'),
   /** The PayPal REST app's client id for this session's mode. Public by design. */
   clientId: z.string(),
@@ -1778,7 +1782,47 @@ export const CheckoutPageClientSchema = z.object({
   subscriptionId: z.string(),
   sdk: z.literal('v5-subscription'),
 });
+
+const PaypalOrderClientSchema = z.object({
+  provider: z.literal('paypal'),
+  /** The PayPal REST app's client id for this session's mode. Public by design. */
+  clientId: z.string(),
+  /** The Orders v2 order Rekey created server-side, handed to the Buttons' `createOrder`. */
+  orderId: z.string(),
+  sdk: z.literal('v5-order'),
+  /** ISO 4217 code of the order. PayPal's script must be loaded with the order's currency. */
+  currency: z.string(),
+});
+
+/** Razorpay Standard Checkout, opened on a subscription or on an order Rekey created server-side. */
+const RazorpayClientSchema = z.object({
+  provider: z.literal('razorpay'),
+  /** The Razorpay key id for this session's mode. Public by design: checkout.js takes it. */
+  keyId: z.string(),
+  sdk: z.literal('razorpay-checkout'),
+  target: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('subscription'), subscriptionId: z.string() }),
+    z.object({ kind: z.literal('order'), orderId: z.string() }),
+  ]),
+});
+
+const StripeElementsClientSchema = z.object({
+  provider: z.literal('stripe'),
+  /** The Application's `pk_test_` / `pk_live_` key, in this session's mode. Public by design. */
+  publishableKey: z.string(),
+  /** The Checkout Session's client secret: scoped to this one session and meant for the browser. */
+  clientSecret: z.string(),
+  sdk: z.literal('elements'),
+});
+
+export const CheckoutPageClientSchema = z.discriminatedUnion('sdk', [
+  PaypalSubscriptionClientSchema,
+  PaypalOrderClientSchema,
+  RazorpayClientSchema,
+  StripeElementsClientSchema,
+]);
 export type CheckoutPageClient = z.infer<typeof CheckoutPageClientSchema>;
+export type PaypalCheckoutPageClient = Extract<CheckoutPageClient, { provider: 'paypal' }>;
 
 export const CheckoutPageOrderSchema = z.object({
   merchant: z.object({

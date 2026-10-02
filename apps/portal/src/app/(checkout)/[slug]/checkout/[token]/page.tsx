@@ -11,10 +11,16 @@
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { checkoutTokenMode } from '@rekey.dev/shared-types/checkout';
-import { confirmApproval, isCheckoutToken, lookupCheckout } from '@/lib/checkout-api';
+import {
+  checkoutTokenMode,
+  PAYPAL_RESOURCE_ID_PATTERN,
+  STRIPE_CHECKOUT_SESSION_ID_PATTERN,
+  STRIPE_RETURN_PARAM,
+} from '@rekey.dev/shared-types/checkout';
+import { confirmApproval, confirmStripe, isCheckoutToken, lookupCheckout } from '@/lib/checkout-api';
 import { NONCE_HEADER } from '@/lib/checkout-csp';
 import { checkoutLocale } from '@/lib/checkout-format';
+import { RAZORPAY_RETURN_PARAM, razorpayReturnOf } from '@/lib/checkout-razorpay-return';
 import { CheckoutNotice, CheckoutView } from '@/components/checkout/checkout-view';
 
 export const dynamic = 'force-dynamic';
@@ -33,16 +39,42 @@ type Params = {
 
 /**
  * A buyer who approved on PayPal's own page (the fallback link) comes back
- * here with `subscription_id`. It is only a claim: the API checks it with
- * PayPal like any approval, and activation still waits for the webhook.
- * PayPal may append it on a cancelled return too, so the query is stripped
- * with a redirect after one attempt: a refresh must not ask again.
+ * here with `subscription_id`, or for a one-time order with the order id as
+ * `token` plus `PayerID`. It is only a claim: the API checks it with PayPal
+ * like any approval, and completion still waits for the webhook. PayPal
+ * appends these on a cancelled return too, so the query is stripped with a
+ * redirect after one attempt: a refresh must not ask again.
  */
 async function confirmReturnFromPaypal(token: string, searchParams: Params['searchParams']): Promise<boolean> {
   const query = await searchParams;
-  if (query === undefined || !('subscription_id' in query)) return false;
-  const returned = query.subscription_id;
-  if (typeof returned === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(returned)) await confirmApproval(token, returned);
+  if (query === undefined) return false;
+  if ('subscription_id' in query) {
+    const returned = query.subscription_id;
+    if (typeof returned === 'string' && PAYPAL_RESOURCE_ID_PATTERN.test(returned)) await confirmApproval(token, { subscriptionId: returned });
+    return true;
+  }
+  if ('token' in query) {
+    const returned = query.token;
+    const approved = typeof query.PayerID === 'string';
+    if (approved && typeof returned === 'string' && PAYPAL_RESOURCE_ID_PATTERN.test(returned)) await confirmApproval(token, { orderId: returned });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A buyer whose Stripe payment method redirected (3-D Secure, a bank or
+ * wallet redirect), or who paid on Stripe's own page through the fallback
+ * link, comes back here with the Checkout Session id. Checked with Stripe
+ * like the in-page confirmation, then stripped with a redirect so the page
+ * renders its status (confirming, or the form again if the payment did not go
+ * through) and a refresh does not ask again.
+ */
+async function confirmReturnFromStripe(token: string, searchParams: Params['searchParams']): Promise<boolean> {
+  const query = await searchParams;
+  if (query === undefined || !(STRIPE_RETURN_PARAM in query)) return false;
+  const returned = query[STRIPE_RETURN_PARAM];
+  if (typeof returned === 'string' && STRIPE_CHECKOUT_SESSION_ID_PATTERN.test(returned)) await confirmStripe(token, returned, 'return');
   return true;
 }
 
@@ -56,7 +88,10 @@ export default async function CheckoutPage({ params, searchParams }: Params): Pr
   const h = await headers();
   const nonce = h.get(NONCE_HEADER) ?? '';
   const locale = checkoutLocale(h.get('accept-language'));
-  if (isCheckoutToken(token) && (await confirmReturnFromPaypal(token, searchParams))) {
+  if (
+    isCheckoutToken(token) &&
+    ((await confirmReturnFromPaypal(token, searchParams)) || (await confirmReturnFromStripe(token, searchParams)))
+  ) {
     redirect(`/${encodeURIComponent(slug)}/checkout/${encodeURIComponent(token)}`);
   }
   const lookup = await lookupCheckout(token);
@@ -108,7 +143,7 @@ export default async function CheckoutPage({ params, searchParams }: Params): Pr
       />
     );
   }
-  if (view.status === 'expired' || view.order === null || view.provider !== 'paypal') {
+  if (view.status === 'expired' || view.order === null || view.order.client.provider !== view.provider) {
     return (
       <CheckoutNotice
         title="This checkout has expired"
@@ -126,6 +161,7 @@ export default async function CheckoutPage({ params, searchParams }: Params): Pr
       nonce={nonce}
       basePath={`/${encodeURIComponent(slug)}/checkout/${encodeURIComponent(token)}`}
       locale={locale}
+      razorpayReturn={razorpayReturnOf((await searchParams)?.[RAZORPAY_RETURN_PARAM])}
     />
   );
 }

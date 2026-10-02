@@ -44,6 +44,7 @@ import {
   createLiveSubscription,
   linkProviderSubscription,
   periodEnd,
+  periodEndSeconds,
 } from './support/stripe-lifecycle.js';
 
 describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (creds) => {
@@ -160,7 +161,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
     const atStripe = await stripe.subscriptions.retrieve(scenario.stripeSubscription.id);
     expect(atStripe.cancel_at_period_end).toBe(true);
     expect(atStripe.status).toBe('active');
-    expect(atStripe.cancel_at).toBe(scenario.stripeSubscription.current_period_end);
+    expect(atStripe.cancel_at).toBe(periodEndSeconds(scenario.stripeSubscription));
 
     // --- 2. Locally the buyer still has what they paid for ------------------
     const scheduled = await prisma.subscription.findUniqueOrThrow({
@@ -204,7 +205,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
     // The claim `expireIfDue` exists to make safe: "a provider-backed row
     // waits for the provider's webhook". Nothing local ends it, so if Stripe
     // does not emit here, a cancelled buyer stays entitled forever.
-    const afterPeriod = scenario.stripeSubscription.current_period_end + 3600;
+    const afterPeriod = periodEndSeconds(scenario.stripeSubscription) + 3600;
     await advanceClock(stripe, scenario.clockId, afterPeriod);
 
     const deleted = await waitForStripeEvents(stripe, {

@@ -2860,6 +2860,9 @@ model DunningCase {
   @@index([applicationId, status])
   @@index([status, nextActionAt])
   @@index([subscriptionId, status])
+  // `dunning_cases_subscription_open_key`, UNIQUE (subscription_id) WHERE
+  // status = 'OPEN': at most one open case per subscription. Partial, so it
+  // lives only in migration 20261002182512_dunning_one_open_case.
   @@map("dunning_cases")
 }
 

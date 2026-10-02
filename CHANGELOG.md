@@ -4,6 +4,122 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0-rc.6
+
+A release candidate on the 2.2.0 line. The Rekey checkout page now takes
+payment through all three providers, for subscriptions and one-time
+purchases: PayPal, Razorpay and Stripe. The page keeps one layout with your
+Application's name, logo and colours; only the payment area changes with the
+provider. Stripe moves to API version `2026-09-30.endive`, and Stripe renewal
+payments and failed payments are now recorded.
+
+**Upgrading an existing deployment:** one migration runs on boot. Deploy the
+portal before or together with the API. Stripe and PayPal webhooks need
+Auto-configure pressed once, and Razorpay needs one event added by hand. See
+**Upgrade notes** at the end of this section.
+
+### Changed
+
+Every item here changes a behaviour an existing 2.2.0-rc.5 deployment or
+integration can see. Read this list before you upgrade.
+
+- **Stripe API version is `2026-09-30.endive` on `stripe` 23.0.0.** Webhook
+  endpoints registered before this release keep sending the older payload
+  shape, and Rekey reads both. Press Auto-configure to move an endpoint to
+  the new version; a hand-made endpoint should pick `2026-09-30.endive`.
+- **Stripe renewal payments and failed payments are now recorded.** Stripe
+  invoice events were dropped before this release because they carried no
+  Application id of their own. They are now routed by the subscription's
+  metadata, so renewals create payments, refill credits and extend timed
+  licences, a failed renewal moves the subscription to `PAST_DUE` and opens a
+  dunning case with its reminder emails, and `payment.succeeded` and
+  `subscription.past_due` webhooks are sent. Renewals from before the upgrade
+  are not backfilled.
+- **A PayPal one-time order is checked before it is captured.** The webhook
+  reads the order back from PayPal and compares the buyer, the amount and the
+  currency with what the checkout was created for. A mismatch is not captured
+  and is recorded as the security event `app.checkout_capture_refused`. An
+  order created before the upgrade on a one-time plan that was re-priced since
+  is refused the same way.
+- **`subscription.activated` is sent once** when several PayPal deliveries
+  for one order arrive together. It could be sent once per delivery before.
+- **A refund of a Stripe invoice paid partly or wholly outside Stripe is
+  refused** with `BILLING_PAYMENT_NOT_REFUNDABLE`; refund it in the Stripe
+  dashboard.
+- **A second checkout for a plan is refused while a payment is in flight** at
+  Razorpay or Stripe, as it already was at PayPal. If the provider cannot be
+  asked, the answer is 503 `CHECKOUT_PAYMENT_STATUS_UNAVAILABLE`.
+
+### Added
+
+- **PayPal one-time purchases on the Rekey checkout page**, through PayPal's
+  buttons with an order created on the server. Coupons apply as on PayPal's
+  own page.
+- **Razorpay on the Rekey checkout page**, subscriptions and one-time
+  purchases. Your Pay button opens Razorpay's payment window with your
+  Application's name, logo and colour, and UPI is listed first for one-time
+  INR purchases. One-time purchases on the page use a Razorpay order and
+  complete on `order.paid`. Buyers are returned to your app after paying,
+  which Razorpay's own subscription page never did.
+- **Stripe on the Rekey checkout page**, subscriptions and one-time
+  purchases, through Checkout Sessions in elements mode with the Payment
+  Element themed from your Application's colours. Trials and coupons work as
+  on Stripe's page. Bank debits (SEPA, ACH, Bacs) count as a payment in
+  flight, and a debit that fails later reopens the plan for a new checkout.
+- **A Stripe publishable key** in the Stripe credentials. It is optional for
+  Stripe's own page and required for the Rekey page; saving a key whose mode
+  differs from the secret key is refused.
+- **Readiness checks for the new flows**: the Razorpay key ID, the Stripe
+  publishable key, and a warning until Razorpay has delivered `order.paid`
+  when one-time plans are sold.
+
+### Fixed
+
+- A PayPal webhook that failed part-way through a one-time purchase is now
+  retried until the purchase is fulfilled.
+- The checkout page shows the price the order was created for, not the
+  plan's current price.
+- Auto-configure adds the order events to a PayPal webhook that already
+  exists at Rekey's URL.
+- A Stripe invoice paid on a retry after a failed attempt is recorded as
+  paid, and can be refunded.
+- A failed payment that arrives late no longer moves a cancelled or expired
+  subscription back to `PAST_DUE`.
+- Two webhooks arriving together no longer open two dunning cases for one
+  subscription.
+
+### Upgrade notes
+
+Migration, applied on boot or with `pnpm db:migrate:deploy`:
+
+- `20261002182512_dunning_one_open_case`: closes duplicate open dunning
+  cases, keeping the oldest, then adds a unique index that allows one open
+  case per subscription.
+
+**Deploy the portal before or together with the API.** An older portal shows
+subscription buttons for a one-time purchase.
+
+**PayPal:** press Auto-configure in Panel → Application → Billing → Setup →
+Providers → PayPal so the webhook receives `CHECKOUT.ORDER.APPROVED` and
+`PAYMENT.CAPTURE.COMPLETED`.
+
+**Razorpay:** add `order.paid` to the webhook in Razorpay Dashboard →
+Settings → Webhooks before selling one-time plans on the Rekey page, and keep
+automatic capture on.
+
+**Stripe:** add the publishable key in Providers → Stripe → Edit, and press
+Auto-configure so the webhook moves to the new API version and receives
+`checkout.session.async_payment_failed`. For Apple Pay and Google Pay, add
+the portal host under Stripe Dashboard → Settings → Payment method domains.
+
+**After the upgrade, watch Stripe billing for a few days:** payments filed as
+unapplied, payments still marked failed that Stripe shows as paid, and more
+than one open dunning case for a subscription should all stay at zero.
+
+**Known limit:** refunds of Stripe renewal invoices use Stripe's Invoice
+Payments API, which this release has not exercised against a live Stripe
+account in CI.
+
 ## 2.2.0-rc.5
 
 A release candidate on the 2.2.0 line. It adds contact lists (waitlists,

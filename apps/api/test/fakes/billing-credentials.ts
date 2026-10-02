@@ -39,3 +39,15 @@ export async function configureSandboxPaypal(applicationId: string): Promise<voi
     { mode: 'test' },
   );
 }
+
+/** Razorpay test keys. The key secret is what the checkout handler's signature is checked with. */
+export const RAZORPAY_TEST_KEY_SECRET = 'secret_ci_only';
+
+export async function configureSandboxRazorpay(applicationId: string, webhookSecret = 'rzp_whsec_ci_only'): Promise<void> {
+  await billingCredentialsService.upsertCredentials(
+    applicationId,
+    'razorpay',
+    { keyId: 'rzp_test_ci', keySecret: RAZORPAY_TEST_KEY_SECRET, webhookSecret },
+    { mode: 'test' },
+  );
+}
