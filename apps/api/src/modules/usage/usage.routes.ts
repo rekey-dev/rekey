@@ -27,13 +27,13 @@ import { ok, okPage, errs, ref } from '../../lib/openapi.js';
  */
 const READ_GATE_ERRORS = {
   401:
-    'API_KEY_MISSING — no Authorization header; or API_KEY_INVALID — the presented credential ' +
+    'API_KEY_MISSING: no Authorization header; or API_KEY_INVALID: the presented credential ' +
     'is not a valid Application secret key, or is unknown/revoked/expired.',
   403:
-    "IP_NOT_ALLOWED — caller IP outside the key's allowlist; or BILLING_DISABLED — billing is " +
-    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT — the key lacks the ' +
+    "IP_NOT_ALLOWED: caller IP outside the key's allowlist; or BILLING_DISABLED: billing is " +
+    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT: the key lacks the ' +
     '`billing:read` scope.',
-  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+  429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
 } as const;
 
 const WRITE_GATE_ERRORS = {
@@ -217,20 +217,20 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
           201: ok(ref('UsageRecord'), 'The recorded usage event.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body failed schema validation; or ' +
-              'IDEMPOTENCY_KEY_INVALID — the Idempotency-Key header is empty or exceeds 200 ' +
-              'characters; or USAGE_SUBJECT_AMBIGUOUS — both `endUserId` and `organizationId` ' +
-              'were passed; or USAGE_METER_INACTIVE — the meter exists but does not accept records; ' +
-              'or METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit.',
+              'VALIDATION_ERROR: the body failed schema validation; or ' +
+              'IDEMPOTENCY_KEY_INVALID: the Idempotency-Key header is empty or exceeds 200 ' +
+              'characters; or USAGE_SUBJECT_AMBIGUOUS: both `endUserId` and `organizationId` ' +
+              'were passed; or USAGE_METER_INACTIVE: the meter exists but does not accept records; ' +
+              'or METADATA_TOO_LARGE: `metadata` exceeds the 16KB limit.',
             ...WRITE_GATE_ERRORS,
-            402: 'USAGE_QUOTA_EXCEEDED — the subject\'s plan-included quota for this meter is exhausted this period.',
+            402: 'USAGE_QUOTA_EXCEEDED: the subject\'s plan-included quota for this meter is exhausted this period.',
             404:
-              'USAGE_METER_NOT_FOUND — no meter with that slug in this application; or ' +
-              'ORGANIZATION_NOT_FOUND — `organizationId` does not name an organization in this ' +
-              'application; or END_USER_NOT_FOUND — `endUserId` does not name an end-user in ' +
+              'USAGE_METER_NOT_FOUND: no meter with that slug in this application; or ' +
+              'ORGANIZATION_NOT_FOUND: `organizationId` does not name an organization in this ' +
+              'application; or END_USER_NOT_FOUND: `endUserId` does not name an end-user in ' +
               'this application.',
             409:
-              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
+              'IDEMPOTENCY_KEY_IN_FLIGHT: a request with this Idempotency-Key is still being ' +
               'processed; or IDEMPOTENCY_KEY_REUSED: the Idempotency-Key header was already used ' +
               'for a different method, path, or body, or the body `idempotencyKey` was already used ' +
               'on this meter for this subject with a different `quantity` or in another month.',
@@ -304,13 +304,13 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('UsageAggregate'), 'Summed quantity for the meter over the requested window.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the querystring failed schema validation; or ' +
-              'USAGE_SUBJECT_AMBIGUOUS — both `endUserId` and `organizationId` were passed.',
+              'VALIDATION_ERROR: the querystring failed schema validation; or ' +
+              'USAGE_SUBJECT_AMBIGUOUS: both `endUserId` and `organizationId` were passed.',
             ...READ_GATE_ERRORS,
             404:
-              'USAGE_METER_NOT_FOUND — no meter with that slug; or ORGANIZATION_NOT_FOUND — ' +
+              'USAGE_METER_NOT_FOUND: no meter with that slug; or ORGANIZATION_NOT_FOUND: ' +
               '`organizationId` does not name an organization in this application; or ' +
-              'END_USER_NOT_FOUND — `endUserId` does not name an end-user in this application.',
+              'END_USER_NOT_FOUND: `endUserId` does not name an end-user in this application.',
           }),
         },
       },

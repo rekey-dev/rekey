@@ -25,12 +25,16 @@ export default async function BillingEventsPage({
   return (
     <section className="space-y-3" aria-labelledby="billing-events-heading">
       <SectionHeader
-        title={<span id="billing-events-heading">Provider events</span>}
+        title={<span id="billing-events-heading">Provider webhooks</span>}
         count={events.length > 0 ? `latest ${events.length}` : undefined}
         description={
           <>
             What your payment providers posted to Rekey, such as a subscription starting or a
-            payment going through. Newest first. The webhooks your app receives from Rekey are under{' '}
+            payment going through. Newest first. What Rekey did about each one, and why, is in the{' '}
+            <Link href={`/applications/${id}/billing-log`} className="underline hover:text-[var(--color-fg)]">
+              Billing log
+            </Link>
+            . The webhooks your app receives from Rekey are under{' '}
             <Link href={`/applications/${id}/webhooks`} className="underline hover:text-[var(--color-fg)]">
               Developer, Webhooks
             </Link>

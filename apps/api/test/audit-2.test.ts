@@ -178,13 +178,13 @@ describe('Audit-2 regression', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${b.applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 1000 },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1000 } },
     });
     await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${b.applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'twenty', discountType: 'PERCENT', amountOff: 2000 },
+      payload: { code: 'twenty', discountType: 'PERCENT', basisPoints: 2000 },
     });
 
     const res = await app.inject({
@@ -218,7 +218,7 @@ describe('Audit-2 regression', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${b.applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'replayable', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
+      payload: { code: 'replayable', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] },
     });
     const coupon = await prisma.coupon.findUniqueOrThrow({
       where: { applicationId_code: { applicationId: b.applicationId, code: 'replayable' } },
@@ -258,8 +258,7 @@ describe('Audit-2 regression', () => {
       payload: {
         code: 'limit3',
         discountType: 'AMOUNT',
-        currency: 'USD',
-        amountOff: 100,
+        amounts: [{ currency: 'USD', amountOff: 100 }],
         maxRedemptions: 3,
       },
     });

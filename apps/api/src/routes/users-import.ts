@@ -125,12 +125,12 @@ export async function usersImportRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — a row failed schema validation; or PASSWORD_HASH_UNSUPPORTED — a ' +
-              '`passwordHash` is neither argon2id nor bcrypt; or END_USER_ROLE_UNKNOWN — a `role` is ' +
-              'not defined for this Application; or METADATA_TOO_LARGE; or IMPORT_DUPLICATE_EMAIL — ' +
+              'VALIDATION_ERROR: a row failed schema validation; or PASSWORD_HASH_UNSUPPORTED: a ' +
+              '`passwordHash` is neither argon2id nor bcrypt; or END_USER_ROLE_UNKNOWN: a `role` is ' +
+              'not defined for this Application; or METADATA_TOO_LARGE; or IMPORT_DUPLICATE_EMAIL: ' +
               'the same address appears twice in the batch.',
-            401: 'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
-            403: "IP_NOT_ALLOWED — the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT — the key lacks `auth:write`; or TENANT_QUOTA_EXCEEDED — the batch would exceed the workspace end-user limit.",
+            401: 'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
+            403: "IP_NOT_ALLOWED: the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT: the key lacks `auth:write`; or TENANT_QUOTA_EXCEEDED: the batch would exceed the workspace end-user limit.",
           }),
         },
       },

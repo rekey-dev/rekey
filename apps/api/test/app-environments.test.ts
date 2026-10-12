@@ -269,7 +269,7 @@ describe('Application environments', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${a.id}/plans`,
       headers: { authorization: `Bearer ${operator}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 1000, interval: 'MONTH' },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1000 }, interval: 'MONTH' },
     });
     const userToken = await app
       .inject({

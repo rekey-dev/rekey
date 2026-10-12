@@ -85,7 +85,7 @@ describe('Trial lifecycle webhooks', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: 'pro', name: 'Pro', amount: 2900, kind: 'SUBSCRIPTION', interval: 'MONTH' },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 }, kind: 'SUBSCRIPTION', interval: 'MONTH' },
     });
     expect(plan.statusCode).toBe(201);
   });

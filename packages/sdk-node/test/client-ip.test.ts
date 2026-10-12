@@ -5,7 +5,15 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { CLIENT_IP_HEADER, CLIENT_USER_AGENT_HEADER, Rekey, normalizeClientIp } from '../src/index.js';
+import {
+  CLIENT_IP_HEADER,
+  CLIENT_USER_AGENT_HEADER,
+  Rekey,
+  VISITOR_COUNTRY_HINT_HEADER,
+  normalizeClientIp,
+  normalizeCountryHint,
+  visitorCountryHintFrom,
+} from '../src/index.js';
 
 function ok(): Response {
   return new Response(JSON.stringify({ success: true, data: {} }), {
@@ -86,5 +94,49 @@ describe('clientUserAgent', () => {
     const rekey = new Rekey({ apiUrl: 'https://api.test', secretKey: 'rp_test_x', fetch: fetchImpl });
     await rekey.with({ clientUserAgent: '   ' }).auth.signIn({ email: 'a@b.co', password: 'pw' });
     expect(sentHeaders(fetchImpl).has(CLIENT_USER_AGENT_HEADER)).toBe(false);
+  });
+});
+
+describe('visitorCountryHint', () => {
+  const client = (fetchImpl: ReturnType<typeof vi.fn>, config: { visitorCountryHint?: string } = {}): Rekey =>
+    new Rekey({ apiUrl: 'https://api.test', secretKey: 'rp_test_x', fetch: fetchImpl, ...config });
+
+  it('is the exact header name the API reads', () => {
+    expect(VISITOR_COUNTRY_HINT_HEADER.toLowerCase()).toBe('x-rekey-visitor-country-hint');
+  });
+
+  it('with({ visitorCountryHint }) sends it on a checkout, and never as the declared country', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok());
+    await client(fetchImpl)
+      .with({ visitorCountryHint: 'in' })
+      .billing.createCheckout('user.jwt', { planSlug: 'pro', successUrl: 'https://a.test/ok', cancelUrl: 'https://a.test/no' });
+    const headers = sentHeaders(fetchImpl);
+    expect(headers.get(VISITOR_COUNTRY_HINT_HEADER)).toBe('IN');
+    expect(headers.has('x-country')).toBe(false);
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body)) as Record<string, unknown>;
+    expect('country' in body).toBe(false);
+  });
+
+  it('survives a later with(), and is not sent when not configured', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok());
+    await client(fetchImpl, { visitorCountryHint: 'DE' }).with({ clientIp: '203.0.113.9' }).billing.getProviders();
+    expect(sentHeaders(fetchImpl).get(VISITOR_COUNTRY_HINT_HEADER)).toBe('DE');
+
+    const bare = vi.fn().mockResolvedValue(ok());
+    await client(bare).billing.getProviders();
+    expect(sentHeaders(bare).has(VISITOR_COUNTRY_HINT_HEADER)).toBe(false);
+  });
+
+  it.each(['XX', 'xx', 'T1', 'IND', 'I', '', 'I N', '1N'])('does not send %j, which is not a country', async (bad) => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok());
+    await client(fetchImpl, { visitorCountryHint: bad }).billing.getProviders();
+    expect(sentHeaders(fetchImpl).has(VISITOR_COUNTRY_HINT_HEADER)).toBe(false);
+    expect(normalizeCountryHint(bad)).toBeNull();
+  });
+
+  it('visitorCountryHintFrom reads Cloudflare, then Vercel, and nothing else', () => {
+    expect(visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'in', 'x-vercel-ip-country': 'US' }))).toBe('IN');
+    expect(visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'XX', 'x-vercel-ip-country': 'us' }))).toBe('US');
+    expect(visitorCountryHintFrom(new Headers({ 'x-country': 'IN' }))).toBeUndefined();
   });
 });

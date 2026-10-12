@@ -1,12 +1,11 @@
 /**
  * Copy and number formatting for the checkout page.
  *
- * Amounts use `Intl.NumberFormat` in the plan's own currency with the buyer's
- * locale, so `en-IN` gets lakh grouping. The minor-unit divisor is the
- * portal's existing one, which already handles zero-decimal currencies.
+ * Amounts are written by the currency registry in the buyer's locale, so
+ * `en-IN` gets lakh grouping.
  */
 
-import { minorUnitDivisor } from './format';
+import { formatMoney as formatRegistryMoney } from '@rekey.dev/shared-types/currency';
 
 export type CheckoutLocale = 'en-US' | 'en-IN';
 
@@ -26,18 +25,7 @@ export function checkoutLocale(acceptLanguage: string | null | undefined): Check
  * formatMoney(9900, 'USD', 'en-US'); // '$99.00'
  */
 export function formatMoney(amountMinor: number, currency: string, locale: CheckoutLocale): string {
-  const divisor = minorUnitDivisor(currency);
-  const digits = divisor === 1 ? 0 : divisor === 1000 ? 3 : 2;
-  try {
-    return new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: currency.toUpperCase(),
-      minimumFractionDigits: digits,
-      maximumFractionDigits: digits,
-    }).format(amountMinor / divisor);
-  } catch {
-    return `${(amountMinor / divisor).toFixed(digits)} ${currency.toUpperCase()}`;
-  }
+  return formatRegistryMoney(amountMinor, currency, locale);
 }
 
 /** "month" / "year", or null for a one-time purchase. */
@@ -59,32 +47,43 @@ function luminance(hex: string): number | null {
   return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
 }
 
+const MIN_TEXT_CONTRAST = 4.5;
+/** The page's secondary text (`--ck-muted-fg`), the lightest text drawn on a surface. */
+const MUTED_TEXT = '#525252';
+const DEFAULT_ACCENT = '#171717';
+
+function contrast(a: number, b: number): number {
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 /**
- * An operator surface colour light enough to keep the page's near-black text
- * at 4.5:1 or better, or null to keep the neutral default.
+ * An operator surface colour light enough to keep the page's text, down to
+ * its muted secondary text, at 4.5:1 or better, or null to keep the neutral
+ * default.
  *
  * @example
- * readableSurface('#0b0b0b'); // null
+ * readableSurface('#808080'); // null: near-black text passes, muted text does not
  */
 export function readableSurface(color: string | null): string | null {
   if (color === null) return null;
   const l = luminance(color);
   if (l === null) return null;
-  const text = luminance('#171717')!;
-  return (l + 0.05) / (text + 0.05) >= 4.5 ? color : null;
+  return l > luminance(MUTED_TEXT)! && contrast(l, luminance(MUTED_TEXT)!) >= MIN_TEXT_CONTRAST ? color : null;
 }
 
 /**
- * The operator's accent when it keeps 4.5:1 against white, otherwise the
- * neutral default, so link text stays readable whatever colour was chosen.
+ * The operator's accent when it keeps 4.5:1 against white, which is the pay
+ * button's text, and against every surface it is drawn on as link text.
+ * Otherwise the neutral default.
  *
  * @example
  * readableAccent('#ffeb3b'); // '#171717'
+ * readableAccent('#0f766e', ['#d4d4d4']); // '#171717': fine on white, too faint on that surface
  */
-export function readableAccent(color: string | null): string {
-  const fallback = '#171717';
-  if (color === null) return fallback;
+export function readableAccent(color: string | null, surfaces: ReadonlyArray<string | null> = []): string {
+  if (color === null) return DEFAULT_ACCENT;
   const l = luminance(color);
-  if (l === null) return fallback;
-  return 1.05 / (l + 0.05) >= 4.5 ? color : fallback;
+  if (l === null) return DEFAULT_ACCENT;
+  const behind = ['#ffffff', ...surfaces].map((s) => (s === null ? null : luminance(s))).filter((s): s is number => s !== null);
+  return behind.every((s) => contrast(l, s) >= MIN_TEXT_CONTRAST) ? color : DEFAULT_ACCENT;
 }

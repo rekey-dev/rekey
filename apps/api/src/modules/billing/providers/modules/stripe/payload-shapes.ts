@@ -10,6 +10,8 @@
  */
 
 import type Stripe from 'stripe';
+import type { ProviderRefund } from '../../module-types.js';
+import { stripeWebhookAmount } from '../../stripe-money.js';
 
 type Ref = string | { id?: unknown } | null | undefined;
 
@@ -87,6 +89,30 @@ export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
   return refId(basil.parent?.subscription_details?.subscription) ?? refId(acacia.subscription);
 }
 
+interface InvoiceLine {
+  /** Basil on: the price is a bare id under `pricing.price_details`. */
+  pricing?: { price_details?: { price?: Ref } | null } | null;
+  /** Acacia: the price object, and the legacy plan object carrying the same id. */
+  price?: Ref;
+  plan?: Ref;
+}
+
+/**
+ * The one price an invoice bills, or null when its lines name none or more
+ * than one. A proration invoice carries the old and the new price, and a
+ * one-off invoice item carries none, so neither identifies a price.
+ */
+export function invoicePriceId(invoice: Stripe.Invoice): string | null {
+  const lines = (invoice.lines as { data?: unknown } | null | undefined)?.data;
+  if (!Array.isArray(lines)) return null;
+  const ids = new Set<string>();
+  for (const line of lines as InvoiceLine[]) {
+    const id = refId(line?.pricing?.price_details?.price) ?? refId(line?.price) ?? refId(line?.plan);
+    if (id !== null) ids.add(id);
+  }
+  return ids.size === 1 ? [...ids][0]! : null;
+}
+
 /**
  * Which id a refunded charge's Payment row was recorded under, as far as the
  * charge alone can say.
@@ -105,4 +131,38 @@ export function chargePaymentRef(charge: Stripe.Charge): { recorded: string } | 
   }
   if (intent) return { lookupByIntent: intent };
   return { recorded: charge.id };
+}
+
+const STRIPE_REFUND_STATUS: Record<string, ProviderRefund['status']> = {
+  succeeded: 'succeeded',
+  pending: 'pending',
+  requires_action: 'pending',
+  failed: 'failed',
+  canceled: 'failed',
+};
+
+/**
+ * The refunds a `charge.refunded` payload lists, each under its own id. One
+ * event can carry several. A charge from an API version that no longer
+ * includes the list yields nothing here, and the applier records what the
+ * charge's running total grew by instead.
+ *
+ * @example
+ * listedRefunds(charge); // { refunds: [{ providerRefundId: 're_1', amount: 400, status: 'succeeded' }] }
+ */
+export function listedRefunds(charge: Stripe.Charge): { refunds?: ProviderRefund[] } {
+  const listed = charge.refunds?.data;
+  if (!Array.isArray(listed) || listed.length === 0) return {};
+  return {
+    refunds: listed
+      .filter((refund) => typeof refund.id === 'string' && refund.id !== '')
+      .map((refund) => {
+        const status = STRIPE_REFUND_STATUS[refund.status ?? 'succeeded'];
+        return {
+          providerRefundId: refund.id,
+          amount: stripeWebhookAmount(refund.currency ?? charge.currency, refund.amount),
+          ...(status !== undefined && { status }),
+        };
+      }),
+  };
 }

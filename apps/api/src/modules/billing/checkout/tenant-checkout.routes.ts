@@ -37,9 +37,9 @@ const RERUN_AFTER_MS = 10_000;
 
 const SESSION_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or TENANT_SESSION_INVALID — ' +
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or TENANT_SESSION_INVALID: ' +
     'the token is invalid, expired, or the operator account no longer exists.',
-  404: 'APPLICATION_NOT_FOUND — no application with that id in this workspace.',
+  404: 'APPLICATION_NOT_FOUND: no application with that id in this workspace.',
 } as const;
 
 async function freshReadiness(applicationId: string, cached: boolean): Promise<CheckoutReadiness> {
@@ -172,10 +172,10 @@ export async function tenantCheckoutRoutes(app: FastifyInstance): Promise<void> 
         response: {
           200: ok(ref('CheckoutSettings'), 'The settings after the change.'),
           ...errs({
-            400: 'VALIDATION_ERROR — an unknown key, or `checkoutMode` without `paymentMode`.',
+            400: 'VALIDATION_ERROR: an unknown key, or `checkoutMode` without `paymentMode`.',
             ...SESSION_ERRORS,
             403: 'TENANT_MEMBERSHIP_REVOKED, TENANT_ROLE_INSUFFICIENT or APP_ACCESS_DENIED.',
-            409: 'CHECKOUT_READINESS_FAILED — a readiness check FAILs for that mode. `details.checks` lists every check.',
+            409: 'CHECKOUT_READINESS_FAILED: a readiness check FAILs for that mode. `details.checks` lists every check.',
           }),
         },
       },

@@ -189,7 +189,7 @@ describe('Portal V2 API', () => {
         method: 'POST',
         url: `/api/v1/admin/applications/${applicationId}/plans`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { slug: 'team', name: 'Team', amount: 4900 },
+        payload: { slug: 'team', name: 'Team', price: { currency: 'USD', amount: 4900 } },
       })
       .then((r) => (r.json().data as { id: string }).id);
     await prisma.subscription.create({

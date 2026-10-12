@@ -430,7 +430,7 @@ const runningAttempts = new Set<Promise<void>>();
 const defaultScheduler: DeliveryScheduler = (deliveryId, delayMs) => {
   if (env.NODE_ENV !== 'test') {
     throw new Error(
-      '[webhooks] no delivery scheduler installed — the BullMQ worker is required ' +
+      '[webhooks] no delivery scheduler installed. The BullMQ worker is required ' +
         'but not running (Redis unreachable at boot?). Refusing to schedule via an ' +
         'in-process timer, which would not survive a crash or distribute across replicas.',
     );

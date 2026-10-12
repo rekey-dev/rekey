@@ -19,10 +19,17 @@ import {
   clearMfaChallenge,
 } from './session';
 import { getPortalConfig } from './config';
-import { checkoutRefusalCode, resolveCheckoutProvider } from './provider-capabilities';
+import {
+  PRESELECTED_PROVIDER_FIELD,
+  checkoutRefusalCode,
+  chosenProvider,
+  resolveCheckoutProvider,
+} from './provider-capabilities';
 import { portalBaseUrl, rekeyApiUrl } from './env';
 import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
 import { isMfaRestartCode, retryQuery } from './auth-error-copy';
+import { planReviewPath } from './billing-subject';
+import { couponCodeOf, isCouponRefusal } from './coupon-quote';
 
 export async function signInAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
@@ -190,9 +197,15 @@ export async function checkoutAction(
   formData: FormData,
 ): Promise<void> {
   const planSlug = String(formData.get('planSlug') ?? '');
-  // The picker (when shown) posts the user's chosen provider; absent, the
-  // server-side geo router picks.
-  const rawProvider = String(formData.get('provider') ?? '').trim();
+  // Present only when the review page had the API price this code.
+  const couponField = formData.get('couponCode');
+  const couponCode = couponCodeOf(typeof couponField === 'string' ? couponField : null);
+  // The picker (when shown) posts the checked provider. Left on the one it
+  // preselected, that is no choice and the API routes the checkout.
+  const rawProvider = chosenProvider(
+    String(formData.get('provider') ?? '').trim(),
+    String(formData.get(PRESELECTED_PROVIDER_FIELD) ?? '').trim(),
+  );
   const client = await portalClientFor(slug);
   const access = await getAccessToken();
   const config = await getPortalConfig(slug);
@@ -203,16 +216,28 @@ export async function checkoutAction(
   // answers with the same codes.
   let provider: string | undefined;
   if (rawProvider !== '') {
-    const offered = await client.listBillingProviders().then(
-      (r) => r.providers,
-      () => null,
-    );
+    const [offered, forPlan] = await Promise.all([
+      client.listBillingProviders().then(
+        (r) => r.providers,
+        () => null,
+      ),
+      client.listBillingProviders({ planSlug }).then(
+        (r) => r.providers,
+        () => null,
+      ),
+    ]);
     if (offered === null) {
       provider = rawProvider;
     } else {
       const choice = resolveCheckoutProvider(rawProvider, offered);
       if (choice.kind === 'refused') redirect(`/${slug}?error=${encodeURIComponent(choice.code)}`);
       if (choice.kind === 'provider') provider = choice.provider;
+    }
+    // A pick that cannot charge this plan at any of its prices is left off, so
+    // the API routes the checkout instead of refusing it. The page does not offer such
+    // a pick; a page rendered before the operator changed a provider can.
+    if (provider !== undefined && forPlan !== null && !forPlan.some((p) => p.provider === provider)) {
+      provider = undefined;
     }
   }
   let url: string;
@@ -223,10 +248,17 @@ export async function checkoutAction(
       cancelUrl: `${portalBaseUrl()}/${slug}?checkout=canceled`,
       ...(provider && { provider }),
       ...(organizationId && { organizationId }),
+      ...(couponCode !== null && { couponCode }),
     });
     url = result.url;
   } catch (err) {
     if (err instanceof RekeyError) {
+      // Checkout judges a code again, and it is the decision. A code it
+      // refuses goes back to the plan's page, which says why and leaves the
+      // buyer free to continue at full price. Nothing was opened or charged.
+      if (couponCode !== null && isCouponRefusal(err.code)) {
+        redirect(`${planReviewPath(slug, planSlug)}?coupon=${encodeURIComponent(couponCode)}&refused=1`);
+      }
       redirect(`/${slug}?error=${encodeURIComponent(checkoutRefusalCode(err.code, rawProvider !== ''))}`);
     }
     throw err;

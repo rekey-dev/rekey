@@ -66,7 +66,7 @@ describe('billing scaffold', () => {
 
   async function createPlan(
     appId: string,
-    body: { slug: string; name: string; amount: number; interval?: 'MONTH' | 'YEAR' },
+    body: { slug: string; name: string; price?: { currency: string; amount: number }; interval?: 'MONTH' | 'YEAR' },
   ): Promise<Record<string, unknown>> {
     const res = await app.inject({
       method: 'POST',
@@ -88,11 +88,10 @@ describe('billing scaffold', () => {
     const plan = await createPlan(applicationId, {
       slug: 'pro_monthly',
       name: 'Pro',
-      amount: 999,
+      price: { currency: 'USD', amount: 999 },
     });
     expect(plan.slug).toBe('pro_monthly');
-    expect(plan.amount).toBe(999);
-    expect(plan.currency).toBe('USD');
+    expect(plan.price).toMatchObject({ amount: 999, currency: 'USD' });
     expect(plan.interval).toBe('MONTH');
     expect(plan.active).toBe(true);
     // Provider registration roundtrips back into metadata.
@@ -106,17 +105,17 @@ describe('billing scaffold', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'NOT VALID', name: 'X', amount: 0 },
+      payload: { slug: 'NOT VALID', name: 'X', },
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe('PLAN_SLUG_INVALID');
 
-    await createPlan(applicationId, { slug: 'dup', name: 'D', amount: 100 });
+    await createPlan(applicationId, { slug: 'dup', name: 'D', price: { currency: 'USD', amount: 100 } });
     const dup = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'dup', name: 'D2', amount: 100 },
+      payload: { slug: 'dup', name: 'D2', price: { currency: 'USD', amount: 100 } },
     });
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('PLAN_SLUG_TAKEN');
@@ -130,7 +129,7 @@ describe('billing scaffold', () => {
     // needs a different slug, so following any of them literally ended in a 409.
     //
     // This test walks the advice instead of reading it.
-    const plan = await createPlan(applicationId, { slug: 'priced', name: 'Priced', amount: 500 });
+    const plan = await createPlan(applicationId, { slug: 'priced', name: 'Priced', price: { currency: 'USD', amount: 500 } });
 
     // Registration is what freezes the price, and it is decided by provider
     // metadata rather than by a live provider call, so this needs no Stripe.
@@ -143,7 +142,7 @@ describe('billing scaffold', () => {
       method: 'PATCH',
       url: `/api/v1/admin/applications/${applicationId}/plans/priced`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { amount: 900 },
+      payload: { price: { currency: 'USD', amount: 900 } },
     });
     expect(repriced.statusCode).toBe(409);
     const immutable = repriced.json().error as { code: string; fix: string };
@@ -167,7 +166,7 @@ describe('billing scaffold', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'priced', name: 'Priced v2', amount: 900 },
+      payload: { slug: 'priced', name: 'Priced v2', price: { currency: 'USD', amount: 900 } },
     });
     expect(sameSlug.statusCode).toBe(409);
     expect(sameSlug.json().error.code).toBe('PLAN_SLUG_TAKEN');
@@ -178,10 +177,10 @@ describe('billing scaffold', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'priced-v2', name: 'Priced v2', amount: 900 },
+      payload: { slug: 'priced-v2', name: 'Priced v2', price: { currency: 'USD', amount: 900 } },
     });
     expect(newSlug.statusCode).toBe(201);
-    expect((newSlug.json().data as { amount: number }).amount).toBe(900);
+    expect((newSlug.json().data as { price: { amount: number } }).price.amount).toBe(900);
   });
 
   it('says an ARCHIVED plan is what holds the slug, instead of "already exists"', async () => {
@@ -191,7 +190,7 @@ describe('billing scaffold', () => {
     // public identifier integrator code passes to checkout, releasing it would
     // let a new plan inherit an old one's meaning. The refusal is right; saying
     // only "already exists" is what made it unactionable.
-    await createPlan(applicationId, { slug: 'retired', name: 'Retired', amount: 500 });
+    await createPlan(applicationId, { slug: 'retired', name: 'Retired', price: { currency: 'USD', amount: 500 } });
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/admin/applications/${applicationId}/plans/retired`,
@@ -203,7 +202,7 @@ describe('billing scaffold', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'retired', name: 'Retired v2', amount: 900 },
+      payload: { slug: 'retired', name: 'Retired v2', price: { currency: 'USD', amount: 900 } },
     });
 
     expect(again.statusCode).toBe(409);
@@ -217,8 +216,8 @@ describe('billing scaffold', () => {
   });
 
   it('lists active plans only by default; includes inactive when asked', async () => {
-    await createPlan(applicationId, { slug: 'a', name: 'A', amount: 100 });
-    await createPlan(applicationId, { slug: 'b', name: 'B', amount: 200 });
+    await createPlan(applicationId, { slug: 'a', name: 'A', price: { currency: 'USD', amount: 100 } });
+    await createPlan(applicationId, { slug: 'b', name: 'B', price: { currency: 'USD', amount: 200 } });
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/admin/applications/${applicationId}/plans/b`,
@@ -250,7 +249,7 @@ describe('billing scaffold', () => {
   // ---------- public /billing/plans ----------
 
   it('public GET /billing/plans returns active plans for the calling Application', async () => {
-    await createPlan(applicationId, { slug: 'lite', name: 'Lite', amount: 500 });
+    await createPlan(applicationId, { slug: 'lite', name: 'Lite', price: { currency: 'USD', amount: 500 } });
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/billing/plans',
@@ -329,7 +328,7 @@ describe('billing scaffold', () => {
   });
 
   it('GET /billing/subscription says what the holding provider can do, on the wire', async () => {
-    const plan = await createPlan(applicationId, { slug: 'caps', name: 'Caps', amount: 500 });
+    const plan = await createPlan(applicationId, { slug: 'caps', name: 'Caps', price: { currency: 'USD', amount: 500 } });
     const accessToken = await signUpUser();
     const user = await prisma.endUser.findFirstOrThrow({ where: { applicationId, email: 'sub@example.com' } });
     const read = async () => {
@@ -364,7 +363,7 @@ describe('billing scaffold', () => {
   });
 
   it('POST /billing/checkout creates a PENDING subscription and returns a provider URL', async () => {
-    await createPlan(applicationId, { slug: 'pro_monthly', name: 'Pro', amount: 999 });
+    await createPlan(applicationId, { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } });
     const accessToken = await signUpUser();
 
     const res = await app.inject({
@@ -410,7 +409,7 @@ describe('billing scaffold', () => {
   });
 
   it('checkout against an inactive plan returns PLAN_INACTIVE', async () => {
-    await createPlan(applicationId, { slug: 'old', name: 'Old', amount: 100 });
+    await createPlan(applicationId, { slug: 'old', name: 'Old', price: { currency: 'USD', amount: 100 } });
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/admin/applications/${applicationId}/plans/old`,
@@ -437,7 +436,7 @@ describe('billing scaffold', () => {
   });
 
   it('repeated checkout for the same plan reuses the PENDING row (no parallel pendings)', async () => {
-    await createPlan(applicationId, { slug: 'pro_monthly', name: 'Pro', amount: 999 });
+    await createPlan(applicationId, { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } });
     const accessToken = await signUpUser();
 
     const first = await app.inject({

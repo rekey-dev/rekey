@@ -287,6 +287,9 @@ export async function grantSubscription(
   const planSlug = String(formData.get('planSlug') ?? '').trim();
   const note = String(formData.get('note') ?? '').trim();
   const periodEnd = String(formData.get('currentPeriodEnd') ?? '').trim();
+  // Empty is the "Plan default" choice: nothing is sent, and the subscription
+  // follows the plan's default price.
+  const currency = String(formData.get('currency') ?? '').trim().toUpperCase();
   const base = `${tabBase(applicationId, euid)}/subscriptions`;
 
   // Re-open the modal on the values the operator chose, so a refusal does not
@@ -297,6 +300,7 @@ export async function grantSubscription(
   const keep = (code: string): string => {
     const q = new URLSearchParams({ grantError: code, grant: '1' });
     if (planSlug) q.set('planSlug', planSlug);
+    if (currency) q.set('currency', currency);
     if (periodEnd) q.set('periodEnd', periodEnd);
     return `${base}?${q.toString()}`;
   };
@@ -315,6 +319,7 @@ export async function grantSubscription(
         // A date input gives YYYY-MM-DD; the API wants an instant. End of that
         // day UTC, so "ends on the 30th" means the 30th is still covered.
         ...(periodEnd ? { currentPeriodEnd: `${periodEnd}T23:59:59.000Z` } : {}),
+        ...(currency ? { currency } : {}),
       },
     });
     activated = result.activated;
@@ -548,6 +553,101 @@ export async function unbanEndUser(applicationId: string, euid: string): Promise
     throw err;
   }
   redirect(`${base}?ban=lifted`);
+}
+
+/**
+ * Support mode lands on its own tab. Nothing is validated here: the API
+ * refuses a bad form with a code the tab turns into a message.
+ */
+function caseTab(applicationId: string, euid: string): string {
+  return `${tabBase(applicationId, euid)}/support-mode`;
+}
+
+function formStrings(formData: FormData, name: string): string[] {
+  return formData
+    .getAll(name)
+    .filter((v): v is string => typeof v === 'string' && v !== '');
+}
+
+export async function openSupportCase(applicationId: string, euid: string, formData: FormData): Promise<void> {
+  const base = caseTab(applicationId, euid);
+  const capabilities = formStrings(formData, 'capabilities');
+  const reason = String(formData.get('reason') ?? '');
+  const devices = formData.get('scope') === 'DEVICES' ? { deviceIds: formStrings(formData, 'deviceIds') } : {};
+  try {
+    await api({
+      method: 'POST',
+      path: `${apiBase(applicationId, euid)}/support`,
+      body: { capabilities, reason, ...devices },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?caseError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  redirect(`${base}?case=opened`);
+}
+
+/**
+ * `scope` is `USER`, `DEVICES`, or absent when the device list could not be
+ * read. Absent leaves the case's devices alone; `USER` sends `deviceIds: null`,
+ * which is how the API is told to widen a case to every device.
+ */
+export async function changeSupportCase(applicationId: string, euid: string, formData: FormData): Promise<void> {
+  const base = caseTab(applicationId, euid);
+  const capabilities = formStrings(formData, 'capabilities');
+  const scope = formData.get('scope');
+  const devices =
+    scope === 'USER' ? { deviceIds: null } : scope === 'DEVICES' ? { deviceIds: formStrings(formData, 'deviceIds') } : {};
+  try {
+    await api({
+      method: 'PATCH',
+      path: `${apiBase(applicationId, euid)}/support`,
+      body: { capabilities, ...devices },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?caseError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  redirect(`${base}?case=changed`);
+}
+
+export async function addSupportCaseNote(applicationId: string, euid: string, formData: FormData): Promise<void> {
+  const base = caseTab(applicationId, euid);
+  try {
+    await api({
+      method: 'POST',
+      path: `${apiBase(applicationId, euid)}/support/notes`,
+      body: { body: String(formData.get('body') ?? '') },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?caseError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  redirect(`${base}?case=noted`);
+}
+
+export async function endSupportCase(applicationId: string, euid: string): Promise<void> {
+  const base = caseTab(applicationId, euid);
+  let result: { case: unknown } | null;
+  try {
+    result = await api<{ case: unknown } | null>({
+      method: 'POST',
+      path: `${apiBase(applicationId, euid)}/support/end`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?caseError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  if (!result?.case) redirect(`${base}?caseError=SUPPORT_CASE_NOT_OPEN`);
+  redirect(`${base}?case=ended`);
 }
 
 /**

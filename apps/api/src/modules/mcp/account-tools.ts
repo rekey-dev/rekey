@@ -18,15 +18,16 @@
  */
 
 import type { Application } from '@prisma/client';
-import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import { BillingConfigSchema, formatMoney } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { billingService } from '../billing/billing.service.js';
-import { billingSubjectOrganization } from '../billing/session-reads.js';
+import { billingSubjectOrganization, toSelfSubscription } from '../billing/session-reads.js';
 import { assertBillingEnabled } from '../../middleware/billing-enabled.js';
 import { creditsService } from '../credits/credits.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import type { GrantOrganization } from './oauth.service.js';
+import { WITH_DEFAULT_PRICE, withDefaultPrice } from '../plans/default-price.js';
 
 export interface ToolContext {
   applicationId: string;
@@ -134,7 +135,12 @@ export const accountTools: AccountTool[] = [
     description:
       'Get the current subscription + plan, or null if none. For the organization this ' +
       'connection acts for when the application bills organizations, otherwise for the ' +
-      'signed-in user personally. `organizationId` says which.',
+      'signed-in user personally. `organizationId` says which. `price` is what this ' +
+      'subscription is charged, `{ id, currency, amount, formatted }`, or null when it records ' +
+      "no price of its own (a free plan, for one). `plan.price` is the plan's default price in " +
+      'the same shape, which a subscriber on a local or negotiated price does not pay, or null ' +
+      'for a plan with no flat price. Every `amount` is an integer in the minor units of its ' +
+      '`currency` (cents for USD, whole yen for JPY); `formatted` is the same amount written out.',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
       const [application, endUser] = await Promise.all([
@@ -152,15 +158,31 @@ export const accountTools: AccountTool[] = [
         organizationId ? { organizationId } : undefined,
       );
       if (!sub) return null;
-      const plan = await prisma.plan.findUnique({
-        where: { id: sub.planId },
-        select: { slug: true, name: true, interval: true, amount: true, currency: true },
-      });
+      const row = await prisma.plan.findUnique({ where: { id: sub.planId }, include: WITH_DEFAULT_PRICE });
+      const priced = row === null ? null : await withDefaultPrice(row);
+      const plan =
+        priced === null
+          ? null
+          : {
+              slug: priced.slug,
+              name: priced.name,
+              interval: priced.interval,
+              price:
+                priced.defaultPrice === null
+                  ? null
+                  : {
+                      id: priced.defaultPrice.id,
+                      currency: priced.defaultPrice.currency.toUpperCase(),
+                      amount: priced.defaultPrice.amount,
+                      formatted: formatMoney(priced.defaultPrice.amount, priced.defaultPrice.currency),
+                    },
+            };
       return {
         status: sub.status,
         provider: sub.provider,
         currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
         cancelAt: sub.cancelAt?.toISOString() ?? null,
+        price: toSelfSubscription(sub).price,
         plan,
         organizationId: organizationId ?? null,
       };

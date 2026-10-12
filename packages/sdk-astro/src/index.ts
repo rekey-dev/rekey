@@ -307,17 +307,81 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
 }
 
 /**
+ * The visitor's country as the hosting platform reports it on a request:
+ * Cloudflare's `cf-ipcountry`, else Vercel's `x-vercel-ip-country`. Undefined
+ * when neither is a two-letter country; Cloudflare sends `XX` for unknown and
+ * `T1` for Tor.
+ *
+ * Kept here, not imported from `@rekey.dev/node`, so this package still loads
+ * beside a node SDK that predates the hint.
+ *
+ * @example
+ * ```ts
+ * visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'in' })); // 'IN'
+ * ```
+ */
+export function visitorCountryHintFrom(h: Headers): string | undefined {
+  for (const name of ['cf-ipcountry', 'x-vercel-ip-country']) {
+    const code = h.get(name)?.trim().toUpperCase();
+    if (code !== undefined && /^[A-Z]{2}$/.test(code) && code !== 'XX') return code;
+  }
+  return undefined;
+}
+
+/**
  * The server client for a call made on the visitor's behalf (sign-in,
  * sign-up, MFA): it forwards the visitor's address as `X-Rekey-Client-Ip`, so
  * the API's per-IP sign-in limits count the visitor rather than this server,
  * and their User-Agent as `X-Rekey-Client-User-Agent`, so the session records
  * their browser and platform rather than this server's runtime.
  *
+ * It also forwards the country your hosting platform reports for the visitor
+ * (`cf-ipcountry`, else `x-vercel-ip-country`) as
+ * `X-Rekey-Visitor-Country-Hint`, so a checkout made through this client is
+ * routed to the payment provider you prefer there. That is a hint, because a
+ * visitor who reaches your origin directly can write the header. It selects a
+ * local price only when the Application's `billingConfig.localPrices` is
+ * `any`. Under the default, pass `country` to `createCheckout` from a source
+ * the buyer cannot write to charge one.
+ *
  * @example
  *   // src/pages/api/sign-in.ts
  *   export const POST: APIRoute = async (context) => {
  *     const result = await visitorClient(context).auth.signIn({ email, password });
  *   };
+ *
+ * @example
+ *   // src/pages/api/checkout.ts
+ *   export const POST: APIRoute = async (context) => {
+ *     const session = await getSession(context.cookies, context.request);
+ *     if (!session) return context.redirect('/sign-in');
+ *     const { url } = await visitorClient(context).billing.createCheckout(session.accessToken, {
+ *       planSlug: 'pro',
+ *       successUrl: new URL('/billing?status=ok', context.url).href,
+ *       cancelUrl: new URL('/billing?status=cancel', context.url).href,
+ *     });
+ *     return context.redirect(url);
+ *   };
+ *
+ * A pricing page reads its plans through the same client, so each plan's
+ * `price` is the one this visitor's checkout would charge. Render
+ * `price.formatted`. When `price.reason` is `fallback`, the price for their
+ * country cannot be charged and the default one is shown: say so.
+ *
+ * @example
+ *   // src/pages/pricing.astro (frontmatter)
+ *   const session = await getSession(Astro.cookies, Astro.request);
+ *   const { items: plans } = await visitorClient(Astro).billing.getPlans(
+ *     undefined,
+ *     session ? { accessToken: session.accessToken } : {},
+ *   );
+ *   // In the template:
+ *   // {plans.map((plan) => <li>{plan.name}: {plan.price?.formatted ?? 'Free'}</li>)}
+ *
+ * A checkout that charges the default price because the selected one could
+ * not be charged says so in `priceFallback`. Tell the buyer before you
+ * redirect them: `priceFallbackMessage` from `@rekey.dev/node` writes the
+ * sentence ("Prices in INR are not available yet. You will pay $19.00.").
  */
 export function visitorClient(
   context: { request: Request; clientAddress?: string | undefined },
@@ -332,9 +396,11 @@ export function visitorClient(
     clientIp = undefined;
   }
   const clientUserAgent = context.request.headers.get('user-agent') ?? undefined;
+  const countryHint = visitorCountryHintFrom(context.request.headers);
   return rekey(config).with({
     ...(clientIp ? { clientIp } : {}),
     ...(clientUserAgent ? { clientUserAgent } : {}),
+    ...(countryHint ? { visitorCountryHint: countryHint } : {}),
   });
 }
 

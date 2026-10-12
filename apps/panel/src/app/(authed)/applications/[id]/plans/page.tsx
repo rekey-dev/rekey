@@ -1,253 +1,25 @@
 import * as React from 'react';
 import Link from '@/components/Link';
-import { redirect } from 'next/navigation';
 import { errorMessage } from '@/lib/error-message';
-import { errorQuery, api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication, unlessBusy } from '@/lib/api';
+import { api, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication, readErrorFlash, unlessBusy } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
-import { formatMoney } from '@/lib/format';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
-import { ConfirmButton } from '@/components/ConfirmButton';
 import { Modal } from '@/components/Modal';
 import { PlanCreateForm } from '@/components/PlanCreateForm';
-import { PlanEditForm } from '@/components/PlanEditForm';
 import { SectionHeader } from '@/components/Card';
-import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
-import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
-import { EntitlementForm } from './EntitlementForm';
-import { ActionForm } from '@/components/ActionForm';
-import { SubmitButton } from '@/components/SubmitButton';
+import { createPlan } from './plan-actions';
+import type { PlanPriceFlash } from './PlanPricesSection';
+import { PlansTable } from './PlansTable';
+import { CurrencyCatalog } from '@/components/CurrencyCatalog';
+import { currencyChoice, toChargingProviders, unchargeableReason } from '@/lib/price-currencies';
+import { getBillingProviders, providerLabel } from '../billing/shared';
+import { registerCanHelp, repairText } from '@/lib/plan-blockers';
 import { Banner } from '@/components/Banner';
 
-async function createPlan(applicationId: string, formData: FormData): Promise<void> {
-  'use server';
-  const slug = String(formData.get('slug') ?? '').trim();
-  const name = String(formData.get('name') ?? '').trim();
-  const amount = Number(formData.get('amount') ?? 0);
-  const currency = String(formData.get('currency') ?? 'USD').toUpperCase();
-  const interval = String(formData.get('interval') ?? 'MONTH');
-  const kind = String(formData.get('kind') ?? 'SUBSCRIPTION') as 'SUBSCRIPTION' | 'LICENSE' | 'USAGE' | 'CREDIT';
-  const licenseKind = String(formData.get('licenseKind') ?? '');
-  const licenseDurationDays = Number(formData.get('licenseDurationDays') ?? 0);
-  const licenseSeatsAllowed = Number(formData.get('licenseSeatsAllowed') ?? 0);
-  const meterSlug = String(formData.get('meterSlug') ?? '').trim();
-  const pricePerUnitCents = Number(formData.get('pricePerUnitCents') ?? 0);
-  const creditsAmount = Number(formData.get('creditsAmount') ?? 0);
-
-  if (!slug || !name || !Number.isInteger(amount) || amount < 0) {
-    redirect(`/applications/${applicationId}/plans?error=missing&newPlan=1`);
-  }
-  const body: Record<string, unknown> = { slug, name, amount, currency, interval, kind };
-  if (kind === 'LICENSE') {
-    if (licenseKind) body.licenseKind = licenseKind;
-    if (licenseKind === 'TIMED' && licenseDurationDays > 0) body.licenseDurationDays = licenseDurationDays;
-    if (licenseKind === 'SEATS' && licenseSeatsAllowed > 0) body.licenseSeatsAllowed = licenseSeatsAllowed;
-  }
-  if (kind === 'USAGE') {
-    if (meterSlug) body.meterSlug = meterSlug;
-    if (Number.isInteger(pricePerUnitCents) && pricePerUnitCents >= 0) body.pricePerUnitCents = pricePerUnitCents;
-  }
-  if (kind === 'CREDIT') {
-    if (Number.isInteger(creditsAmount) && creditsAmount > 0) body.creditsAmount = creditsAmount;
-  }
-
-  try {
-    await api({
-      method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans`,
-      body,
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/plans?${await errorQuery(err, { newPlan: '1' })}`);
-    }
-    throw err;
-  }
-
-  // Apply bundle add-ons (one PUT per entitlement). The plan already exists, so
-  // a per-entitlement failure surfaces an error but keeps the `created` flag,
-  // the operator sees the plan and can fix the bundle in the Entitlements modal.
-  const entitlementsRaw = String(formData.get('entitlements') ?? '[]');
-  let entitlements: Array<Record<string, unknown>> = [];
-  try {
-    const parsed: unknown = JSON.parse(entitlementsRaw);
-    if (Array.isArray(parsed)) entitlements = parsed as Array<Record<string, unknown>>;
-  } catch {
-    // Ignore a malformed payload, the plan is still created without add-ons.
-  }
-  for (const ent of entitlements) {
-    try {
-      await api({
-        method: 'PUT',
-        path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/entitlements`,
-        body: ent,
-      });
-    } catch (err) {
-      if (err instanceof PanelApiError) {
-        redirect(`/applications/${applicationId}/plans?created=${slug}&entError=${encodeURIComponent(err.code)}`);
-      }
-      throw err;
-    }
-  }
-  redirect(`/applications/${applicationId}/plans?created=${slug}&e=plan_created`);
-}
-
-async function registerPlan(applicationId: string, slug: string): Promise<void> {
-  'use server';
-  try {
-    await api({
-      method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/register`,
-    });
-  } catch (err) {
-    // Registration reaches Stripe, so it fails for reasons the operator can do
-    // something about: no credentials configured, credentials the provider
-    // rejected, a provider that is simply down. This was the one action in the
-    // file with no catch, which turned every one of those into the whole-page
-    // error boundary and a Try again button that could not succeed. The state
-    // this button exists for is exactly the state most likely to produce them.
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/plans?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  // `redirect`, not `revalidatePath`, matching every other action in this
-  // file. A same-action revalidatePath kills Next's seeded prefetch here and
-  // the page renders blank for a full RSC round-trip.
-  redirect(`/applications/${applicationId}/plans`);
-}
-
-/**
- * Edit an existing plan's name, and its price while no provider price exists.
- *
- * The API refuses `amount`/`currency`/`interval` on a registered plan with
- * `PLAN_PRICE_IMMUTABLE`, so the form hides those inputs there rather than
- * offering an edit that cannot succeed. Only the fields actually submitted are
- * sent, so a name-only edit never touches the price.
- */
-async function editPlan(applicationId: string, slug: string, formData: FormData): Promise<void> {
-  'use server';
-  const name = String(formData.get('name') ?? '').trim();
-  if (!name) {
-    redirect(`/applications/${applicationId}/plans?editError=missing&editSlug=${encodeURIComponent(slug)}`);
-  }
-
-  const amountRaw = formData.get('amount');
-  const currencyRaw = String(formData.get('currency') ?? '').trim();
-  const intervalRaw = String(formData.get('interval') ?? '').trim();
-  const body: Record<string, unknown> = { name };
-  if (amountRaw !== null && String(amountRaw) !== '') body.amount = Number(amountRaw);
-  if (currencyRaw) body.currency = currencyRaw.toUpperCase();
-  if (intervalRaw) body.interval = intervalRaw;
-
-  try {
-    await api({
-      method: 'PATCH',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}`,
-      body,
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(
-        `/applications/${applicationId}/plans?${await errorQuery(err, {
-          editError: err.code,
-          editSlug: slug,
-        })}`,
-      );
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/plans`);
-}
-
-async function setPlanActive(applicationId: string, slug: string, active: boolean): Promise<void> {
-  'use server';
-  await api({
-    method: 'PATCH',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}`,
-    body: { active },
-  });
-  redirect(`/applications/${applicationId}/plans`);
-}
-
-async function addEntitlement(applicationId: string, slug: string, formData: FormData): Promise<void> {
-  'use server';
-  const kind = String(formData.get('kind') ?? '');
-  const key = String(formData.get('key') ?? '').trim();
-  const valueType = String(formData.get('valueType') ?? '').trim();
-  const value = String(formData.get('value') ?? '').trim();
-  const quantity = Number(formData.get('quantity') ?? 0);
-  const licenseKind = String(formData.get('licenseKind') ?? '').trim();
-
-  const body: Record<string, unknown> = { kind };
-  if (kind === 'FEATURE') {
-    if (key) body.key = key;
-    if (valueType) body.valueType = valueType;
-    if (value) body.value = value;
-  } else if (kind === 'CREDIT') {
-    body.quantity = quantity;
-  } else if (kind === 'LICENSE') {
-    if (licenseKind) body.licenseKind = licenseKind;
-    if (quantity > 0) body.quantity = quantity;
-  } else if (kind === 'USAGE') {
-    if (key) body.key = key;
-    body.quantity = quantity;
-    // Empty means "hard cap", which is not the same as zero, zero is a real
-    // price meaning "charge nothing per unit". Read the raw field so the two
-    // stay distinguishable.
-    const rawRate = String(formData.get('creditsPerUnit') ?? '').trim();
-    if (rawRate !== '') body.creditsPerUnit = Number(rawRate);
-  }
-
-  try {
-    await api({
-      method: 'PUT',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/entitlements`,
-      body,
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/plans?entError=${encodeURIComponent(err.code)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/plans?entSaved=${encodeURIComponent(slug)}`);
-}
-
-async function removeEntitlement(applicationId: string, slug: string, entId: string): Promise<void> {
-  'use server';
-  await api({
-    method: 'DELETE',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/entitlements/${encodeURIComponent(entId)}`,
-  });
-  redirect(`/applications/${applicationId}/plans`);
-}
-
-/** Compact human label for an entitlement chip. */
-function entitlementLabel(e: PlanEntitlementRow): string {
-  switch (e.kind) {
-    case 'FEATURE':
-      return `${e.key}=${e.value}`;
-    case 'CREDIT':
-      return `${e.quantity} credits`;
-    case 'LICENSE':
-      return e.licenseKind === 'SEATS' ? `${e.quantity ?? 0} seats` : `license (${e.licenseKind?.toLowerCase()})`;
-    case 'USAGE':
-      // Deliberately does NOT claim "hard cap" when the entitlement carries no
-      // price: the meter itself may price the overage as a fallback, and this
-      // view cannot see the meter. Saying "hard cap" over a meter that is
-      // charging is the worse of the two wrong answers, so say less.
-      return e.creditsPerUnit == null
-        ? `${e.key} ≤ ${e.quantity}`
-        : `${e.key}: ${e.quantity} included, then ${e.creditsPerUnit}cr/unit`;
-    default:
-      return e.kind;
-  }
-}
-
 const ERR: Record<string, string> = {
-  missing: 'All fields required + amount must be a non-negative integer (cents).',
+  missing: 'Every field is required, and the amount is typed as the currency is written (19.99), with no more decimals than the currency has.',
   PLAN_SLUG_INVALID: 'Slug must be lowercase letters/digits/-/_.',
   PLAN_SLUG_TAKEN: 'A plan with that slug already exists.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage plans.',
@@ -277,6 +49,17 @@ export default async function PlansPage({
   const entSaved = typeof sp.entSaved === 'string' ? sp.entSaved : undefined;
   const editError = typeof sp.editError === 'string' ? sp.editError : undefined;
   const editSlug = typeof sp.editSlug === 'string' ? sp.editSlug : undefined;
+  const priceError = typeof sp.priceError === 'string' ? sp.priceError : undefined;
+  const priceErrorFlash = await readErrorFlash(priceError);
+  const priceFlash: PlanPriceFlash = {
+    error: priceError,
+    errorDetail: priceErrorFlash.detail,
+    errorFix: priceErrorFlash.fix,
+    saved: typeof sp.priceSaved === 'string' ? sp.priceSaved : undefined,
+    added: typeof sp.priceAdded === 'string' ? sp.priceAdded : undefined,
+    removed: typeof sp.priceRemoved === 'string' ? sp.priceRemoved : undefined,
+    localPrices: typeof sp.localPricesSaved === 'string' ? sp.localPricesSaved : undefined,
+  };
 
   // Billing master switch off → point at the switch instead of an empty table
   // (same guard the Revenue page renders; the tab group is hidden but the URL
@@ -294,7 +77,7 @@ export default async function PlansPage({
     );
   }
 
-  const [planPage, meterPage] = await Promise.all([
+  const [planPage, meterPage, providers] = await Promise.all([
     api<Page<PlanRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans`,
@@ -303,7 +86,11 @@ export default async function PlansPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/usage-meters`,
     }).catch(unlessBusy(() => emptyPage<UsageMeterRow>())),
+    // The currency fields say which currencies no provider can charge. With
+    // the provider list unreadable they still work, and say nothing about that.
+    getBillingProviders(id).catch(unlessBusy(() => [])),
   ]);
+  const reportingCurrency = app.billingConfig.reportingCurrency;
   const plans = planPage.items;
   const meters = meterPage.items;
   // Per-plan entitlement bundles (one round-trip each; plan counts are small).
@@ -337,15 +124,17 @@ export default async function PlansPage({
       p.registrationStatus !== 'FAILED',
   );
   // The subset the per-row Register button is actually offered for. That button
-  // is withheld when the only blocker is NO_BILLING_PROVIDER, since with nothing
-  // configured the call can only come back 400. The banner's remedy text has to
-  // follow the same rule or it names a control that is not on screen, which is
-  // exactly the state the banner exists to explain.
-  const registerable = unbuyable.filter(
-    (p) => !(p.checkout?.blockers ?? []).some((b) => b.code === 'NO_BILLING_PROVIDER'),
+  // is withheld when registering cannot clear what blocks the plan: nothing is
+  // configured, or no provider can charge its currency. The banner's remedy
+  // text has to follow the same rule or it names a control that is not on
+  // screen, which is exactly the state the banner exists to explain.
+  const registerable = unbuyable.filter((p) => registerCanHelp(p.checkout?.blockers ?? []));
+  const noProvider = unbuyable.some((p) =>
+    (p.checkout?.blockers ?? []).some((b) => b.code === 'NO_BILLING_PROVIDER'),
   );
 
   return (
+    <CurrencyCatalog providers={toChargingProviders(providers)} first={reportingCurrency}>
     <div className="space-y-5">
       <BillingModeBanner applicationId={id} />
       {created && (
@@ -376,22 +165,26 @@ export default async function PlansPage({
             {unbuyable.map((p) => (
               <li key={p.id} className="text-xs">
                 <code className="font-mono">{p.slug}</code>
-                {p.checkout?.blockers.map((b) => (
-                  <span key={`${p.id}-${b.provider ?? 'none'}-${b.code}`}>
-                    {': '}
+                {(p.checkout?.blockers ?? []).map((b) => (
+                  <span key={`${p.id}-${b.provider ?? 'none'}-${b.code}`} className="block">
+                    {b.provider !== null && `${providerLabel(providers, b.provider)}: `}
                     {b.message}
+                    {/* No provider connected gets the paragraph below, once. */}
+                    {b.code !== 'NO_BILLING_PROVIDER' && <span className="block opacity-90">To repair: {repairText(b, id)}</span>}
                   </span>
                 ))}
               </li>
             ))}
           </ul>
-          {registerable.length > 0 ? (
+          {registerable.length > 0 && (
             <p className="mt-2 text-xs">
               Plans register with the payment provider when they are created, so a plan created
               before you connected one was never registered and connecting it afterwards does not
-              repair them. Use <strong>Register</strong> on each row, or recreate them.
+              repair them. Use <strong>Register</strong> on each row that offers it, or recreate
+              them.
             </p>
-          ) : (
+          )}
+          {noProvider && (
             <p className="mt-2 text-xs">
               Connect a billing provider in{' '}
               <Link href={`/applications/${id}/billing/providers`} className="underline">
@@ -414,7 +207,11 @@ export default async function PlansPage({
             <strong>Subscription</strong> (recurring access),{' '}
             <strong>License</strong> (one purchase auto-issues a software license key),{' '}
             <strong>Usage</strong> (metered, pay per unit consumed). Archive blocks new sign-ups;
-            existing subscribers stay.
+            existing subscribers stay. To see which price and provider a buyer in one country gets, use the{' '}
+            <Link href={`/applications/${id}/billing/preview`} className="underline hover:text-[var(--color-fg)]">
+              routing preview
+            </Link>
+            .
           </>
         }
         action={
@@ -425,7 +222,7 @@ export default async function PlansPage({
             description="Pick the kind first, and the form adapts to show only the fields that kind needs. Slug + name + amount are required for every kind."
             trigger="+ New plan"
           >
-            <PlanCreateForm action={action} meters={meterOptions} error={error} />
+            <PlanCreateForm action={action} meters={meterOptions} defaultCurrency={reportingCurrency} error={error} />
           </Modal>
         }
       />
@@ -448,238 +245,15 @@ export default async function PlansPage({
           entBySlug={entBySlug}
           editError={editError}
           editSlug={editSlug}
+          priceFlash={priceFlash}
+          reportingCurrency={reportingCurrency}
+          providerLabel={(name) => providerLabel(providers, name)}
+          // With the provider list unreadable there is nothing to judge by, so nothing is claimed.
+          unchargeable={(currency) => (providers.length === 0 ? null : unchargeableReason(currencyChoice(currency, providers)))}
         />
       )}
     </div>
+    </CurrencyCatalog>
   );
 }
 
-function PlansTable({
-  rows,
-  applicationId,
-  entBySlug,
-  editError,
-  editSlug,
-}: {
-  rows: PlanRow[];
-  applicationId: string;
-  entBySlug: Record<string, PlanEntitlementRow[]>;
-  /** Failure from the last Edit submit, rendered inside that plan's modal. */
-  editError?: string | undefined;
-  editSlug?: string | undefined;
-}): React.JSX.Element {
-  return (
-    <Table minWidth="min-w-[60rem]">
-      <THead>
-        <TR>
-          <TH>Slug</TH>
-          <TH>Name</TH>
-          <TH>Kind</TH>
-          <TH>Entitlements</TH>
-          <TH align="right">Price</TH>
-          <TH>Interval</TH>
-          <TH>Status</TH>
-          <TH align="right"> </TH>
-        </TR>
-      </THead>
-      <TBody>
-        {rows.map((p) => {
-          const ents = entBySlug[p.slug] ?? [];
-          return (
-            <TR key={p.id} hover>
-              <TD>
-                <Badge tone="neutral" mono>{p.slug}</Badge>
-              </TD>
-              <TD className="font-medium">{p.name}</TD>
-              <TD className="text-xs">
-                <Badge tone="brand" mono>{(p.kind ?? 'SUBSCRIPTION').toLowerCase()}</Badge>
-                {p.kind === 'LICENSE' && p.licenseKind && (
-                  <span className="ml-1.5 text-[var(--color-muted-fg)]">· {p.licenseKind.toLowerCase()}</span>
-                )}
-                {p.kind === 'USAGE' && p.meterSlug && (
-                  <span className="ml-1.5 font-mono text-[var(--color-muted-fg)]">
-                    · {p.meterSlug} @ {p.pricePerUnitCents}¢/unit
-                  </span>
-                )}
-                {p.kind === 'CREDIT' && p.creditsAmount && (
-                  <span className="ml-1.5 font-mono text-[var(--color-muted-fg)]">
-                    · {p.creditsAmount} credits
-                  </span>
-                )}
-              </TD>
-              <TD>
-                <div className="flex max-w-[16rem] flex-wrap items-center gap-1">
-                  {ents.slice(0, 4).map((e) => (
-                    <Badge key={e.id} tone="neutral">{entitlementLabel(e)}</Badge>
-                  ))}
-                  {ents.length > 4 && (
-                    <span className="text-[11px] text-[var(--color-faint-fg)]">+{ents.length - 4}</span>
-                  )}
-                  {ents.length === 0 && (
-                    <span className="text-[11px] text-[var(--color-faint-fg)]">—</span>
-                  )}
-                </div>
-              </TD>
-              <TD align="right" mono>{formatMoney(p.amount, p.currency)}</TD>
-              <TD muted className="text-xs">
-                {p.kind === 'CREDIT' || (p.kind === 'LICENSE' && p.licenseKind !== 'TIMED') ? 'one-time' : p.interval}
-              </TD>
-              <TD>
-                {p.registrationStatus === 'FAILED' ? (
-                  // The provider's own reason is the only actionable thing
-                  // here ("Invalid API Key provided: sk_test_…"), and it was
-                  // reachable only by hovering, invisible on touch and to
-                  // keyboard users. Show it inline; keep the title for the
-                  // full text when it is truncated.
-                  <span
-                    className="inline-flex flex-col items-start gap-0.5"
-                    title={p.registrationError ?? undefined}
-                  >
-                    <Badge tone="danger" dot>not registered</Badge>
-                    {p.registrationError && (
-                      <span className="block max-w-[9rem] truncate text-[10px] text-[var(--color-muted-fg)]">
-                        {p.registrationError}
-                      </span>
-                    )}
-                  </span>
-                ) : p.registrationStatus === 'PENDING' ? (
-                  <Badge tone="neutral" dot>registering…</Badge>
-                ) : p.checkout?.ready === false ? (
-                  // `active` and buyable are different facts, and this is the
-                  // row where they disagree. Showing "active" here would be
-                  // technically true and the most misleading thing on the page.
-                  <span
-                    className="inline-flex flex-col items-start gap-0.5"
-                    title={p.checkout.blockers.map((b) => b.message).join(' ')}
-                  >
-                    <Badge tone="danger" dot>cannot be bought</Badge>
-                    <span className="block max-w-[9rem] truncate text-[10px] text-[var(--color-muted-fg)]">
-                      {p.checkout.blockers[0]?.message ?? 'No provider will accept this plan.'}
-                    </span>
-                  </span>
-                ) : p.active ? (
-                  <Badge tone="success" dot>active</Badge>
-                ) : (
-                  <Badge tone="neutral" dot>archived</Badge>
-                )}
-              </TD>
-              <TD align="right">
-                <div className="flex items-center justify-end gap-3">
-                  <Modal
-                    modalKey={`edit_${p.slug}`}
-                    size="md"
-                    title={`Edit plan: ${p.slug}`}
-                    description="Rename the plan, and correct its price while no provider price exists yet. The slug is permanent because your integration passes it to checkout."
-                    trigger="Edit"
-                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-                  >
-                    <PlanEditForm
-                      plan={{
-                        slug: p.slug,
-                        name: p.name,
-                        amount: p.amount,
-                        currency: p.currency,
-                        interval: p.interval,
-                        // A provider price is immutable once minted, so the
-                        // price inputs only render while none exists. FAILED
-                        // and PENDING are exactly the repair cases: the plan is
-                        // un-purchasable and nothing has been minted yet.
-                        priceEditable: p.registrationStatus !== 'REGISTERED',
-                      }}
-                      action={editPlan.bind(null, applicationId, p.slug)}
-                      error={editSlug === p.slug ? editError : undefined}
-                    />
-                  </Modal>
-                  <Modal
-                    modalKey={`ent_${p.slug}`}
-                    size="lg"
-                    title={`Entitlements: ${p.slug}`}
-                    description="The benefit bundle this plan grants on purchase (licenses, credits, feature flags, usage allowance). Materialized onto the buyer when the subscription activates."
-                    trigger="Entitlements"
-                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-                  >
-                    <div className="space-y-4">
-                      {ents.length > 0 ? (
-                        <ul className="divide-y divide-[var(--color-border)] rounded-md border border-[var(--color-border)]">
-                          {ents.map((e) => (
-                            <li key={e.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                              <span className="text-[var(--color-fg)]">
-                                <Badge tone="neutral" mono className="mr-1.5">{e.kind}</Badge>
-                                {entitlementLabel(e)}
-                              </span>
-                              <ActionForm action={removeEntitlement.bind(null, applicationId, p.slug, e.id)}>
-                                <ConfirmButton confirm={`Remove "${entitlementLabel(e)}" from ${p.slug}? Future purchases stop granting it; already-materialized grants on existing buyers are unaffected.`}>
-                                  Remove
-                                </ConfirmButton>
-                              </ActionForm>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="text-sm text-[var(--color-muted-fg)]">
-                          No entitlements yet. A plan with none falls back to its legacy kind on purchase.
-                        </p>
-                      )}
-                      <EntitlementForm action={addEntitlement.bind(null, applicationId, p.slug)} />
-                    </div>
-                  </Modal>
-                  {p.checkout?.ready === false &&
-                    // NO_BILLING_PROVIDER is not a plan problem and Register
-                    // cannot fix it: with nothing configured the call can only
-                    // come back 400. Offering it here put a button on every
-                    // active plan whose sole outcome was an error, in the very
-                    // state this feature was written to explain.
-                    !p.checkout.blockers.some((b) => b.code === 'NO_BILLING_PROVIDER') &&
-                    p.registrationStatus !== 'FAILED' &&
-                    p.registrationStatus !== 'PENDING' && (
-                      // Offered alongside Archive rather than instead of it:
-                      // this plan is live and the operator may reasonably want
-                      // either to fix it or to pull it down.
-                      <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
-                        <SubmitButton
-                          pendingLabel="Registering…"
-                          className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
-                        >
-                          Register
-                        </SubmitButton>
-                      </ActionForm>
-                    )}
-                  {p.registrationStatus === 'FAILED' || p.registrationStatus === 'PENDING' ? (
-                    // Activating an unregistered plan is refused by the API,
-                    // nothing can be sold against it until the provider accepts
-                    // it. Offering "Reactivate" here would be a button whose
-                    // only outcome is an error, so this offers the repair the
-                    // API actually wants instead.
-                    <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
-                      <SubmitButton
-                        pendingLabel="Registering…"
-                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
-                      >
-                        Retry registration
-                      </SubmitButton>
-                    </ActionForm>
-                  ) : (
-                  <ActionForm action={setPlanActive.bind(null, applicationId, p.slug, !p.active)} className="inline">
-                    {p.active ? (
-                      <ConfirmButton confirm={`Archive plan "${p.slug}"? End-users on this plan stay subscribed; new sign-ups are blocked.`}>
-                        Archive
-                      </ConfirmButton>
-                    ) : (
-                      <SubmitButton
-                        pendingLabel="Reactivating…"
-                        className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
-                      >
-                        Reactivate
-                      </SubmitButton>
-                    )}
-                  </ActionForm>
-                  )}
-                </div>
-              </TD>
-            </TR>
-          );
-        })}
-      </TBody>
-    </Table>
-  );
-}

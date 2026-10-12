@@ -268,7 +268,7 @@ export const oauthService = {
           statusCode: 401,
           code: 'OAUTH_EMAIL_NOT_VERIFIED',
           message:
-            `${args.providerName} did not verify the email — auto-linking to your existing account is refused.`,
+            `${args.providerName} did not verify the email, so auto-linking to your existing account is refused.`,
           fix: 'Sign in with your existing credentials, then explicitly link this OAuth provider from your account settings.',
         });
       }
@@ -288,7 +288,7 @@ export const oauthService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'OAUTH_NO_EMAIL',
-        message: `${args.providerName} did not return an email — cannot create a new user.`,
+        message: `${args.providerName} did not return an email, so Rekey cannot create a new user.`,
         fix: 'Either link this provider to an existing account first, or grant the email scope to this OAuth client.',
       });
     }
@@ -421,7 +421,7 @@ export const oauthService = {
       throw new RekeyError({
         statusCode: 401,
         code: 'OAUTH_EMAIL_NOT_VERIFIED',
-        message: `${args.providerName} did not verify the email — refusing to link to your account.`,
+        message: `${args.providerName} did not verify the email, so it cannot be linked to your account.`,
         fix: 'Verify the email at the provider, then retry. Some providers (Microsoft consumer accounts, generic OIDC) may not assert email_verified by default.',
       });
     }

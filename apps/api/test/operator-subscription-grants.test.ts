@@ -84,7 +84,7 @@ describe('operator subscription grants', () => {
       payload: {
         slug: planSlug,
         name: 'Pro',
-        amount: 2900,
+        price: { currency: 'USD', amount: 2900 },
         kind: 'SUBSCRIPTION',
         interval: 'MONTH',
       },

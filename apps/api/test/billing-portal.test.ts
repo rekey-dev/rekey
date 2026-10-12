@@ -77,7 +77,7 @@ describe('end-user billing portal surface', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug, name: slug, amount },
+      payload: { slug, name: slug, price: { currency: 'USD', amount } },
     });
     expect(res.statusCode).toBe(201);
     return (res.json().data as { id: string }).id;

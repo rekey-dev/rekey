@@ -76,7 +76,7 @@ describe('PayPal one-time purchase on the checkout page', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { slug: 'pack', name: '100 Credits', amount: 4999, kind: 'CREDIT', creditsAmount: 100 },
+      payload: { slug: 'pack', name: '100 Credits', price: { currency: 'USD', amount: 4999 }, kind: 'CREDIT', creditsAmount: 100 },
     });
     expect(plan.statusCode, plan.body).toBe(201);
     const current = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
@@ -154,7 +154,8 @@ describe('PayPal one-time purchase on the checkout page', () => {
     expect(input.returnUrl).toMatch(new RegExp(`/${slug}/checkout/${token}$`));
     const row = await sessionRow(sessionId);
     expect(row.kind).toBe('ONE_TIME');
-    expect((row.metadata as { expectedCharge: unknown }).expectedCharge).toEqual({ amount: 4999, currency: 'USD' });
+    expect(row).toMatchObject({ chargeAmount: 4999, discountAmount: 0, unitAmount: 4999, currency: 'USD' });
+    expect(row.metadata).not.toHaveProperty('expectedCharge');
 
     const view = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${token}` });
     expect(view.statusCode).toBe(200);
@@ -207,7 +208,7 @@ describe('PayPal one-time purchase on the checkout page', () => {
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${applicationId}/plans/pack`,
       headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { amount: 100 },
+      payload: { price: { currency: 'USD', amount: 100 } },
     });
     expect(patched.statusCode, patched.body).toBe(200);
     const order = (await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${token}` })).json().data.order as {
@@ -351,7 +352,7 @@ describe('PayPal one-time purchase on the checkout page', () => {
 
     it("records a redirect order's charge and refuses to capture a different one", async () => {
       const { orderId, sessionId } = await startCheckout('redirect');
-      expect((await sessionRow(sessionId)).metadata).toMatchObject({ expectedCharge: { amount: 4999, currency: 'USD' } });
+      expect(await sessionRow(sessionId)).toMatchObject({ chargeAmount: 4999, currency: 'USD', metadata: {} });
       markApproved(orderId, { amount: 4998 });
       await expectNotCaptured(orderId, sessionId, 'amount_mismatch');
     });

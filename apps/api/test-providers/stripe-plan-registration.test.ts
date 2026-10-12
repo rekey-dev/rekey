@@ -58,8 +58,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
       slug: 'pro-monthly',
       // The product name is what the sweep matches on, keep the prefix.
       name: `${HARNESS_PREFIX} Pro Monthly ${runId}`,
-      amount: 2499,
-      currency: 'usd',
+      price: { currency: 'usd', amount: 2499 },
       interval: 'MONTH',
     });
 
@@ -97,8 +96,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
       applicationId: fixture.applicationId,
       slug: 'idem-monthly',
       name: `${HARNESS_PREFIX} Idempotent ${runId}`,
-      amount: 500,
-      currency: 'usd',
+      price: { currency: 'usd', amount: 500 },
       interval: 'MONTH',
     });
     const first = (plan.metadata as { stripe?: { priceId?: string } }).stripe?.priceId;
@@ -123,8 +121,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
         applicationId: fixture.applicationId,
         slug: 'refused',
         name: `${HARNESS_PREFIX} Refused ${runId}`,
-        amount: 1000,
-        currency: 'usd',
+        price: { currency: 'usd', amount: 1000 },
         interval: 'MONTH',
       }),
     ).rejects.toMatchObject({

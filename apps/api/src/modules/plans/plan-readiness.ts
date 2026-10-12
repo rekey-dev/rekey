@@ -30,8 +30,10 @@
  * chasing a plan that was fine.
  */
 
-import type { Plan } from '@prisma/client';
-import { billingCredentialsService } from '../billing/credentials.service.js';
+import { costsNothing } from '../billing/free-plan.js';
+import type { Plan, PlanPrice } from '@prisma/client';
+import { prisma } from '../../lib/prisma.js';
+import { billingCredentialsService, canCharge } from '../billing/credentials.service.js';
 import type { BillingProviderName } from '../billing/credentials.service.js';
 import type { PlanCheckoutBlocker } from '../billing/providers/module-types.js';
 import { getModule } from '../billing/providers/registry.js';
@@ -52,10 +54,22 @@ export interface PlanReadiness {
  * Batched because the caller is always a list view and the credential lookup
  * is per Application, not per plan. Blocker evaluation itself is pure and
  * touches neither the database nor the provider.
+ *
+ * `pricesByPlan` is each plan's additional prices. A caller that already
+ * holds them passes them; otherwise they are read here, once for all plans.
  */
+/**
+ * What readiness reads of a plan: the plan, and the currency of its default
+ * price (null for a plan with no flat price).
+ */
+export type ReadinessPlan = Omit<Plan, 'amount' | 'currency' | 'pricePerUnitCents'> & {
+  defaultPrice: { currency: string } | null;
+};
+
 export async function planCheckoutReadiness(
   applicationId: string,
-  plans: Plan[],
+  plans: readonly ReadinessPlan[],
+  pricesByPlan?: ReadonlyMap<string, ReadonlyArray<Pick<PlanPrice, 'currency'>>>,
 ): Promise<Map<string, PlanReadiness>> {
   const out = new Map<string, PlanReadiness>();
   if (plans.length === 0) return out;
@@ -85,9 +99,36 @@ export async function planCheckoutReadiness(
   const routable = enabled.filter(({ provider }) => getModule(provider)?.capabilities.checkout !== false);
   const judged = routable.length > 0 ? routable : enabled;
 
+  const additional = pricesByPlan ?? (await additionalCurrencies(plans));
+
   for (const plan of plans) {
     const blockers: PlanBlocker[] = [];
-    for (const { provider } of judged) {
+    const priced = !costsNothing(plan);
+    const defaultCurrency = plan.defaultPrice?.currency.toUpperCase() ?? null;
+    const currencies = [
+      ...(defaultCurrency === null ? [] : [defaultCurrency]),
+      ...(additional.get(plan.id) ?? []).map((price) => price.currency),
+    ];
+    // The default price is the one every buyer without a local price pays,
+    // so it must be chargeable: a chargeable local price does not make up for
+    // a default nobody can be charged.
+    if (defaultCurrency !== null && routable.length > 0 && !routable.some((p) => canCharge(p, defaultCurrency))) {
+      const currency = defaultCurrency;
+      blockers.push({
+        provider: null,
+        code: 'PLAN_CURRENCY_UNSUPPORTED',
+        message:
+          currencies.length === 1
+            ? `No enabled provider is set up to charge ${currency}, the currency of this plan, so its checkout is refused.`
+            : `No enabled provider is set up to charge ${currency}, this plan's default price, so a buyer without a local price is refused.`,
+        fix: `Add ${currency} to a provider's currencies in Panel → Application → Billing → Setup → Providers → Edit, or price the plan in a currency a provider there can charge.`,
+      });
+    }
+    for (const candidate of judged) {
+      const { provider } = candidate;
+      // A provider that cannot charge any of this plan's prices is never
+      // routed it, so what it would make of the plan does not matter.
+      if (priced && currencies.length > 0 && !currencies.some((c) => canCharge(candidate, c))) continue;
       const module = getModule(provider);
       const blocker = module?.planCheckoutBlocker?.(plan);
       if (blocker) blockers.push({ provider, ...blocker });
@@ -128,10 +169,22 @@ export async function planCheckoutReadiness(
   return out;
 }
 
+async function additionalCurrencies(plans: readonly ReadinessPlan[]): Promise<Map<string, Array<{ currency: string }>>> {
+  const defaults = plans.flatMap((plan) => (plan.defaultPriceId === null ? [] : [plan.defaultPriceId]));
+  const rows = await prisma.planPrice.findMany({
+    where: { planId: { in: plans.map((plan) => plan.id) }, archivedAt: null, id: { notIn: defaults } },
+    select: { planId: true, currency: true },
+    orderBy: { currency: 'asc' },
+  });
+  const byPlan = new Map<string, Array<{ currency: string }>>();
+  for (const row of rows) byPlan.set(row.planId, [...(byPlan.get(row.planId) ?? []), { currency: row.currency }]);
+  return byPlan;
+}
+
 /** The single-plan case, for callers that already hold exactly one. */
 export async function planCheckoutReadinessFor(
   applicationId: string,
-  plan: Plan,
+  plan: ReadinessPlan,
 ): Promise<PlanReadiness> {
   const map = await planCheckoutReadiness(applicationId, [plan]);
   return map.get(plan.id) ?? { ready: true, blockers: [] };

@@ -2,16 +2,17 @@ import { isEntitlingStatus } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cancelCopy } from '@/lib/cancel-copy';
+import { managedBillingOrg, planReviewPath } from '@/lib/billing-subject';
 import { managedElsewhere } from '@/lib/provider-capabilities';
 import { getPortalConfig, supportLink } from '@/lib/config';
-import { formatMoney, formatPlanPrice } from '@/lib/format';
+import { formatMoney, formatPlanPrice, refundLine, subscriptionPriceLabel } from '@/lib/format';
+import { planOffer } from '@/lib/plan-offer';
 import { getPortalUser, portalClientFor } from '@/lib/session';
-import { cancelSubscriptionAction, checkoutAction } from '@/lib/actions';
+import { cancelSubscriptionAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
 import { Card } from '@/components/card';
 import { StatusBadge } from '@/components/status-badge';
 import { ConfirmSubmit } from '@/components/confirm-submit';
-import { ProviderRadios } from '@/components/provider-radios';
 
 /**
  * Checkout / cancel failures, translated for the merchant's customer.
@@ -40,6 +41,15 @@ const CHECKOUT_ERR: Record<string, string> = {
   CHECKOUT_UNAVAILABLE: 'Checkout isn’t available here, so plans can’t be bought on this page.',
   PLAN_NOT_FOUND: 'That plan isn’t available any more.',
   PLAN_INACTIVE: 'That plan isn’t available any more.',
+  // Portal-side code: the catalogue says a checkout for this plan would be refused.
+  PLAN_UNAVAILABLE: 'That plan can’t be bought here right now.',
+  PLAN_CURRENCY_INVALID: 'That plan can’t be bought here right now. Nothing was charged.',
+  // A subscriber is never moved to another currency, and theirs can no longer
+  // be charged. Only the business can repair it.
+  BILLING_CURRENCY_CONFLICT:
+    'Your subscription is billed in a currency that can’t be charged here right now, so a new checkout can’t be started. Nothing was charged.',
+  BILLING_NO_PROVIDER_FOR_CURRENCY:
+    'That plan can’t be paid for in your currency here right now. Nothing was charged.',
   BILLING_ORGANIZATION_REQUIRED:
     'This plan is billed to your team, so a team owner or admin has to start it.',
   // One string, two binder states: a paid subscription and an unfinished
@@ -77,25 +87,14 @@ export default async function DashboardPage({
   const isOrgBilled = config!.billingSubject === 'org';
 
   // On org-billed apps, the subscription belongs to a team. If the signed-in
-  // user OWNS or ADMINS a team, they can manage that team's billing here; pick
-  // the first such team. Otherwise the plans are read-only (a member can look
-  // but only an owner/admin can change the plan).
-  let billingOrg: { id: string; name: string } | null = null;
-  if (isOrgBilled) {
-    // `?limit=100` deliberately: this picks the first team the user can manage,
-    // and the default 50-row window could exclude it for someone in many teams.
-    // `page.total` says whether even 100 was short.
-    const orgs = await client!
-      .listOrganizations(session.accessToken, { limit: 100 })
-      .then((r) => r.items)
-      .catch(() => []);
-    const managed = orgs.find((o) => o.role === 'OWNER' || o.role === 'ADMIN');
-    if (managed) billingOrg = { id: managed.id, name: managed.name };
-  }
+  // user OWNS or ADMINS a team, they can manage that team's billing here.
+  // Otherwise the plans are read-only (a member can look but only an
+  // owner/admin can change the plan).
+  const billingOrg = isOrgBilled ? await managedBillingOrg(client!, session.accessToken) : null;
   const orgId = billingOrg?.id ?? null;
 
   const subjectOpts = orgId ? { organizationId: orgId } : undefined;
-  const [current, live, plans, providers, payments] = await Promise.all([
+  const [current, live, plans, payments] = await Promise.all([
     client!.getSubscription(session.accessToken, subjectOpts),
     // Every live subscription: a buyer can hold several, and the singular read
     // shows one. Without this the page offered checkout for a plan they already
@@ -104,11 +103,10 @@ export default async function DashboardPage({
       .listSubscriptions(session.accessToken, subjectOpts)
       .then((r) => r.items)
       .catch(() => null),
-    config!.billingEnabled ? client!.getPlans().then((r) => r.items) : Promise.resolve([]),
-    // Powers the "Pay with…" picker. Public (publishable key, no token). A hiccup
-    // here must never break the dashboard, fall back to the auto-routed flow.
+    // With the buyer's token, so each plan's price is the one THEIR checkout
+    // would charge: the currency they already pay in, not a stranger's default.
     config!.billingEnabled
-      ? client!.listBillingProviders().then((r) => r.providers).catch(() => [])
+      ? client!.getPlans({ limit: 100 }, { accessToken: session.accessToken }).then((r) => r.items)
       : Promise.resolve([]),
     // Billing history. Non-critical, never let it break the dashboard.
     config!.billingEnabled
@@ -138,9 +136,6 @@ export default async function DashboardPage({
   // Individual apps: always self-checkout. Org apps: only when we resolved a
   // team the user can manage. Members of org-billed apps get a read-only view.
   const canCheckout = !isOrgBilled || billingOrg !== null;
-  // Only offer a choice when there's more than one provider; with one (or none)
-  // the server-side geo router picks automatically, keep the current behavior.
-  const showProviderPicker = providers.length > 1;
 
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const notice = typeof sp.e === 'string' ? sp.e : undefined;
@@ -199,12 +194,16 @@ export default async function DashboardPage({
               /** Which of the two cancellations this customer is actually about to get. */
               const cancelText = cancelCopy(sub);
               const subEndsOn = sub.cancelAt ?? sub.currentPeriodEnd ?? null;
+              // The subscription's own price, which can differ from the
+              // plan's price today and from its default.
+              const priceLabel = subscriptionPriceLabel(sub.price, plan);
               return (
                 <li key={sub.id} className="space-y-2">
                   <div className="flex items-center gap-3">
                     <span className="font-medium text-[var(--color-fg)]">{plan?.name ?? sub.planId}</span>
                     <StatusBadge status={sub.status} />
                   </div>
+                  {priceLabel && <p className="text-[var(--color-fg)]">{priceLabel}</p>}
                   {subEndsOn && (
                     <p className="text-[var(--color-muted-fg)]">
                       {subCanceling ? 'Ends' : 'Renews'} on {new Date(subEndsOn).toLocaleDateString()}
@@ -256,32 +255,35 @@ export default async function DashboardPage({
           )}
           <ul className="space-y-2">
             {plans.map((plan) => {
-              const held = heldPlanIds.has(plan.id);
+              const offer = planOffer(plan, { held: heldPlanIds.has(plan.id), canCheckout });
               return (
-                <li key={plan.id} className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] px-3 py-2">
-                  <div className="text-sm">
-                    <span className="font-medium text-[var(--color-fg)]">{plan.name}</span>{' '}
-                    <span className="text-[var(--color-muted-fg)]">
-                      {formatPlanPrice(plan)}
-                    </span>
-                  </div>
-                  {held ? (
-                    <span className="text-xs text-[var(--color-muted-fg)]">Current</span>
-                  ) : canCheckout ? (
-                    <form action={checkoutAction.bind(null, slug, orgId)}>
-                      <input type="hidden" name="planSlug" value={plan.slug} />
-                      <ConfirmSubmit
-                        size="sm"
-                        label={subscriptions.length > 0 ? 'Switch' : 'Subscribe'}
-                        title={subscriptions.length > 0 ? `Switch to ${plan.name}?` : `Subscribe to ${plan.name}?`}
-                        message={`This takes you to checkout for ${plan.name} at ${formatPlanPrice(plan)}.`}
-                        confirmLabel="Continue to checkout"
-                        pendingLabel="Opening checkout…"
+                <li key={plan.id} className="rounded-md border border-[var(--color-border)] px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm">
+                      <span className="font-medium text-[var(--color-fg)]">{plan.name}</span>{' '}
+                      <span className="text-[var(--color-muted-fg)]">{formatPlanPrice(plan)}</span>
+                    </div>
+                    {offer.kind === 'current' && (
+                      <span className="text-xs text-[var(--color-muted-fg)]">Current</span>
+                    )}
+                    {offer.kind === 'unavailable' && (
+                      <span className="text-xs text-[var(--color-muted-fg)]">{offer.reason}</span>
+                    )}
+                    {/* The price, its currency and the checkout button are on
+                        the plan's own page, so nothing is bought from a list. */}
+                    {offer.kind === 'buy' && (
+                      <a
+                        href={planReviewPath(slug, plan.slug)}
+                        className="rounded-md bg-[var(--color-primary)] px-2.5 py-1 text-xs font-medium text-[var(--color-primary-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]"
                       >
-                        {showProviderPicker && <ProviderRadios providers={providers} />}
-                      </ConfirmSubmit>
-                    </form>
-                  ) : null}
+                        {subscriptions.length > 0 ? 'Switch' : 'Subscribe'}
+                        <span className="sr-only"> to {plan.name}</span>
+                      </a>
+                    )}
+                  </div>
+                  {offer.kind === 'current' && offer.note && (
+                    <p className="mt-1 text-xs text-[var(--color-muted-fg)]">{offer.note}</p>
+                  )}
                 </li>
               );
             })}
@@ -302,18 +304,13 @@ export default async function DashboardPage({
                   <span className="truncate text-[var(--color-muted-fg)]">
                     {p.description ?? p.planSlug ?? ''}
                   </span>
+                  {refundLine(p) && <p className="text-xs text-[var(--color-muted-fg)]">{refundLine(p)}</p>}
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
                   <span className="font-medium text-[var(--color-fg)]">
                     {formatMoney(p.amount, p.currency)}
                   </span>
-                  {p.status === 'PARTIALLY_REFUNDED' && p.refundedAmount !== undefined ? (
-                    <span className="text-xs text-[var(--color-muted-fg)]">
-                      Refunded {formatMoney(p.refundedAmount, p.currency)} of {formatMoney(p.amount, p.currency)}
-                    </span>
-                  ) : (
-                    <StatusBadge status={p.status} />
-                  )}
+                  <StatusBadge status={p.status} />
                   {p.receiptUrl && (
                     <a
                       href={p.receiptUrl}

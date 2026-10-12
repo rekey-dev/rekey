@@ -33,8 +33,8 @@ export type PaginationInput = z.infer<typeof PaginationQuery>;
 
 /** Fastify JSON-schema fragment for the same params (for swagger + coercion). */
 export const paginationJsonSchema = {
-  limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT },
-  offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
+  limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, description: `Rows to return, at most ${MAX_LIMIT}.` },
+  offset: { type: 'integer', minimum: 0, maximum: 2147483647, description: 'Rows to skip before the first one returned.' },
 } as const;
 
 /** Resolve `{ take, skip }` for Prisma from a parsed query. */

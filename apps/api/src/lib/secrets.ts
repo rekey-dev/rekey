@@ -56,7 +56,7 @@ export function decryptJson<T = unknown>(stored: string): T {
   }
   const k = key();
   if (!k) {
-    throw new Error('ENCRYPTION_KEY is not set — cannot decrypt v1 ciphertext.');
+    throw new Error('ENCRYPTION_KEY is not set, so Rekey cannot decrypt v1 ciphertext.');
   }
   const [, ivHex, tagHex, ctHex] = stored.split('.');
   if (!ivHex || !tagHex || !ctHex) throw new Error('Malformed v1 ciphertext');

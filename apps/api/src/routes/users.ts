@@ -27,11 +27,12 @@ import { assertEndUserInApplication } from '../lib/end-users.js';
 import { authService } from '../modules/auth/auth.service.js';
 import { requireApiKey, requireScope } from '../middleware/api-key-auth.js';
 import { ok, errs, ref } from '../lib/openapi.js';
+import { SUPPORT_MODE_SCHEMA, supportModeFor } from '../modules/support-cases/support-mode.js';
 
 const USERS_ERRORS = {
-  401: 'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
-  403: "IP_NOT_ALLOWED — the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT — the key lacks `auth:read`.",
-  404: 'END_USER_NOT_FOUND — no end-user matches in this Application.',
+  401: 'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
+  403: "IP_NOT_ALLOWED: the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT: the key lacks `auth:read`.",
+  404: 'END_USER_NOT_FOUND: no end-user matches in this Application.',
 } as const;
 
 function notFound(what: string): RekeyError {
@@ -65,8 +66,8 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(ref('EndUser'), 'The matching end-user.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `email` is missing or malformed.',
-            410: 'END_USER_ERASED — the account was erased (GDPR); only a tombstone remains.',
+            400: 'VALIDATION_ERROR: `email` is missing or malformed.',
+            410: 'END_USER_ERASED: the account was erased (GDPR); only a tombstone remains.',
             ...USERS_ERRORS,
           }),
         },
@@ -94,7 +95,7 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         response: {
           200: ok(ref('EndUser'), 'The end-user.'),
-          ...errs({ 410: 'END_USER_ERASED — the account was erased (GDPR); only a tombstone remains.', ...USERS_ERRORS }),
+          ...errs({ 410: 'END_USER_ERASED: the account was erased (GDPR); only a tombstone remains.', ...USERS_ERRORS }),
         },
       },
     },
@@ -106,6 +107,45 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         'Confirm the id belongs to the Application this secret key represents.',
       );
       return { success: true, data: await authService.getByIdForServer(req.application!.id, id) };
+    },
+  );
+
+  app.get(
+    '/:id/support',
+    {
+      schema: {
+        tags: ['Public · Auth'],
+        summary: "Read an end-user's support mode (server-side)",
+        description:
+          'Whether an operator has an open support case on this end-user, and which capabilities ' +
+          'it turns on. The same object `GET /users/me?include=support` returns. Pass `deviceId` ' +
+          'to ask about one device; without it only a case covering every device reads as active. ' +
+          'A `deviceId` the case does not name, including one that is not this end-user\'s, reads ' +
+          'as inactive. Secret key only.',
+        security: [{ apiKey: [] }],
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        querystring: {
+          type: 'object',
+          properties: { deviceId: { type: 'string', description: 'A device id from the devices routes.' } },
+        },
+        response: {
+          200: ok(SUPPORT_MODE_SCHEMA, 'Support mode for the end-user, or for that device.'),
+          ...errs(USERS_ERRORS),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(req.params);
+      const { deviceId } = z.object({ deviceId: z.string().min(1).max(200).optional() }).parse(req.query);
+      await assertEndUserInApplication(
+        req.application!.id,
+        id,
+        'Confirm the id belongs to the Application this secret key represents.',
+      );
+      return {
+        success: true,
+        data: await supportModeFor({ applicationId: req.application!.id, endUserId: id, deviceId }),
+      };
     },
   );
 }

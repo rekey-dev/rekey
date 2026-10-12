@@ -24,6 +24,7 @@ import {
   unbuyablePlans,
   webhookUrlFor,
 } from '../shared';
+import { NO_CURRENCY_TICKED, currenciesSummary } from '@/lib/provider-currencies';
 
 const linkButtonCls =
   'rounded text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60';
@@ -44,6 +45,7 @@ export default async function BillingProvidersPage({
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
   const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
   const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
+  const webhookStale = typeof sp.webhookStale === 'string' ? sp.webhookStale : undefined;
 
   const [app, providers, planPage] = await Promise.all([
     getApplication(id),
@@ -81,6 +83,13 @@ export default async function BillingProvidersPage({
           message={`${providerLabel(providers, webhook)} webhook configured automatically. Nothing to paste in the provider dashboard.`}
         />
       )}
+      {webhookStale && (
+        <Banner tone="warning">
+          The saved {providerLabel(providers, webhookStale)} webhook was registered with the previous
+          credentials, and {providerLabel(providers, webhookStale)} refused to register it again with the
+          new ones. Check the keys and mode, then press Reconfigure in the Webhook column.
+        </Banner>
+      )}
       {/* `?edit=<provider>` reopens that provider's dialog, which shows the
           error itself. Showing it here too would say it twice. */}
       {error && !edit && (
@@ -112,13 +121,14 @@ export default async function BillingProvidersPage({
           }
         />
 
-        <Table minWidth="min-w-[56rem]">
+        <Table minWidth="min-w-[64rem]">
           <THead>
             <TR>
               <TH>Provider</TH>
               <TH>Status</TH>
               <TH>Mode</TH>
               <TH>Countries</TH>
+              <TH>Currencies</TH>
               <TH align="right">Priority</TH>
               <TH>Webhook</TH>
               <TH align="right">
@@ -162,6 +172,7 @@ function ProviderRow({
 }): React.JSX.Element {
   const row = d.status;
   const inbound = isInboundOnly(d);
+  const currencies = currenciesSummary(row?.currencies ?? []);
   const dash = <span className="text-[var(--color-muted-fg)]">—</span>;
   return (
     <TR hover>
@@ -170,6 +181,11 @@ function ProviderRow({
         {inbound && (
           <span className="mt-0.5 block text-[11px] font-normal text-[var(--color-muted-fg)]">
             Inbound events only, no checkout
+          </span>
+        )}
+        {row && row.unsupportedCurrencies.length > 0 && (
+          <span className="mt-0.5 block text-[11px] font-normal text-amber-700 dark:text-amber-400">
+            Cannot charge {row.unsupportedCurrencies.join(', ')}, saved here earlier. Edit to remove.
           </span>
         )}
       </TD>
@@ -188,6 +204,20 @@ function ProviderRow({
       <TD muted className="text-xs">
         {!row || inbound ? '—' : row.countries.length === 0 ? 'All countries' : row.countries.join(', ')}
       </TD>
+      <TD muted className="max-w-[14rem] text-xs">
+        {!row || inbound ? (
+          '—'
+        ) : (
+          <span title={currencies.title}>
+            {currencies.text}
+            {currencies.none && (
+              <span className="mt-0.5 block text-[11px] text-amber-700 dark:text-amber-400">
+                {NO_CURRENCY_TICKED}
+              </span>
+            )}
+          </span>
+        )}
+      </TD>
       <TD align="right" muted className="text-xs tabular-nums">
         {row && !inbound ? row.priority : '—'}
       </TD>
@@ -195,7 +225,20 @@ function ProviderRow({
         {!row ? (
           dash
         ) : row.webhookConfigured ? (
-          <Badge tone="success" dot>configured</Badge>
+          <span className="inline-flex items-center gap-2">
+            <Badge tone="success" dot>configured</Badge>
+            {d.capabilities.autoWebhookRegister && (
+              <ActionForm action={registerWebhook.bind(null, applicationId, d.name)} className="inline">
+                <SubmitButton
+                  pendingLabel="Reconfiguring…"
+                  className={`${linkButtonCls} font-normal text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline`}
+                  title={`Register the webhook at ${d.label} again with the saved credentials, and store what it returns`}
+                >
+                  Reconfigure
+                </SubmitButton>
+              </ActionForm>
+            )}
+          </span>
         ) : !d.capabilities.autoWebhookRegister ? (
           <span
             title={

@@ -17,6 +17,13 @@ import { operatorWriteTools } from './operator-write-tools.js';
 import { operatorOrganizationTools } from './operator-organization-tools.js';
 import { operatorContactTools } from './operator-contact-tools.js';
 import { operatorAnalyticsTools } from './operator-analytics-tools.js';
+import { operatorPlanPriceTools } from './operator-plan-price-tools.js';
+import { operatorSupportTools } from './operator-support-tools.js';
+import { operatorBillingLogTools } from './operator-billing-log-tools.js';
+import { operatorPlanTools } from './operator-plan-tools.js';
+import { operatorCouponTools } from './operator-coupon-tools.js';
+import { operatorBillingReadTools } from './operator-billing-read-tools.js';
+import { operatorBillingWriteTools } from './operator-billing-write-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'rekey-operator', version: '1.0.0' };
@@ -28,6 +35,13 @@ export const allOperatorTools: readonly OperatorTool[] = [
   ...operatorOrganizationTools,
   ...operatorContactTools,
   ...operatorAnalyticsTools,
+  ...operatorPlanPriceTools,
+  ...operatorSupportTools,
+  ...operatorBillingLogTools,
+  ...operatorPlanTools,
+  ...operatorCouponTools,
+  ...operatorBillingReadTools,
+  ...operatorBillingWriteTools,
 ];
 
 /**
@@ -43,11 +57,26 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   get_user_analytics: 'overview:read',
   recent_payments: 'billing:read',
   recent_subscriptions: 'billing:read',
+  recent_billing_events: 'billing:read',
+  preview_checkout_routing: 'billing:read',
+  list_price_fallbacks: 'billing:read',
+  get_billing_reconciliation: 'billing:read',
+  get_payment: 'billing:read',
+  list_payment_refunds: 'billing:read',
+  get_reporting_currency: 'billing:read',
+  get_billing_stats: 'billing:read',
+  list_coupons: 'billing:read',
+  create_coupon: 'billing:write',
+  update_coupon: 'billing:write',
+  set_reporting_currency: 'billing:write',
+  create_refund: 'billing:write',
   cancel_subscription: 'billing:write',
   configure_billing_provider: 'billing:write',
   list_plans: 'billing:read',
   create_plan: 'billing:write',
   update_plan: 'billing:write',
+  set_plan_price: 'billing:write',
+  remove_plan_price: 'billing:write',
   set_plan_active: 'billing:write',
   register_plan_with_provider: 'billing:write',
   list_plan_entitlements: 'billing:read',
@@ -67,6 +96,8 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   release_device: 'end-users:write',
   block_device: 'end-users:write',
   unblock_device: 'end-users:write',
+  list_support_cases: 'end-users:read',
+  close_support_case: 'end-users:write',
   list_organization_roles: 'organizations:read',
   create_organization_role: 'organizations:write',
   update_organization_role: 'organizations:write',

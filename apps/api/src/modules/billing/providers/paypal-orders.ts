@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import type { CheckoutSessionInput, ProviderOrderSnapshot } from './types.js';
 import { paypalFetch, paypalError } from './paypal-http.js';
-import { paypalMajorString, paypalMinorFromMajor } from './paypal-money.js';
+import { paypalMinorFromMajor, toProviderAmount } from './paypal-money.js';
 
 /** A REST base and a bearer token for it. */
 export interface PaypalApi {
@@ -42,13 +42,9 @@ export async function createPaypalOrder(
   const requestId = `REKEY-ORDER-${randomUUID()}`;
   const currency = input.plan.currency.toUpperCase();
   const discountMinor = input.discount?.amount ?? 0;
-  // Scaled by what PayPal accepts for THIS currency. These three used to
-  // hardcode `/ 100` and `.toFixed(2)`, so a plan in a currency PayPal takes
-  // no decimals on was both priced at a hundredth of its value and rejected
-  // outright for carrying a decimal point.
-  const grossMajor = paypalMajorString(input.plan.amount, input.plan.currency);
-  const discountMajor = paypalMajorString(discountMinor, input.plan.currency);
-  const valueMajor = paypalMajorString(input.plan.amount - discountMinor, input.plan.currency);
+  const grossMajor = toProviderAmount(currency, input.plan.amount);
+  const discountMajor = toProviderAmount(currency, discountMinor);
+  const valueMajor = toProviderAmount(currency, input.plan.amount - discountMinor);
   // PayPal has no free-form metadata on a purchase unit, so the code goes
   // where the buyer and the operator will both see it.
   const description = (

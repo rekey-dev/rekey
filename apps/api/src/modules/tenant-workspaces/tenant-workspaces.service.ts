@@ -272,7 +272,7 @@ export const tenantWorkspacesService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'APP_GRANT_MEMBER_ONLY',
-        message: `Per-application grants only apply to MEMBER roles — this membership is ${membership.role} and already has full access to every Application.`,
+        message: `Per-application grants only apply to MEMBER roles. This membership is ${membership.role} and already has full access to every Application.`,
         fix: 'Change the member role to MEMBER first (PATCH /api/v1/tenant/workspace/members/:id), then add grants.',
       });
     }
@@ -806,7 +806,7 @@ export const tenantWorkspacesService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'SCOPES_MEMBER_ONLY',
-        message: `Scopes only apply to MEMBER roles — this membership is ${target.role} and is unrestricted by definition.`,
+        message: `Scopes only apply to MEMBER roles. This membership is ${target.role} and is unrestricted by definition.`,
         fix: 'Change the member role to MEMBER first, then set scopes.',
       });
     }

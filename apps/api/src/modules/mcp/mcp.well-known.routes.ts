@@ -47,14 +47,14 @@ const SlugParam = z.object({ slug: z.string().min(1).max(40) });
 
 const AUTH_SERVER_GATE_404 = {
   404:
-    'MCP_NOT_FOUND — the Application does not exist, or neither `authConfig.mcpEnabled` nor ' +
+    'MCP_NOT_FOUND: the Application does not exist, or neither `authConfig.mcpEnabled` nor ' +
     '`authConfig.oidcEnabled` is on.',
 };
 const OIDC_GATE_404 = {
-  404: 'OIDC_NOT_FOUND — the Application does not exist, or `authConfig.oidcEnabled` is off.',
+  404: 'OIDC_NOT_FOUND: the Application does not exist, or `authConfig.oidcEnabled` is off.',
 };
 const MCP_GATE_404 = {
-  404: 'MCP_NOT_FOUND — the Application does not exist, or `authConfig.mcpEnabled` is off.',
+  404: 'MCP_NOT_FOUND: the Application does not exist, or `authConfig.mcpEnabled` is off.',
 };
 
 /**

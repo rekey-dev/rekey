@@ -70,8 +70,7 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
       applicationId: fixture.applicationId,
       slug: 'pp-monthly',
       name: `${HARNESS_PREFIX} PayPal ${runId}`,
-      amount: 1500,
-      currency: 'USD',
+      price: { currency: 'USD', amount: 1500 },
       interval: 'MONTH',
     });
     expect(plan.registrationStatus).toBe('NOT_REQUIRED');
@@ -104,16 +103,14 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
       applicationId: fixture.applicationId,
       slug: 'pp-discount',
       name: `${HARNESS_PREFIX} PayPal Coupon ${runId}`,
-      amount: 2000,
-      currency: 'USD',
+      price: { currency: 'USD', amount: 2000 },
       interval: 'MONTH',
     });
     await couponsService.create({
       applicationId: fixture.applicationId,
       code: `${HARNESS_PREFIX}-pp-10`,
       discountType: 'AMOUNT',
-      amountOff: 200,
-      currency: 'USD',
+      amounts: [{ currency: 'USD', amountOff: 200 }],
     });
 
     const res = await startCheckout(fixture, {

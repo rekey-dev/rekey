@@ -67,7 +67,7 @@ describe('trial eligibility', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appId}/plans`,
         headers: auth(),
-        payload: { slug: s, name: s, amount: 900, kind: 'SUBSCRIPTION' },
+        payload: { slug: s, name: s, price: { currency: 'USD', amount: 900 }, kind: 'SUBSCRIPTION' },
       });
     }
     basicId = (await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'basic' } })).id;

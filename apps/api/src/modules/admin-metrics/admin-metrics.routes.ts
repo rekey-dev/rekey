@@ -25,6 +25,7 @@ import {
   okPage,
   okArray,
   errs,
+  ref,
   type JsonSchema,
 } from "../../lib/openapi.js";
 
@@ -34,10 +35,10 @@ import {
  */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 /**
@@ -48,13 +49,50 @@ const SUPER_ADMIN_ERRORS = {
  * branch, not the `BAD_REQUEST` a Fastify/AJV schema failure would produce.
  */
 const LIST_QUERY_ERRORS = {
-  400: "VALIDATION_ERROR — a query parameter (e.g. `sort`, `order`, `limit`) failed validation.",
+  400: "VALIDATION_ERROR: a query parameter (e.g. `sort`, `order`, `limit`) failed validation.",
   ...SUPER_ADMIN_ERRORS,
 } as const;
 
 // Response shape fragments, one per service method. Modelled from the exact
 // TS return types in admin-metrics.service.ts (see the JSDoc there for the
 // semantics behind each field).
+
+const CURRENCY_CODE = { type: "string", description: "Upper-case ISO 4217 code." } as const;
+
+const MrrByCurrencySchema: JsonSchema = {
+  type: "array",
+  description:
+    "MRR per currency, never added across currencies and with no total: ACTIVE subscriptions " +
+    "on recurring plans, each at its own price, a yearly price counted as a twelfth. A " +
+    "subscription with no price of its own is not counted. Ordered by active subscriptions, then by code.",
+  items: {
+    type: "object",
+    properties: {
+      currency: CURRENCY_CODE,
+      mrrCents: { type: "integer", description: "Smallest unit of `currency`." },
+      activeSubscriptions: {
+        type: "integer",
+        description: "ACTIVE subscriptions on recurring plans priced in this currency.",
+      },
+    },
+    required: ["currency", "mrrCents", "activeSubscriptions"],
+  },
+};
+
+const PaymentWindowSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    count: { type: "integer" },
+    volumeCents: { type: "integer", description: "Net of refunds, smallest currency unit." },
+  },
+  required: ["count", "volumeCents"],
+};
+
+const PaymentCountSchema: JsonSchema = {
+  type: "object",
+  properties: { count: { type: "integer" } },
+  required: ["count"],
+};
 
 const OverviewSchema: JsonSchema = {
   type: "object",
@@ -118,39 +156,58 @@ const OverviewSchema: JsonSchema = {
     },
     payments: {
       type: "object",
+      description:
+        "`lifetime`, `last30d` and `byCurrency` count verified succeeded and partly refunded " +
+        "payments. `lifetime.count` and `last30d.count` cover every currency. Volume is reported " +
+        "per currency only, in `byCurrency`, and never added across currencies. " +
+        "`succeededLast24h` and `failedLast24h` count every payment recorded, verified or not.",
       properties: {
-        lifetime: {
-          type: "object",
-          properties: {
-            count: { type: "integer" },
-            volumeCents: { type: "integer" },
+        lifetime: PaymentCountSchema,
+        last30d: PaymentCountSchema,
+        byCurrency: {
+          type: "array",
+          description: "Counts and net volume per currency, most payments first, then by code.",
+          items: {
+            type: "object",
+            properties: {
+              currency: CURRENCY_CODE,
+              lifetime: PaymentWindowSchema,
+              last30d: PaymentWindowSchema,
+            },
+            required: ["currency", "lifetime", "last30d"],
           },
-          required: ["count", "volumeCents"],
         },
-        last30d: {
-          type: "object",
-          properties: {
-            count: { type: "integer" },
-            volumeCents: { type: "integer" },
+        unverified: {
+          type: "array",
+          description:
+            "Charges recorded and not applied, still held, of any age: per currency, net of " +
+            "refunds, by code. Never part of `byCurrency` or of MRR.",
+          items: {
+            type: "object",
+            properties: {
+              currency: CURRENCY_CODE,
+              amountCents: { type: "integer" },
+              payments: { type: "integer" },
+            },
+            required: ["currency", "amountCents", "payments"],
           },
-          required: ["count", "volumeCents"],
         },
-        succeededLast24h: { type: "integer" },
-        failedLast24h: { type: "integer" },
+        succeededLast24h: {
+          type: "integer",
+          description:
+            "Every succeeded or partly refunded payment recorded in the last 24 hours, across every " +
+            "currency, verified or not. It includes unverified charges, which are in `unverified` " +
+            "and not in `byCurrency`. A fully refunded payment is not counted.",
+        },
+        failedLast24h: {
+          type: "integer",
+          description:
+            "Every failed charge recorded in the last 24 hours, across every currency, verified or not.",
+        },
       },
-      required: ["lifetime", "last30d", "succeededLast24h", "failedLast24h"],
+      required: ["lifetime", "last30d", "byCurrency", "unverified", "succeededLast24h", "failedLast24h"],
     },
-    mrrCents: {
-      type: "integer",
-      description:
-        "SUM of ACTIVE subscriptions, YEAR-interval plans converted to a monthly figure.",
-    },
-    mrrCapped: {
-      type: "boolean",
-      description:
-        "True when the MRR read saturated its 10,000-row cap, `mrrCents` is then a lower " +
-        "bound, not the truth.",
-    },
+    mrrByCurrency: MrrByCurrencySchema,
     webhooks: {
       type: "object",
       properties: {
@@ -222,8 +279,7 @@ const OverviewSchema: JsonSchema = {
     "organizations",
     "subscriptions",
     "payments",
-    "mrrCents",
-    "mrrCapped",
+    "mrrByCurrency",
     "webhooks",
     "apiRequests",
     "tenantUsers",
@@ -344,12 +400,7 @@ const TenantSummaryItem: JsonSchema = {
     endUserCount: { type: "integer" },
     organizationCount: { type: "integer" },
     activeSubscriptions: { type: "integer" },
-    mrrCents: { type: "integer" },
-    mrrCapped: {
-      type: "boolean",
-      description:
-        "True when this tenant's MRR sum saturated the 10,000-row read cap (lower bound).",
-    },
+    mrrByCurrency: MrrByCurrencySchema,
     createdAt: { type: "string", format: "date-time" },
     lastActivityAt: {
       type: "string",
@@ -367,8 +418,7 @@ const TenantSummaryItem: JsonSchema = {
     "endUserCount",
     "organizationCount",
     "activeSubscriptions",
-    "mrrCents",
-    "mrrCapped",
+    "mrrByCurrency",
     "createdAt",
     "lastActivityAt",
   ],
@@ -539,11 +589,20 @@ const AdminPaymentSummaryItem: JsonSchema = {
     applicationId: { type: "string" },
     applicationSlug: { type: "string" },
     endUserId: { type: "string", nullable: true },
-    amount: { type: "integer", description: "Minor currency units (cents)." },
+    amount: { type: "integer", description: "Smallest unit of `currency`." },
     currency: { type: "string" },
     status: {
       type: "string",
-      enum: ["PENDING", "SUCCEEDED", "FAILED", "REFUNDED"],
+      enum: ["PENDING", "SUCCEEDED", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"],
+    },
+    refundedAmount: {
+      type: "integer",
+      description: "The sum of this payment's refunds that have not failed, smallest unit of `currency`. 0 when nothing was refunded.",
+    },
+    verification: {
+      type: "string",
+      enum: ["verified", "unverified"],
+      description: "`unverified` for a charge that was recorded and not applied: it matched no subscription, or not the price it was for. It is in no revenue figure.",
     },
     createdAt: { type: "string", format: "date-time" },
   },
@@ -554,6 +613,8 @@ const AdminPaymentSummaryItem: JsonSchema = {
     "endUserId",
     "amount",
     "currency",
+    "refundedAmount",
+    "verification",
     "status",
     "createdAt",
   ],
@@ -579,8 +640,20 @@ const AdminSubscriptionSummaryItem: JsonSchema = {
         "EXPIRED",
       ],
     },
-    currency: { type: "string" },
-    amount: { type: "integer" },
+    currency: {
+      type: "string",
+      nullable: true,
+      description:
+        "The subscription's own currency, upper-case ISO 4217. Null when the subscription has " +
+        "no price of its own; its plan's is never reported in its place.",
+    },
+    amount: {
+      type: "integer",
+      nullable: true,
+      description:
+        "What this subscription is charged per `interval`: integer, minor units of `currency` " +
+        "(cents for USD, whole yen for JPY). Null when the subscription has no price of its own.",
+    },
     interval: { type: "string" },
     createdAt: { type: "string", format: "date-time" },
     currentPeriodEnd: { type: "string", format: "date-time", nullable: true },
@@ -867,10 +940,21 @@ const PaymentsByAppItem: JsonSchema = {
       description:
         "succeeded / (succeeded+failed) over the last 30 days. Null when both are zero.",
     },
-    volumeCents: {
-      type: "integer",
+    volumeByCurrency: {
+      type: "array",
       description:
-        "SUCCEEDED payment volume in minor currency units over the last 30 days.",
+        "Net volume of succeeded and partly refunded payments over the last 30 days, per " +
+        "currency and never added together. The currency the application reports in is first " +
+        "when it has payments; the rest are ordered by number of payments, then by code.",
+      items: {
+        type: "object",
+        properties: {
+          currency: CURRENCY_CODE,
+          volumeCents: { type: "integer" },
+          payments: { type: "integer" },
+        },
+        required: ["currency", "volumeCents", "payments"],
+      },
     },
   },
   required: [
@@ -882,7 +966,7 @@ const PaymentsByAppItem: JsonSchema = {
     "pending",
     "refunded",
     "successRate",
-    "volumeCents",
+    "volumeByCurrency",
   ],
 };
 
@@ -899,13 +983,18 @@ const TenantsQuery = z.object({
     .enum([
       "createdAt",
       "name",
-      "mrrCents",
+      "mrr",
       "endUserCount",
       "applicationCount",
       "lastActivityAt",
     ])
     .optional(),
   order: Order,
+  /** The currency `sort=mrr` ranks in. */
+  currency: z
+    .string()
+    .regex(/^[A-Za-z]{3}$/)
+    .optional(),
 });
 
 const ApplicationsQuery = z.object({
@@ -976,7 +1065,7 @@ const PaymentsQuery = z.object({
   q: Q,
   order: Order,
   sort: z.enum(["createdAt", "amount"]).optional(),
-  status: z.enum(["PENDING", "SUCCEEDED", "FAILED", "REFUNDED"]).optional(),
+  status: z.enum(["PENDING", "SUCCEEDED", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"]).optional(),
   applicationId: z.string().min(1).optional(),
 });
 
@@ -1079,8 +1168,32 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
         tags: ["Admin · Metrics"],
         security: [{ superAdminKey: [] }],
         summary: "Per-tenant summary (searchable + sortable)",
+        description:
+          "`sort=mrr` orders every tenant by its MRR in ONE currency and then cuts the page, " +
+          "so the first page holds the largest tenants in that currency. The currency is " +
+          "`currency` when sent, else the one with the most active subscriptions on the " +
+          "platform (the first entry of the overview's `mrrByCurrency`); `sortedByMrrIn` names " +
+          "it. A tenant with no MRR in that currency sorts as zero, and ties fall to the id, " +
+          "so paging by `offset` never repeats or skips a tenant. Amounts in other currencies " +
+          "take no part in the order: they cannot be compared.",
         response: {
-          200: okPage(TenantSummaryItem, "A page of per-tenant summaries."),
+          200: ok(
+            {
+              type: "object",
+              properties: {
+                items: { type: "array", items: TenantSummaryItem },
+                page: ref("PageMeta"),
+                sortedByMrrIn: {
+                  type: "string",
+                  nullable: true,
+                  description:
+                    "The currency `sort=mrr` ranked in. Null for any other sort, and when nothing on the platform is recurring.",
+                },
+              },
+              required: ["items", "page", "sortedByMrrIn"],
+            },
+            "A page of per-tenant summaries.",
+          ),
           ...errs(LIST_QUERY_ERRORS),
         },
       },

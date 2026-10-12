@@ -94,7 +94,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'pro_monthly', name: 'Pro', amount: 999 },
+      payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } },
     });
 
     const su = await app.inject({
@@ -355,7 +355,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'credit_pack', name: 'Credits', amount: 1900 },
+      payload: { slug: 'credit_pack', name: 'Credits', price: { currency: 'USD', amount: 1900 } },
     });
     const plan = await prisma.plan.findUniqueOrThrow({
       where: { applicationId_slug: { applicationId, slug: 'credit_pack' } },
@@ -434,7 +434,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'credit_pack_ord', name: 'Credits Ord', amount: 1900 },
+      payload: { slug: 'credit_pack_ord', name: 'Credits Ord', price: { currency: 'USD', amount: 1900 } },
     });
     const plan = await prisma.plan.findUniqueOrThrow({
       where: { applicationId_slug: { applicationId, slug: 'credit_pack_ord' } },

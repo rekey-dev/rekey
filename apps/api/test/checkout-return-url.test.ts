@@ -70,7 +70,7 @@ describe('checkout return URLs', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 1000 },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1000 } },
     });
     expect(plan.statusCode).toBe(201);
     userAccess = await app

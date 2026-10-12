@@ -54,7 +54,7 @@ import { accessContextFromTool } from '../../lib/access-context.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { applicationsService } from '../applications/applications.service.js';
-import { planCheckoutReadiness, planCheckoutReadinessFor } from '../plans/plan-readiness.js';
+import { refreshWebhookAfterEdit, webhookStateBeforeEdit } from '../billing/webhook-registration.js';
 import { plansService } from '../plans/plans.service.js';
 import { webhookService } from '../webhooks/webhook.service.js';
 import { billingService } from '../billing/billing.service.js';
@@ -191,6 +191,9 @@ function audit(
   });
 }
 
+/** The same audit trail, for write tools that live in their own file. */
+export { audit as auditOperatorWrite };
+
 
 /**
  * Organization-role writes need organizations switched on for the Application.
@@ -212,8 +215,8 @@ export function assertOrganizationsEnabled(app: Application): void {
   }
 }
 
-/** Shared by the device tools: the end-user must be in an app the operator can read. */
-async function loadEndUserInApp(
+/** Shared by the device and support tools: the end-user must be in an app the operator can read. */
+export async function loadEndUserInApp(
   ctx: OperatorToolContext,
   applicationId: string,
   endUserId: string,
@@ -254,6 +257,21 @@ const DEVICE_TOOL_ARGS = {
   endUserId: { type: 'string', minLength: 1 },
   deviceId: { type: 'string', minLength: 1 },
 } as const;
+
+/** A stored list that matches nothing takes the provider out of routing, so a malformed code is refused, not saved. */
+function currencyCodes(value: unknown): string[] {
+  const codes = Array.isArray(value) ? value : [];
+  const bad = codes.find((c) => typeof c !== 'string' || !/^[A-Za-z]{3}$/.test(c));
+  if (bad !== undefined) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+      message: `"${String(bad)}" is not an ISO 4217 currency code.`,
+      fix: 'Pass three-letter codes such as "USD" or "INR", or an empty array for a provider that is used for no checkout.',
+    });
+  }
+  return codes as string[];
+}
 
 export const operatorWriteTools: OperatorTool[] = [
   {
@@ -631,73 +649,6 @@ export const operatorWriteTools: OperatorTool[] = [
     },
   },
   {
-    name: 'list_plans',
-    description:
-      'Plans on an application, including inactive ones. Slugs for the other tools. Each plan ' +
-      'carries `checkout.ready`, false means a buyer sent to checkout for it is refused, and ' +
-      '`checkout.blockers` says by which provider and how to repair it. Check it after ' +
-      'configuring a billing provider: plans register with the provider when they are CREATED, ' +
-      'so any plan created before the credentials existed has no price behind it and connecting ' +
-      'the provider afterwards does not repair it.',
-    write: false,
-    inputSchema: {
-      type: 'object',
-      properties: { applicationId: { type: 'string', minLength: 1 } },
-      required: ['applicationId'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const plans = await plansService.listForApplication(app.id, true);
-      const readiness = await planCheckoutReadiness(app.id, plans);
-      return {
-        plans: plans.map((plan) => ({
-          ...plan,
-          checkout: readiness.get(plan.id) ?? { ready: true, blockers: [] },
-        })),
-      };
-    },
-  },
-  {
-    name: 'register_plan_with_provider',
-    description:
-      'Register an existing plan with the billing provider, giving it a price so it can be ' +
-      'bought. The repair for `checkout.ready: false` on a plan created before the provider ' +
-      'was configured. Idempotent: a plan that already has a price is answered from the row ' +
-      'without calling the provider. A plan the provider previously refused is reactivated on ' +
-      'success, because it was deactivated by Rekey rather than by you; a plan you retired on ' +
-      'purpose keeps its `active: false`, since this registers rather than publishes.',
-    write: true,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        applicationId: { type: 'string', minLength: 1 },
-        planSlug: { type: 'string', minLength: 1 },
-      },
-      required: ['applicationId', 'planSlug'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const plan = await plansService.registerWithProvider(app.id, String(args.planSlug));
-      // Its REST twin records `app.plan_updated` and this file's header claims
-      // every write tool leaves a trail. A tool that mints a live price at a
-      // payment provider is not the one to be missing from the audit log.
-      //
-      // Through `audit` like every other write tool here, not a hand-rolled
-      // call. The hand-rolled one omitted `ip` and `userAgent`, so the single
-      // most consequential entry in this file was also the only one that could
-      // not be traced to a request, and it wrote `via: 'mcp'` where the rest
-      // of the file writes `via: 'operator_mcp'`, which quietly breaks any
-      // query that filters on it.
-      audit(ctx, 'app.plan_updated', app.id, {
-        planSlug: plan.slug,
-        registrationStatus: plan.registrationStatus,
-      });
-      return { plan, checkout: await planCheckoutReadinessFor(app.id, plan) };
-    },
-  },
-  {
     name: 'list_api_keys',
     description:
       'API keys on an application, id, name, prefix, scopes, last use. Never the key ' +
@@ -818,7 +769,7 @@ export const operatorWriteTools: OperatorTool[] = [
         expiresAt: result.apiKey.expiresAt,
         // Shown once. There is no endpoint that can return it again.
         rawKey: result.rawKey,
-        warning: 'Store this now — the raw key is hashed at rest and cannot be retrieved again.',
+        warning: 'Store this now. The raw key is hashed at rest and cannot be retrieved again.',
       };
     },
   },
@@ -1004,227 +955,6 @@ export const operatorWriteTools: OperatorTool[] = [
       const updated = await applicationsService.updateAuthConfig({ applicationId: app.id, patch });
       audit(ctx, 'app.auth_config_updated', app.id, { fields: Object.keys(patch) });
       return { id: updated.id, slug: updated.slug, authConfig: updated.authConfig };
-    },
-  },
-  {
-    name: 'create_plan',
-    description:
-      'Create a billing Plan on an application. `amount` is in the smallest currency unit ' +
-      '(e.g. cents). Defaults: currency USD, interval MONTH, kind SUBSCRIPTION.\n\n' +
-      'Each `kind` needs its own fields, and the API refuses the plan without them:\n' +
-      '- SUBSCRIPTION: nothing extra. `interval` applies. Free trials are held in this ' +
-      'release and a plan cannot carry one.\n' +
-      '- CREDIT: `creditsAmount`. A one-off pack of credits, not a recurring charge.\n' +
-      '- LICENSE: `licenseKind`, plus `licenseDurationDays` for TIMED and ' +
-      '`licenseSeatsAllowed` for SEATS.\n' +
-      '- USAGE: `meterSlug` (see list_usage_meters) and `pricePerUnitCents`.',
-    write: true,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        applicationId: { type: 'string', minLength: 1 },
-        slug: { type: 'string', minLength: 1, maxLength: 40 },
-        name: { type: 'string', minLength: 1, maxLength: 120 },
-        amount: { type: 'integer', minimum: 0, maximum: 2147483647 },
-        currency: { type: 'string', minLength: 3, maxLength: 3 },
-        interval: { type: 'string', enum: ['MONTH', 'YEAR'] },
-        kind: {
-          type: 'string',
-          enum: ['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT'],
-          description:
-            'Defaults to SUBSCRIPTION. Without this, a credit pack or a license cannot be ' +
-            'created at all, only a recurring subscription.',
-        },
-        creditsAmount: {
-          // 1, not 0. The service refuses `creditsAmount <= 0` with
-          // PLAN_CREDITS_AMOUNT_REQUIRED and the REST body says `minimum: 1`,
-          // so advertising 0 would tell an agent a value is valid and then
-          // refuse it, the exact defect this pass narrowed passwordMinLength
-          // to remove.
-          type: 'integer',
-          minimum: 1,
-          maximum: 2147483647,
-          description: 'CREDIT plans: how many credits the purchase grants. Required for that kind.',
-        },
-        licenseKind: {
-          type: 'string',
-          enum: ['PERPETUAL', 'TIMED', 'SEATS'],
-          description: 'LICENSE plans: required for that kind.',
-        },
-        licenseDurationDays: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 2147483647,
-          description: 'LICENSE plans with licenseKind TIMED: required for that combination.',
-        },
-        licenseSeatsAllowed: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 2147483647,
-          description: 'LICENSE plans with licenseKind SEATS: required for that combination.',
-        },
-        meterSlug: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 40,
-          description: 'USAGE plans: the usage meter this plan bills against. Required for that kind.',
-        },
-        pricePerUnitCents: {
-          type: 'integer',
-          minimum: 0,
-          maximum: 2147483647,
-          description: 'USAGE plans: charge per metered unit past the included quota.',
-        },
-        metadata: {
-          type: 'object',
-          additionalProperties: true,
-          // Provider-reserved keys (stripe / paypal / razorpay) are stripped by
-          // the service: naming a price id here would otherwise make the plan
-          // charge for someone else's product.
-          description: 'Free-form operator metadata stored on the plan.',
-        },
-      },
-      required: ['applicationId', 'slug', 'name', 'amount'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const plan = await plansService.create({
-        applicationId: app.id,
-        slug: String(args.slug),
-        name: String(args.name),
-        amount: Number(args.amount),
-        ...(args.currency !== undefined && { currency: String(args.currency) }),
-        ...(args.interval !== undefined && {
-          interval: args.interval as 'MONTH' | 'YEAR',
-        }),
-        ...(args.kind !== undefined && {
-          kind: args.kind as 'SUBSCRIPTION' | 'LICENSE' | 'USAGE' | 'CREDIT',
-        }),
-        ...(args.creditsAmount !== undefined && { creditsAmount: Number(args.creditsAmount) }),
-        ...(args.licenseKind !== undefined && {
-          licenseKind: args.licenseKind as 'PERPETUAL' | 'TIMED' | 'SEATS',
-        }),
-        ...(args.licenseDurationDays !== undefined && {
-          licenseDurationDays: Number(args.licenseDurationDays),
-        }),
-        ...(args.licenseSeatsAllowed !== undefined && {
-          licenseSeatsAllowed: Number(args.licenseSeatsAllowed),
-        }),
-        ...(args.meterSlug !== undefined && { meterSlug: String(args.meterSlug) }),
-        ...(args.pricePerUnitCents !== undefined && {
-          pricePerUnitCents: Number(args.pricePerUnitCents),
-        }),
-        ...(args.metadata !== undefined && {
-          metadata: args.metadata as Record<string, unknown>,
-        }),
-      });
-      audit(ctx, 'app.plan_created', app.id, {
-        planSlug: plan.slug,
-        amount: plan.amount,
-        kind: plan.kind,
-      });
-      return {
-        id: plan.id,
-        slug: plan.slug,
-        name: plan.name,
-        // Echo the kind and its per-kind field, so the caller can see that a
-        // credit pack really was created as a credit pack rather than silently
-        // defaulting to a subscription.
-        kind: plan.kind,
-        amount: plan.amount,
-        currency: plan.currency,
-        interval: plan.interval,
-        creditsAmount: plan.creditsAmount,
-        trialDays: plan.trialDays,
-        licenseKind: plan.licenseKind,
-        licenseDurationDays: plan.licenseDurationDays,
-        licenseSeatsAllowed: plan.licenseSeatsAllowed,
-        meterSlug: plan.meterSlug,
-        pricePerUnitCents: plan.pricePerUnitCents,
-        active: plan.active,
-      };
-    },
-  },
-  {
-    name: 'set_plan_active',
-    description:
-      'Activate or ARCHIVE a plan by slug. Deactivating (active=false) archives it: existing ' +
-      "subscriptions keep billing, but no new sign-ups. This is how you retire a plan, you " +
-      "CANNOT change a plan's price in place (the price is registered with the payment provider " +
-      'and is immutable), so to change pricing you archive the old plan here and create a ' +
-      'replacement with create_plan UNDER A DIFFERENT SLUG. Archiving does not release the slug: ' +
-      'it is the identifier integrations pass to checkout, so reusing it is refused with ' +
-      'PLAN_SLUG_TAKEN. Reversible.',
-    write: true,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        applicationId: { type: 'string', minLength: 1 },
-        slug: { type: 'string', minLength: 1 },
-        active: { type: 'boolean' },
-      },
-      required: ['applicationId', 'slug', 'active'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const plan = await plansService.setActive(app.id, String(args.slug), args.active === true);
-      audit(ctx, 'app.plan_active_changed', app.id, { planSlug: plan.slug, active: plan.active });
-      return { slug: plan.slug, active: plan.active };
-    },
-  },
-  {
-    name: 'update_plan',
-    description:
-      "Edit a plan's ENTITLEMENTS ONLY, its display name, LICENSE seats/duration, or CREDIT " +
-      'amount. You CANNOT change price, currency, or interval here: those are registered with ' +
-      'the payment provider (Stripe/PayPal/Razorpay) and are immutable. To change pricing, ' +
-      'ARCHIVE this plan (set_plan_active active=false) and CREATE a replacement (create_plan) ' +
-      'under a DIFFERENT slug, because archiving does not release the old one. Existing ' +
-      'subscribers keep their old price, new sign-ups get the new plan.',
-    write: true,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        applicationId: { type: 'string', minLength: 1 },
-        slug: { type: 'string', minLength: 1 },
-        name: { type: 'string', minLength: 1, maxLength: 120 },
-        licenseSeatsAllowed: { type: 'integer', minimum: 0, description: 'LICENSE plans only.', maximum: 2147483647 },
-        licenseDurationDays: { type: 'integer', minimum: 0, description: 'LICENSE plans only.', maximum: 2147483647 },
-        creditsAmount: { type: 'integer', minimum: 0, description: 'CREDIT plans only.', maximum: 2147483647 },
-      },
-      required: ['applicationId', 'slug'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const patch = {
-        ...(args.name !== undefined && { name: String(args.name) }),
-        ...(args.licenseSeatsAllowed !== undefined && {
-          licenseSeatsAllowed: Number(args.licenseSeatsAllowed),
-        }),
-        ...(args.licenseDurationDays !== undefined && {
-          licenseDurationDays: Number(args.licenseDurationDays),
-        }),
-        ...(args.creditsAmount !== undefined && { creditsAmount: Number(args.creditsAmount) }),
-      };
-      const plan = await plansService.updateEntitlements(app.id, String(args.slug), patch);
-      audit(ctx, 'app.plan_entitlements_updated', app.id, {
-        planSlug: plan.slug,
-        fields: Object.keys(patch),
-      });
-      return {
-        slug: plan.slug,
-        name: plan.name,
-        licenseSeatsAllowed: plan.licenseSeatsAllowed,
-        licenseDurationDays: plan.licenseDurationDays,
-        creditsAmount: plan.creditsAmount,
-        // Echo the (immutable) price so the agent sees what it can't change here.
-        amount: plan.amount,
-        currency: plan.currency,
-        interval: plan.interval,
-      };
     },
   },
   {
@@ -1464,6 +1194,12 @@ export const operatorWriteTools: OperatorTool[] = [
         webhookId: { type: 'string' },
         mode: { type: 'string', enum: ['test', 'live'] },
         countries: { type: 'array', items: { type: 'string' } },
+        currencies: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'ISO 4217 currencies this provider account can charge (Razorpay without international payments: ["INR"]). Empty means none: the provider is not used for any checkout. Left out on a new provider, it starts with the currencies that provider usually charges; left out on an existing one, the list stays as it is. A price in another currency is never routed to it.',
+        },
         enabled: { type: 'boolean' },
       },
       required: ['applicationId', 'provider'],
@@ -1484,8 +1220,10 @@ export const operatorWriteTools: OperatorTool[] = [
       const mode = args.mode === 'test' || args.mode === 'live' ? (args.mode as BillingMode) : undefined;
       const options = {
         ...(args.countries !== undefined && { countries: args.countries as string[] }),
+        ...(args.currencies !== undefined && { currencies: currencyCodes(args.currencies) }),
         ...(args.enabled !== undefined && { enabled: args.enabled === true }),
         ...(mode !== undefined && { mode }),
+        operatorId: ctx.tenantUserId,
       };
       // The field set is whatever the module declares, so a fourth provider is
       // not a fourth branch. A field the caller omits is omitted from the
@@ -1498,10 +1236,12 @@ export const operatorWriteTools: OperatorTool[] = [
         const value = args[field.key];
         if (value !== undefined) data[field.key] = String(value);
       }
+      const before = await webhookStateBeforeEdit(app.id, provider);
       await billingCredentialsService.upsertCredentials(app.id, provider, data, options);
+      const webhook = await refreshWebhookAfterEdit(app.id, provider, app.slug, before, data);
       // Audit records only that creds were set, NEVER the secret values.
-      audit(ctx, 'app.billing_credentials_configured', app.id, { provider, mode: mode ?? 'inferred' });
-      return { applicationId: app.id, provider, configured: true };
+      audit(ctx, 'app.billing_credentials_configured', app.id, { provider, mode: mode ?? 'inferred', webhook });
+      return { applicationId: app.id, provider, configured: true, webhook };
     },
   },
   {
@@ -1551,6 +1291,7 @@ export const operatorWriteTools: OperatorTool[] = [
       const atPeriodEnd = args.atPeriodEnd !== false;
       const updated = await billingService.cancelSubscriptionById(app, subscriptionId, {
         atPeriodEnd,
+        operatorId: ctx.tenantUserId,
       });
       audit(ctx, 'app.subscription_canceled', app.id, {
         subscriptionId,

@@ -67,6 +67,14 @@ export const CLIENT_IP_VOUCHED = Symbol('rekey.clientIpVouched');
 export const DECLARED_CLIENT_IP = Symbol('rekey.declaredClientIp');
 /** The visitor's country our panel or portal forwards, believed only with the caller secret. */
 export const CLIENT_COUNTRY_HEADER = 'x-rekey-client-country';
+/**
+ * `x-rekey-visitor-country-hint`, which a secret-key SDK client sends, is
+ * deliberately left on the request: unlike the header above it is never
+ * believed, only read as a hint by `resolveBuyerCountry` in
+ * modules/billing/buyer-country.ts. A hint routes the provider. It selects a
+ * local price only when the Application sets `billingConfig.localPrices` to
+ * `any`.
+ */
 /** Where the resolver leaves the country it believes (see `visitorCountry` below). */
 export const VISITOR_COUNTRY = Symbol('rekey.visitorCountry');
 /** Where the resolver leaves whether the caller proved INTERNAL_CALLER_SECRET. */

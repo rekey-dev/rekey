@@ -68,15 +68,17 @@ const UPI_FIRST: NonNullable<RazorpayOptions['config']> = {
 
 const MESSAGES: Partial<Record<Phase, string>> = {
   processing: 'Processing…',
-  // A UPI collect request can still be approved in the buyer's app after the
-  // modal closes, so this never says nothing was charged.
-  cancelled: 'Payment not completed. If you approved it in your UPI app, wait a moment before trying again.',
+  cancelled: 'Payment not completed. You can try again.',
   failed: 'The payment failed. You have not been charged. You can try again.',
   script_failed: 'The secure payment form did not load.',
   confirming: 'Payment received. Confirming your payment…',
   handing_off: 'Payment received and being processed. Taking you back…',
   redirecting: 'Payment confirmed. Taking you back…',
 };
+
+// A UPI collect request can still be approved in the buyer's app after the
+// modal closes, so where UPI is offered this never invites an immediate retry.
+const CANCELLED_WITH_UPI = 'Payment not completed. If you approved it in your UPI app, wait a moment before trying again.';
 
 const BUTTON_PHASES = new Set<Phase>(['idle', 'open', 'processing', 'cancelled', 'failed']);
 
@@ -209,7 +211,8 @@ export function RazorpayPayment({
     }
   };
 
-  const message = phase === 'unconfirmed' ? unconfirmedMessage(providerName) : MESSAGES[phase];
+  const message =
+    phase === 'unconfirmed' ? unconfirmedMessage(providerName) : phase === 'cancelled' && upiFirst ? CANCELLED_WITH_UPI : MESSAGES[phase];
   const busy = (!loaded && BUTTON_PHASES.has(phase)) || phase === 'processing' || phase === 'confirming' || phase === 'handing_off' || phase === 'redirecting';
 
   return (

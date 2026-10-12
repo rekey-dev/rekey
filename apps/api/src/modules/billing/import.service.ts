@@ -785,6 +785,7 @@ export const subscriptionImportService = {
           endUserId: subscriberId,
           note: `Imported from ${run.provider} (${item.externalId})`,
           providerBinding: { provider: run.provider, providerSubId: item.externalId },
+          origin: { via: 'import', actor: { type: 'operator', id: args.actorId }, importRunId: run.id },
           ...(periodEnd !== undefined && { currentPeriodEnd: periodEnd }),
           ...(trialEndsAt !== undefined && { trialEndsAt, trialAttemptId: run.id }),
           // Provenance and `cancelAt` commit INSIDE the grant's transaction.

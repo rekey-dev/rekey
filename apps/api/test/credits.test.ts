@@ -223,7 +223,7 @@ describe('credits', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${tenantAccess}` },
-      payload: { slug: 'pack_bad', name: 'Bad Pack', amount: 999, kind: 'CREDIT' },
+      payload: { slug: 'pack_bad', name: 'Bad Pack', price: { currency: 'USD', amount: 999 }, kind: 'CREDIT' },
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe('PLAN_CREDITS_AMOUNT_REQUIRED');
@@ -232,7 +232,7 @@ describe('credits', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${tenantAccess}` },
-      payload: { slug: 'pack_100', name: '100 Leads', amount: 4999, kind: 'CREDIT', creditsAmount: 100 },
+      payload: { slug: 'pack_100', name: '100 Leads', price: { currency: 'USD', amount: 4999 }, kind: 'CREDIT', creditsAmount: 100 },
     });
     expect(ok.statusCode).toBe(201);
     const plan = ok.json().data as Record<string, unknown>;

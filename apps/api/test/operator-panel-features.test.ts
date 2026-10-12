@@ -2,7 +2,7 @@
  * Operator panel list features:
  *   - GET /tenant/applications/:id/payments (status/from/to filters + email join)
  *   - GET /tenant/applications/:id/end-users (emailVerified + subscriptionStatus filters)
- *   - GET /tenant/applications/:id/coupons (redemptionCount + totalDiscountIssued stats)
+ *   - GET /tenant/applications/:id/coupons (redemptionCount + per-currency discount stats)
  *   - GET /tenant/security-events (from/to filters + ?format=csv export)
  *
  * Rows that normally arrive via provider webhooks (payments, subscriptions,
@@ -415,7 +415,7 @@ describe('operator panel features', () => {
 
   // ---------- coupon redemption stats ----------
 
-  it('coupons: list carries redemptionCount + totalDiscountIssued aggregates', async () => {
+  it('coupons: list carries redemptionCount and what was taken off per currency', async () => {
     const b = await bootstrap('coupstats');
     const endUserId = await signUpEndUser(b, 'redeemer-opf@example.com');
 
@@ -429,9 +429,9 @@ describe('operator panel features', () => {
       expect(res.statusCode).toBe(201);
       return res.json().data as { id: string; code: string };
     };
-    const percent = await createCoupon({ code: 'pct15', discountType: 'PERCENT', amountOff: 1500 });
-    const amount = await createCoupon({ code: 'flat5', discountType: 'AMOUNT', currency: 'USD', amountOff: 500 });
-    await createCoupon({ code: 'unused', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 });
+    const percent = await createCoupon({ code: 'pct15', discountType: 'PERCENT', basisPoints: 1500 });
+    const amount = await createCoupon({ code: 'flat5', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }] });
+    await createCoupon({ code: 'unused', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] });
 
     // PERCENT redemption: the discount is stamped on the REDEMPTION row when
     // it is recorded. It used to be read back off the linked subscription's
@@ -461,7 +461,7 @@ describe('operator panel features', () => {
       },
     });
     // Redemptions with no recorded discount (rows written before the column
-    // existed) fall back to amountOff for an AMOUNT coupon.
+    // existed, with no currency either) are placed by a fixed coupon's only amount.
     for (const paymentId of ['opf-redeem-1', 'opf-redeem-2']) {
       await prisma.couponRedemption.create({
         data: { couponId: amount.id, applicationId: b.applicationId, endUserId, paymentId },
@@ -478,15 +478,24 @@ describe('operator panel features', () => {
       items: Array<{
         code: string;
         redemptionCount: number;
-        totalDiscountIssued: number;
+        discountIssuedByCurrency: Array<{ currency: string; amount: number; redemptions: number }>;
       }>;
       page: { total: number };
     };
     expect(coupons.page.total).toBe(3);
     const byCode = new Map(coupons.items.map((c) => [c.code, c]));
-    expect(byCode.get('pct15')).toMatchObject({ redemptionCount: 1, totalDiscountIssued: 149 });
-    expect(byCode.get('flat5')).toMatchObject({ redemptionCount: 2, totalDiscountIssued: 1000 });
-    expect(byCode.get('unused')).toMatchObject({ redemptionCount: 0, totalDiscountIssued: 0 });
+    // The percentage redemption names no currency and nothing can place it:
+    // it is counted, and is in no currency's total.
+    expect(byCode.get('pct15')).toMatchObject({ redemptionCount: 1, discountIssuedByCurrency: [] });
+    expect(byCode.get('flat5')).toMatchObject({
+      redemptionCount: 2,
+      discountIssuedByCurrency: [{ currency: 'USD', amount: 1000, redemptions: 2 }],
+    });
+    expect(byCode.get('unused')).toMatchObject({ redemptionCount: 0, discountIssuedByCurrency: [] });
+    for (const coupon of coupons.items) {
+      expect(coupon).not.toHaveProperty('totalDiscountIssued');
+      expect(coupon).not.toHaveProperty('discountCurrency');
+    }
   });
 
   // ---------- audit log filters + CSV export ----------

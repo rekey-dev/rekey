@@ -114,7 +114,7 @@ describe('subscription import', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ownerToken}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 2900, kind: 'SUBSCRIPTION', interval: 'MONTH' },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 }, kind: 'SUBSCRIPTION', interval: 'MONTH' },
     });
     expect(plan.statusCode).toBe(201);
 
@@ -376,6 +376,10 @@ describe('subscription import', () => {
     const sub = await prisma.subscription.findFirstOrThrow({
       where: { applicationId: w.applicationId },
     });
+    // An imported row names no currency, so it takes the plan's default price.
+    const plan = await prisma.plan.findUniqueOrThrow({ where: { id: sub.planId } });
+    expect(plan.defaultPriceId).not.toBeNull();
+    expect(sub).toMatchObject({ currency: 'USD', unitAmount: 2900, planPriceId: plan.defaultPriceId });
     expect(sub.currentPeriodEnd).not.toBeNull();
     expect(sub.currentPeriodEnd!.toISOString()).toBe(periodEnd.toISOString());
     expect(sub.cancelAt!.toISOString()).toBe(cancelAt.toISOString());

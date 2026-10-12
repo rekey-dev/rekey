@@ -199,7 +199,7 @@ describe('operator scopes', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${w.appId}/plans`,
       headers: auth(w.memberToken),
-      payload: { slug: 'p', name: 'P', amount: 100, kind: 'SUBSCRIPTION', interval: 'MONTH' },
+      payload: { slug: 'p', name: 'P', price: { currency: 'USD', amount: 100 }, kind: 'SUBSCRIPTION', interval: 'MONTH' },
     });
     // The GRANT refuses first, APP_VIEWER cannot billing-write, and the
     // scope, being an intersection, cannot override that.

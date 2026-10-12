@@ -15,7 +15,8 @@ import { prisma } from '../../../lib/prisma.js';
 import type { BillingProviderName } from '../credentials.service.js';
 import { getProviderForApplication } from '../providers/index.js';
 import type { CheckoutPaymentFailedEvent } from '../providers/module-types.js';
-import type { ApplyContext } from './apply.js';
+import type { ApplyContext } from './apply-shared.js';
+import { logCheckoutExpired } from '../checkout/expired-event.js';
 
 /** Set on a CheckoutSession's metadata; the in-flight guard skips a row carrying it. */
 export const PAYMENT_FAILED_AT = 'paymentFailedAt';
@@ -72,6 +73,13 @@ export async function applyCheckoutPaymentFailed(ev: CheckoutPaymentFailedEvent,
     WHERE application_id = ${ev.applicationId}
       AND provider_session_id = ${ev.checkoutSessionId}
       AND status IN ('OPEN', 'CONFIRMING', 'EXPIRED')`;
+  if (closed > 0) {
+    const sessions = await prisma.checkoutSession.findMany({
+      where: { applicationId: ev.applicationId, providerSessionId: ev.checkoutSessionId },
+      select: { id: true },
+    });
+    for (const session of sessions) await logCheckoutExpired(session.id, 'payment_failed');
+  }
   const held = { applicationId: ev.applicationId, checkoutSessionId: ev.checkoutSessionId, status: 'RESERVED' as const };
   const coupons = await prisma.couponRedemption.deleteMany({ where: held });
   const trials = await prisma.trialRedemption.updateMany({ where: held, data: { status: 'RELEASED' } });

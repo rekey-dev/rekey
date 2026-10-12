@@ -72,6 +72,7 @@ Reading: `GET /api/v1/users/me`, `GET /api/v1/auth/me` and
 render: with a publishable key only the ones the user may answer, with a
 secret key all of them.
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // Your backend
 await rekey.users.updateProfile(userId, { plan_tier: 'enterprise' });
@@ -136,6 +137,7 @@ Every one of these routes returns the same shape:
 }
 ```
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // Browser (@rekey.dev/react)
 await client.skipOnboarding(accessToken);

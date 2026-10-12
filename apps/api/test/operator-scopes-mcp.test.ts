@@ -191,12 +191,13 @@ describe('operator scopes over MCP', () => {
     await setScopes(w, ['overview:read', 'end-users:read']);
     const without = called(await rpc(w.pat, 'tools/call', { name: 'get_workspace_overview', arguments: {} }));
     expect(without).toHaveProperty('activeSubscriptions');
-    expect(without).not.toHaveProperty('mrrMinor');
     expect(without).not.toHaveProperty('currencies');
 
     await setScopes(w, ['overview:read', 'billing:read']);
     const withBilling = called(await rpc(w.pat, 'tools/call', { name: 'get_workspace_overview', arguments: {} }));
-    expect(withBilling).toHaveProperty('mrrMinor');
+    expect(withBilling).toHaveProperty('currencies');
+    // Per currency only: no scalar total sits beside the list.
+    expect(withBilling).not.toHaveProperty('mrrMinor');
   });
 
   it('every tool is either scoped or an explicit workspace floor', () => {

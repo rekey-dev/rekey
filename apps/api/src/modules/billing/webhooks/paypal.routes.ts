@@ -86,15 +86,15 @@ export async function paypalWebhookRoutes(app: FastifyInstance): Promise<void> {
           },
           ...errs({
             400:
-              'VALIDATION_ERROR — the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING ' +
-              '— internal misconfiguration (fastify-raw-body not wired); or ' +
-              'WEBHOOK_PAYLOAD_INVALID — the body is not a recognisable PayPal event (missing ' +
+              'VALIDATION_ERROR: the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING: ' +
+              'internal misconfiguration (fastify-raw-body not wired); or ' +
+              'WEBHOOK_PAYLOAD_INVALID: the body is not a recognisable PayPal event (missing ' +
               '`id` / `event_type`).',
-            401: 'WEBHOOK_SIGNATURE_INVALID — the transmission signature failed PayPal\'s verify-webhook-signature check.',
-            404: 'APPLICATION_NOT_FOUND — no application with that slug.',
+            401: 'WEBHOOK_SIGNATURE_INVALID: the transmission signature failed PayPal\'s verify-webhook-signature check.',
+            404: 'APPLICATION_NOT_FOUND: no application with that slug.',
             503:
-              'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no PayPal webhook id ' +
-              'configured; or WEBHOOK_VERIFICATION_UNAVAILABLE — PayPal\'s verify-webhook-signature ' +
+              'BILLING_CREDENTIALS_NOT_CONFIGURED: this Application has no PayPal webhook id ' +
+              'configured; or WEBHOOK_VERIFICATION_UNAVAILABLE: PayPal\'s verify-webhook-signature ' +
               'call did not answer in time (fail-closed; PayPal will retry).',
           }),
         },

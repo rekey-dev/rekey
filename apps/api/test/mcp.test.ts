@@ -10,6 +10,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { formatMoney } from '@rekey.dev/shared-types';
+import { createPlanWithDefaultPrice } from '../src/modules/plans/default-price.js';
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
@@ -607,6 +609,51 @@ describe('MCP OAuth AS — discovery + DCR', () => {
     })) as { json: () => { result: { content: Array<{ text: string }> } } };
     const bal = JSON.parse(credits.json().result.content[0]!.text) as { balance: number };
     expect(typeof bal.balance).toBe('number');
+  });
+
+  it('get_subscription reports the price the subscription is charged beside its plan\'s default price, and no price when it has none', async () => {
+    const ctx = await bootstrapFlow();
+    const token = await accessTokenFor(ctx);
+    const application = await prisma.application.update({
+      where: { slug: ctx.slug },
+      data: { billingConfig: { provider: 'stripe', enabled: true } },
+    });
+    const endUser = await prisma.endUser.findFirstOrThrow({ where: { applicationId: application.id, email: ctx.euEmail } });
+    const plan = await createPlanWithDefaultPrice({ applicationId: application.id, slug: 'pro', name: 'Pro', amount: 1900, currency: 'USD', interval: 'MONTH' });
+    const inr = await prisma.planPrice.create({ data: { applicationId: application.id, planId: plan.id, currency: 'INR', amount: 149900 } });
+    const subscription = await prisma.subscription.create({
+      data: { applicationId: application.id, endUserId: endUser.id, planId: plan.id, status: 'ACTIVE', planPriceId: inr.id, currency: 'INR', unitAmount: 149900 },
+    });
+    const read = async (): Promise<Record<string, unknown>> => {
+      const res = (await rpc(ctx.slug, token, {
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/call',
+        params: { name: 'get_subscription', arguments: {} },
+      })) as { json: () => { result: { content: Array<{ text: string }>; isError?: boolean } } };
+      expect(res.json().result.isError === true, res.json().result.content[0]!.text).toBe(false);
+      return JSON.parse(res.json().result.content[0]!.text) as Record<string, unknown>;
+    };
+
+    const priced = await read();
+    expect(priced.price).toEqual({ id: inr.id, currency: 'INR', amount: 149900, formatted: formatMoney(149900, 'INR') });
+    expect(priced.plan).toEqual({
+      slug: 'pro',
+      name: 'Pro',
+      interval: 'MONTH',
+      price: { id: plan.defaultPriceId, currency: 'USD', amount: 1900, formatted: formatMoney(1900, 'USD') },
+    });
+
+    // No price of its own: null, never the plan's 19.00.
+    await prisma.subscription.update({ where: { id: subscription.id }, data: { planPriceId: null, currency: null, unitAmount: null } });
+    const unpriced = await read();
+    expect(unpriced.price).toBeNull();
+    expect((unpriced.plan as { price: { amount: number } }).price.amount).toBe(1900);
+
+    const listed = (await rpc(ctx.slug, token, { jsonrpc: '2.0', id: 10, method: 'tools/list' })) as {
+      json: () => { result: { tools: Array<{ name: string; description: string }> } };
+    };
+    expect(listed.json().result.tools.find((tool) => tool.name === 'get_subscription')!.description).toContain('minor units');
   });
 
   it('the billing tools refuse with BILLING_DISABLED where the REST reads they mirror do', async () => {

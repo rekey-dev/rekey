@@ -69,5 +69,8 @@ describe('payment region copy', () => {
     expect(PAYMENT_MESSAGES.handing_off).toMatch(/approved and being processed/i);
     expect(PAYMENT_MESSAGES.handing_off).not.toMatch(/confirmed/i);
     expect(PAYMENT_MESSAGES.redirecting).toMatch(/confirmed/i);
+    // onError cannot tell an abandoned approval from a completed one.
+    expect(PAYMENT_MESSAGES.failed).not.toMatch(/not been charged/i);
+    expect(PAYMENT_MESSAGES.failed).toMatch(/check your PayPal activity before paying again/);
   });
 });

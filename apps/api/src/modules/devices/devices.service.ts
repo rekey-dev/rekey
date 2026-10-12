@@ -36,6 +36,7 @@ import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import { emitDetached, enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import { removeInactiveDeviceIn } from '../support-cases/support-case-writes.js';
 
 export type { Device, DeviceStatus };
 
@@ -119,7 +120,7 @@ function lockKey(applicationId: string, endUserId: string): string {
  * device back to ACTIVE with `blockedAt` still set), and a release cannot be
  * lost to a touch that read ACTIVE a moment earlier.
  */
-async function lockDevices(
+export async function lockDevices(
   tx: Prisma.TransactionClient,
   applicationId: string,
   endUserId: string,
@@ -466,7 +467,22 @@ export const devicesService = {
           releasedBy: args.actor.type,
         },
       });
-      return { device, sessionsRevoked: revoked.count, changed: true, deliveryIds };
+      const supportDeliveryIds = await removeInactiveDeviceIn(tx, {
+        applicationId: args.applicationId,
+        endUserId: args.endUserId,
+        deviceId: current.id,
+        actor: {
+          actorType: args.actor.type === 'server' ? 'system' : args.actor.type,
+          actorId: args.actor.id,
+          tenantId: null,
+        },
+      });
+      return {
+        device,
+        sessionsRevoked: revoked.count,
+        changed: true,
+        deliveryIds: [...deliveryIds, ...supportDeliveryIds],
+      };
     });
     if (!result.changed) return { device: result.device, sessionsRevoked: 0 };
     const released = { device: result.device, sessionsRevoked: result.sessionsRevoked };
@@ -490,7 +506,8 @@ export const devicesService = {
 
   /**
    * Operator decision: refuse sign-in from this fingerprint until unblocked.
-   * Revokes the device's sessions like `release` does. Idempotent.
+   * Revokes the device's sessions and takes the device out of an open support
+   * case, like `release` does. Idempotent.
    */
   async block(args: {
     applicationId: string;
@@ -526,7 +543,18 @@ export const devicesService = {
         type: 'device.blocked',
         data: { device: devicePayload(device), sessionsRevoked: revoked.count },
       });
-      return { device, sessionsRevoked: revoked.count, changed: true, deliveryIds };
+      const supportDeliveryIds = await removeInactiveDeviceIn(tx, {
+        applicationId: args.applicationId,
+        endUserId: args.endUserId,
+        deviceId: current.id,
+        actor: { actorType: 'operator', actorId: args.operatorUserId, tenantId: null },
+      });
+      return {
+        device,
+        sessionsRevoked: revoked.count,
+        changed: true,
+        deliveryIds: [...deliveryIds, ...supportDeliveryIds],
+      };
     });
     if (!result.changed) return { device: result.device, sessionsRevoked: 0 };
     const blocked = { device: result.device, sessionsRevoked: result.sessionsRevoked };

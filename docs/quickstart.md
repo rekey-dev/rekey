@@ -296,6 +296,7 @@ If you do not want that, set `signupMode: 'invite_only'` on the Application.
 Magic link then respects it exactly: unknown addresses get `delivered: false`,
 a `null` token, and no user is created.
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 const result = await rekey.auth.requestPasswordReset({
   email,

@@ -94,6 +94,10 @@ interface ApplyDeltaInput extends CreditSubjectInput {
   afterEntry?: ((tx: Prisma.TransactionClient, entry: CreditLedger) => Promise<void>) | undefined;
   /** Refuse (409) a replay whose stored entry has a different delta or reason. */
   strictReplay?: boolean | undefined;
+  /** The payment that bought these credits, for a purchase or a refill. */
+  paymentId?: string | undefined;
+  /** The plan price the credits were bought at. */
+  planPriceId?: string | undefined;
 }
 
 /**
@@ -231,6 +235,8 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
         reason: input.reason,
         balanceAfter,
         idempotencyKey: input.idempotencyKey ?? null,
+        paymentId: input.paymentId ?? null,
+        planPriceId: input.planPriceId ?? null,
         description: input.description ?? null,
         metadata: (input.metadata ?? {}) as Prisma.InputJsonValue,
       },
@@ -374,8 +380,14 @@ export const creditsService = {
     amount: number;
     paymentRef: string;
     metadata?: Record<string, unknown> | undefined;
+    /** The payment that paid for them, when it is recorded by the time they are granted. */
+    paymentId?: string | undefined;
+    /** The plan price they were bought at. */
+    planPriceId?: string | undefined;
+    /** See `ApplyDeltaInput.afterEntry`. */
+    afterEntry?: ApplyDeltaInput['afterEntry'];
   }): Promise<ApplyDeltaResult> {
-    return applyDelta({
+    const result = await applyDelta({
       applicationId: input.applicationId,
       ...(input.endUserId != null && { endUserId: input.endUserId }),
       ...(input.organizationId != null && { organizationId: input.organizationId }),
@@ -384,7 +396,20 @@ export const creditsService = {
       idempotencyKey: `purchase:${input.paymentRef}`,
       description: 'Credit pack purchase',
       metadata: input.metadata,
+      paymentId: input.paymentId,
+      planPriceId: input.planPriceId,
+      afterEntry: input.afterEntry,
     });
+    // The first period of a subscription is granted when its checkout
+    // completes, before its payment is recorded. When the payment then
+    // arrives and finds the grant already made, the entry takes its id.
+    if (!result.applied && input.paymentId !== undefined) {
+      await prisma.creditLedger.updateMany({
+        where: { id: result.entryId, applicationId: input.applicationId, paymentId: null },
+        data: { paymentId: input.paymentId },
+      });
+    }
+    return result;
   },
 
   /**

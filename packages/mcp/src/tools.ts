@@ -2,51 +2,19 @@
  * MCP tool registry. Each tool is a `(client, args) → result` function with
  * a Zod-described input schema. The server (index.ts) wires them up.
  *
- * Read tools authenticate with the admin key. The one WRITE tool
- * (`mint_api_key`) authenticates instead with a SCOPED operator
- * personal-access-token (`REKEY_OPERATOR_TOKEN`) and is rejected server-side
- * unless that PAT carries the `keys:mint` scope, default-deny, so an agent
- * can't mint production keys unless explicitly granted. See AGENTS.md.
+ * The deployment-wide read tools in this file authenticate with the admin
+ * key. Every WRITE tool, and the billing tools of one Application (see
+ * `billing-tools.ts`), authenticate instead with a SCOPED operator
+ * personal-access-token (`REKEY_OPERATOR_TOKEN`), and the server refuses them
+ * unless that PAT carries the scope the route asks for: default-deny, so an
+ * agent cannot change production unless explicitly granted. See AGENTS.md.
  */
 
 import { z } from 'zod';
-import type { AdminClient } from './client.js';
+import { billingTools } from './billing-tools.js';
+import { MINOR_UNITS, PagingArgs, query, type ToolDefinition } from './tool-types.js';
 
-export interface ToolDefinition<TArgs extends z.ZodRawShape> {
-  name: string;
-  description: string;
-  inputSchema: z.ZodObject<TArgs>;
-  execute: (client: AdminClient, args: z.infer<z.ZodObject<TArgs>>) => Promise<unknown>;
-}
-
-/**
- * `limit` / `offset`, accepted by every list endpoint on the admin surface.
- *
- * Merged into each list tool's args so a model can page. Before 2.0.0-rc.3
- * these endpoints returned a bare array with no `total`, so a tool result
- * silently capped at the server default was indistinguishable from a complete
- * one; a model reading "3 applications" had no way to know there were 90.
- */
-const PagingArgs = {
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .optional()
-    .describe('Rows per page, 1-100. Default 50.'),
-  offset: z.number().int().min(0).optional().describe('Rows to skip (0-based). Default 0.'),
-};
-
-/** Build `?a=b&…`, dropping undefined values. Returns '' when empty. */
-function query(params: Record<string, string | number | boolean | undefined>): string {
-  const p = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined) p.set(k, String(v));
-  }
-  const s = p.toString();
-  return s ? `?${s}` : '';
-}
+export type { ToolDefinition } from './tool-types.js';
 
 const ListApplicationsArgs = z.object({
   tenantId: z.string().optional().describe('Optional Tenant id to filter by.'),
@@ -65,7 +33,7 @@ const ListPlansArgs = z.object({
 
 const ListCouponsArgs = z.object({
   applicationId: z.string().describe('Application id to list coupons for.'),
-  includeInactive: z.boolean().optional(),
+  includeInactive: z.boolean().optional().describe('If true, include deactivated coupons.'),
   ...PagingArgs,
 });
 
@@ -93,17 +61,22 @@ const ListPaymentsArgs = z.object({
   status: z
     .enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'])
     .optional()
-    .describe('Filter by payment status.'),
+    .describe('Filter by payment status. A partly refunded payment has the status PARTIALLY_REFUNDED, which this filter cannot select.'),
   q: z
     .string()
     .optional()
     .describe('Exact-match search: payment id, provider payment id, or end-user id.'),
-  sort: z.enum(['createdAt', 'amount']).optional().describe('Sort field. Default createdAt.'),
+  sort: z
+    .enum(['createdAt', 'amount'])
+    .optional()
+    .describe('Sort field. Default createdAt. `amount` compares the stored integers, so it mixes currencies.'),
   order: z.enum(['asc', 'desc']).optional().describe('Sort direction. Default desc.'),
   limit: z.number().int().min(1).max(200).optional().describe('Page size, 1–200. Default 50.'),
 });
 
 const PaymentStatsByAppArgs = z.object({});
+
+const BillingOutboxArgs = z.object({});
 
 export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
@@ -133,7 +106,9 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_plans',
     description:
-      'List Plans for an Application. Amount is always in the smallest currency unit (cents/paise/sen), never floats. ' +
+      'List Plans for an Application. Each plan carries `prices`, every price it sells at with the default one first: `id`, `currency`, ' +
+      `\`amount\` (${MINOR_UNITS}), \`countries\` (where a non-default price applies; empty means wherever its currency is the local one), \`isDefault\`, \`registration\` (where the price stands at the payment provider), \`amountEditable\` (false once a provider holds the price or a subscription, an open checkout, a payment or a credit grant names it, after which its amount cannot change) and \`liveSubscriptions\` and \`openCheckouts\` (counts of who is on it; a price with either above 0 cannot be removed). ` +
+      "`defaultPriceId` names the default price and is null for a plan with no flat price; `isFree` says the plan charges nothing. A plan has no `amount` or `currency` of its own: `price` is the price a buyer with no country would be charged. " +
       'Returns `{items, page}`, check `page.hasMore` / `page.total`.',
     inputSchema: ListPlansArgs,
     execute: (c, args) =>
@@ -149,7 +124,9 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_coupons',
     description:
-      'List discount coupons for an Application. PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use the smallest currency unit. ' +
+      'List discount coupons for an Application. A PERCENT coupon carries `basisPoints` (1500 = 15%) and works in any currency unless `currencies` limits it. ' +
+      `An AMOUNT coupon carries \`amounts\`, one \`{currency, amountOff}\` per currency (\`amountOff\`: ${MINOR_UNITS}), and works only in those currencies. ` +
+      '`coveredCurrencies` is every currency a checkout may use the coupon in, or null for any. ' +
       'Returns `{items, page}`, check `page.hasMore` / `page.total`.',
     inputSchema: ListCouponsArgs,
     execute: (c, args) =>
@@ -178,7 +155,7 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
     description:
       'List recent payments (newest first), optionally filtered to one Application and/or status. ' +
       'Each row carries applicationId, applicationSlug, endUserId, amount, currency, status, createdAt. ' +
-      'Amounts are integers in the smallest currency unit (cents/paise/sen), never floats.',
+      `\`amount\` is an ${MINOR_UNITS}: read it with the row's \`currency\`, and never add rows in different currencies.`,
     inputSchema: ListPaymentsArgs,
     execute: async (c, args) => {
       const p = new URLSearchParams();
@@ -204,11 +181,19 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'get_payment_stats_by_app',
     description:
       'Billing/payment health per Application over the last 30 days: succeeded/failed/pending/refunded ' +
-      'counts, success rate, and SUCCEEDED volume (volumeCents, smallest currency unit). Use this for ' +
-      '"which apps are earning / failing payments" questions. (The richer per-app Billing Overview, MRR, ' +
-      "12-month revenue series, lives at the panel-session-only endpoint /api/v1/tenant/applications/:id/billing/stats and isn't reachable with this server's credentials.)",
+      'counts, success rate, and `volumeByCurrency`: the net volume of verified payments, one `{currency, volumeCents, payments}` entry per currency ' +
+      `(\`volumeCents\` is an ${MINOR_UNITS} despite its name). There is no total across currencies. Use this for ` +
+      '"which apps are earning / failing payments" questions. For one Application\'s MRR and 12-month revenue series, use `get_billing_stats`.',
     inputSchema: PaymentStatsByAppArgs,
     execute: (c) => c.request('GET', '/api/v1/admin/metrics/payments-by-app'),
+  },
+  {
+    name: 'get_billing_outbox_status',
+    description:
+      'Billing events waiting to reach the billing log, across every Application: `pending`, `due`, and `failing` (rows that have failed `failingThreshold` times or more). ' +
+      '`stuck` lists the failing rows with the error of their last attempt. Each stuck row is an event missing from its Application\'s billing log until it drains. No event payload is returned.',
+    inputSchema: BillingOutboxArgs,
+    execute: (c) => c.request('GET', '/api/v1/admin/metrics/billing-outbox'),
   },
   {
     name: 'mint_api_key',
@@ -227,4 +212,5 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
         },
       ),
   },
+  ...billingTools,
 ];

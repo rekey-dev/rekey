@@ -123,8 +123,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
       applicationId: fixture.applicationId,
       slug: 'hosted',
       name: `${HARNESS_PREFIX} Hosted ${runId}`,
-      amount: 2100,
-      currency: 'usd',
+      price: { currency: 'usd', amount: 2100 },
       interval: 'MONTH',
     });
     await entitlementsService.upsert({

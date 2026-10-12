@@ -78,7 +78,7 @@ describe('License — org-pooled key delivery (#27)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug, name: slug, amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug, name: slug, kind: 'SUBSCRIPTION' },
     });
     await app.inject({
       method: 'PUT',

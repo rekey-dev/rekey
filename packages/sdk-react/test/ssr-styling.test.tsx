@@ -22,11 +22,12 @@ const PLANS = [
     id: 'p1',
     slug: 'pro',
     name: 'Pro',
-    amount: 2900,
-    currency: 'USD',
+    isFree: false,
+    checkout: { ready: true },
     interval: 'MONTH' as const,
     kind: 'SUBSCRIPTION' as const,
-    active: true,
+    price: { currency: 'USD', amount: 2900, formatted: '$29.00' },
+    prices: [{ currency: 'USD', amount: 2900 }],
   },
 ];
 

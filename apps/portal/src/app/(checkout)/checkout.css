@@ -23,7 +23,23 @@ body {
 .ck-link {
   color: var(--ck-accent);
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
+}
+
+/* Navigation that is not the purchase: quiet until pointed at, so the pay
+   button stays the one accented thing on the page. */
+.ck-quiet-link {
+  color: var(--ck-muted-fg);
+  text-underline-offset: 3px;
+}
+
+.ck-quiet-link:hover {
+  color: var(--ck-fg);
+  text-decoration: underline;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--ck-accent) 18%, transparent);
 }
 
 /* The page's own pay button, for a processor whose button Rekey draws.

@@ -92,7 +92,7 @@ describe('a subscription row that has two completable checkout sessions', () => 
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 2900 },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 } },
     });
     userAccess = await app
       .inject({

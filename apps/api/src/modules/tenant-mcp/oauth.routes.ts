@@ -60,7 +60,7 @@ import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body
  */
 const OPERATOR_MCP_DISABLED_404 = {
   404:
-    'ROUTE_NOT_FOUND — this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
+    'ROUTE_NOT_FOUND: this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
     'MCP surface (including this discovery document) does not exist.',
 };
 
@@ -190,7 +190,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           200: { description: 'Authorization-server metadata.', ...ref('OAuthAuthServerMetadata') },
           ...errs({
             ...OPERATOR_MCP_DISABLED_404,
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -209,7 +209,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           200: { description: 'Protected-resource metadata.', ...ProtectedResourceMetadata },
           ...errs({
             ...OPERATOR_MCP_DISABLED_404,
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -254,15 +254,15 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           201: { description: 'The registered public client.', ...ClientRegistrationResponse },
           ...errs({
             400:
-              'INVALID_REDIRECT_URI — a `redirect_uris` entry is not an https URL, an http(s) ' +
-              'loopback URL, or a well-formed custom scheme; or VALIDATION_ERROR — the body ' +
+              'INVALID_REDIRECT_URI: a `redirect_uris` entry is not an https URL, an http(s) ' +
+              'loopback URL, or a well-formed custom scheme; or VALIDATION_ERROR: the body ' +
               'failed schema validation.',
             403:
-              'CLIENT_REGISTRATION_DISABLED — this deployment sets ' +
+              'CLIENT_REGISTRATION_DISABLED: this deployment sets ' +
               '`OPERATOR_MCP_DYNAMIC_REGISTRATION=disabled`, so open registration is closed. ' +
               'The endpoint stays routed (it answers 403 rather than 404) but is also absent ' +
               'from the RFC 8414 metadata, so a compliant client will not attempt it.',
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -301,13 +301,13 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
               'client `redirect_uri` with `error=invalid_request` instead).',
           },
           400: raw(
-            'Invalid authorization request, or unknown `client_id` / unregistered `redirect_uri` ' +
-              '— rendered as an HTML error page, not JSON (there is no validated redirect target ' +
+            'Invalid authorization request, or unknown `client_id` / unregistered `redirect_uri`. ' +
+              'Rendered as an HTML error page, not JSON (there is no validated redirect target ' +
               'to bounce the browser to yet).',
             'text/html',
           ),
           ...errs({
-            503: 'PANEL_URL_NOT_CONFIGURED — this deployment has not set `PANEL_URL`.',
+            503: 'PANEL_URL_NOT_CONFIGURED: this deployment has not set `PANEL_URL`.',
           }),
         },
       },
@@ -394,19 +394,19 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           ),
           ...errs({
             400:
-              'MCP_GRANT_INVALID — the body did not parse; MCP_GRANT_INVALID_CLIENT — unknown ' +
-              '`client_id` or unregistered `redirect_uri`; or MCP_GRANT_PKCE_REQUIRED — ' +
+              'MCP_GRANT_INVALID: the body did not parse; MCP_GRANT_INVALID_CLIENT: unknown ' +
+              '`client_id` or unregistered `redirect_uri`; or MCP_GRANT_PKCE_REQUIRED: ' +
               '`code_challenge_method` is not `S256`.',
             401:
-              'TENANT_SESSION_MISSING — no `Authorization: Bearer` session token; or ' +
-              'TENANT_SESSION_INVALID — the token is invalid, expired, or its operator no ' +
+              'TENANT_SESSION_MISSING: no `Authorization: Bearer` session token; or ' +
+              'TENANT_SESSION_INVALID: the token is invalid, expired, or its operator no ' +
               'longer exists.',
             403:
-              'TENANT_MEMBERSHIP_REVOKED — the session operator is no longer a member of ANY ' +
-              'workspace; or TENANT_MEMBERSHIP_REQUIRED — the session operator is not a member ' +
-              'of the specific `tenant_id` they picked at consent; or OPERATOR_MCP_DISABLED — ' +
+              'TENANT_MEMBERSHIP_REVOKED: the session operator is no longer a member of ANY ' +
+              'workspace; or TENANT_MEMBERSHIP_REQUIRED: the session operator is not a member ' +
+              'of the specific `tenant_id` they picked at consent; or OPERATOR_MCP_DISABLED: ' +
               'that workspace has switched the operator MCP server off, so no consent is granted.',
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -511,14 +511,14 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         response: {
           200: { description: 'Tokens issued.', ...TokenResponse },
           400: oauthError(
-            'invalid_request — the body did not parse, or a required parameter (code / ' +
-              'code_verifier / redirect_uri / refresh_token) is missing; invalid_grant — the ' +
+            'invalid_request: the body did not parse, or a required parameter (code / ' +
+              'code_verifier / redirect_uri / refresh_token) is missing; invalid_grant: the ' +
               'code, PKCE verifier, or refresh_token is invalid, expired, already used, or the ' +
               "operator is no longer a member of the code/token's workspace; or " +
-              'unsupported_grant_type — `grant_type` is neither `authorization_code` nor `refresh_token`.',
+              'unsupported_grant_type: `grant_type` is neither `authorization_code` nor `refresh_token`.',
           ),
           ...errs({
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -618,9 +618,9 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           // still accurate, just incomplete.
           200: { description: 'Token state (RFC 7662).', ...ref('OAuthIntrospectionResponse') },
           ...errs({
-            401: 'OPERATOR_TOKEN_INVALID — the PAT is missing, invalid, revoked, or expired.',
-            403: 'TENANT_MEMBERSHIP_REVOKED — the PAT holder is no longer a member of its workspace.',
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            401: 'OPERATOR_TOKEN_INVALID: the PAT is missing, invalid, revoked, or expired.',
+            403: 'TENANT_MEMBERSHIP_REVOKED: the PAT holder is no longer a member of its workspace.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },

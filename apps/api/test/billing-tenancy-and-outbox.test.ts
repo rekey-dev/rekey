@@ -120,7 +120,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
         method: 'POST',
         url: `/api/v1/admin/applications/${application.id}/plans`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { slug: 'pro_monthly', name: 'Pro', amount: 999 },
+        payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } },
       })
       .then((r) => r.json().data as { id: string });
 

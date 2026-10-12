@@ -209,7 +209,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
       headers: auth(memberToken),
-      payload: { code: 'NOPE', discountType: 'PERCENT', amountOff: 10 },
+      payload: { code: 'NOPE', discountType: 'PERCENT', basisPoints: 10 },
     });
     expect(coupon.statusCode).toBe(403);
     expect(coupon.json().error.code).toBe('TENANT_ROLE_INSUFFICIENT');
@@ -280,8 +280,8 @@ describe('per-application grants (ApplicationGrant)', () => {
     }
 
     const writes: Array<{ method: 'POST' | 'PATCH' | 'PUT'; path: string; payload: unknown }> = [
-      { method: 'POST', path: '/coupons', payload: { code: 'NO', discountType: 'PERCENT', amountOff: 5 } },
-      { method: 'POST', path: '/plans', payload: { slug: 'p1', name: 'P1', amount: 100 } },
+      { method: 'POST', path: '/coupons', payload: { code: 'NO', discountType: 'PERCENT', basisPoints: 5 } },
+      { method: 'POST', path: '/plans', payload: { slug: 'p1', name: 'P1', price: { currency: 'USD', amount: 100 } } },
       { method: 'POST', path: '/api-keys', payload: { name: 'k' } },
       { method: 'PATCH', path: '/auth-config', payload: { signupEnabled: false } },
       { method: 'PUT', path: '/access', payload: { ipAllowlist: [] } },
@@ -309,7 +309,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
       headers: auth(memberToken),
-      payload: { code: 'SAVE10', discountType: 'PERCENT', amountOff: 10 },
+      payload: { code: 'SAVE10', discountType: 'PERCENT', basisPoints: 10 },
     });
     expect(coupon.statusCode).toBe(201);
 
@@ -317,7 +317,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/plans`,
       headers: auth(memberToken),
-      payload: { slug: 'pro', name: 'Pro', amount: 999 },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 999 } },
     });
     expect(plan.statusCode).toBe(201);
 
@@ -410,7 +410,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
       headers: auth(memberToken),
-      payload: { code: 'ADM', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
+      payload: { code: 'ADM', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] },
     });
     expect(coupon.statusCode).toBe(201);
 

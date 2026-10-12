@@ -38,7 +38,7 @@ import { getModule } from './providers/registry.js';
  * as an unexpected charge to the buyer.
  */
 export function resolveCheckoutTrial(input: {
-  plan: Plan;
+  plan: Pick<Plan, 'slug' | 'trialDays'>;
   /** Registry name of the provider the checkout resolved to. */
   provider: string;
   /** True for CREDIT packs and perpetual licences, a single charge. */

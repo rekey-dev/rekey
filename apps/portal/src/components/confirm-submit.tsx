@@ -5,7 +5,7 @@
  * server-action <form>; the confirm button is a real type="submit" so the
  * form's action runs exactly as a plain submit would, only gated by an
  * explicit confirmation. Used for money/irreversible actions in the portal
- * (cancel subscription, switch plan) so a single stray click can't trigger them.
+ * (cancel subscription) so a single stray click can't trigger them.
  */
 
 import * as React from 'react';

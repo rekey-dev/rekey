@@ -121,13 +121,106 @@ export function visitorIpFrom(h: Headers, hops: number = trustedProxyHops()): st
 }
 
 /**
+ * The visitor's country as the hosting platform reports it on a request:
+ * Cloudflare's `cf-ipcountry`, else Vercel's `x-vercel-ip-country`. Undefined
+ * when neither is a two-letter country; Cloudflare sends `XX` for unknown and
+ * `T1` for Tor.
+ *
+ * Kept here, not imported from `@rekey.dev/node`, so this package still loads
+ * beside a node SDK that predates the hint.
+ *
+ * @example
+ * ```ts
+ * visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'in' })); // 'IN'
+ * ```
+ */
+export function visitorCountryHintFrom(h: Headers): string | undefined {
+  for (const name of ['cf-ipcountry', 'x-vercel-ip-country']) {
+    const code = h.get(name)?.trim().toUpperCase();
+    if (code !== undefined && /^[A-Z]{2}$/.test(code) && code !== 'XX') return code;
+  }
+  return undefined;
+}
+
+/**
+ * Where your hosting platform says the visitor of the current request is:
+ * Cloudflare's `cf-ipcountry`, else Vercel's `x-vercel-ip-country`. Undefined
+ * when neither names a country (Cloudflare's `XX` and `T1` do not).
+ *
+ * Give it to your own `@rekey.dev/node` client as `visitorCountryHint` so a
+ * checkout is routed to the payment provider you prefer in that country.
+ * Nothing in this package does that for a checkout: without this call, a
+ * Next.js checkout carries no country. It is a hint, because a visitor who
+ * reaches your origin directly can write the header. It selects a local price
+ * only when the Application's `billingConfig.localPrices` is `any`. Under the
+ * default, pass `country` to `createCheckout` from a source the buyer cannot
+ * write to charge one.
+ *
+ * @example
+ * ```ts
+ * // lib/rekey.ts
+ * import { Rekey } from '@rekey.dev/node';
+ * export const rekey = new Rekey({ apiUrl: process.env.REKEY_URL!, secretKey: process.env.REKEY_SECRET! });
+ *
+ * // app/billing/actions.ts
+ * 'use server';
+ * import { redirect } from 'next/navigation';
+ * import { auth, visitorCountryHint } from '@rekey.dev/nextjs/server';
+ * import { rekey } from '@/lib/rekey';
+ *
+ * export async function checkout(formData: FormData) {
+ *   const session = await auth();
+ *   if (!session) redirect('/sign-in');
+ *   const scoped = rekey.with({ visitorCountryHint: await visitorCountryHint() });
+ *   const { url } = await scoped.billing.createCheckout(session.accessToken, {
+ *     planSlug: String(formData.get('planSlug')),
+ *     successUrl: 'https://yourapp.com/billing?status=ok',
+ *     cancelUrl: 'https://yourapp.com/billing?status=cancel',
+ *   });
+ *   redirect(url);
+ * }
+ * ```
+ *
+ * A pricing page reads its plans through the same scoped client, so each
+ * plan's `price` is the one this visitor's checkout would charge, and
+ * `<PricingTable>` renders it as it is.
+ *
+ * @example
+ * ```tsx
+ * // app/pricing/page.tsx
+ * import { PricingTable } from '@rekey.dev/react';
+ * import { auth, visitorCountryHint } from '@rekey.dev/nextjs/server';
+ * import { rekey } from '@/lib/rekey';
+ * import { checkout } from '../billing/actions';
+ *
+ * export default async function Pricing() {
+ *   const session = await auth();
+ *   const scoped = rekey.with({ visitorCountryHint: await visitorCountryHint() });
+ *   const { items } = await scoped.billing.getPlans(undefined, session ? { accessToken: session.accessToken } : {});
+ *   return <PricingTable plans={items} checkoutAction={checkout} />;
+ * }
+ * ```
+ *
+ * A checkout that charges the default price because the selected one could
+ * not be charged says so in `priceFallback`. Tell the buyer before you
+ * redirect them, with `<PriceFallbackNotice fallback={checkout.priceFallback} />`
+ * from `@rekey.dev/react` or `priceFallbackMessage` from `@rekey.dev/node`.
+ */
+export async function visitorCountryHint(): Promise<string | undefined> {
+  return visitorCountryHintFrom(await headers());
+}
+
+/**
  * The client for a call made on the visitor's behalf: sign-in, sign-up, MFA.
  * Carries the visitor's address in `X-Rekey-Client-Ip` so the API's per-IP
  * sign-in limit counts the visitor rather than this server, and the visitor's
  * User-Agent in `X-Rekey-Client-User-Agent` so the session records their
  * browser and platform rather than this server's runtime. `clientIp`
  * overrides the header-derived address; `null` sends none. `@rekey.dev/node`
- * sends it only when it is exactly one IP address.
+ * sends it only when it is exactly one IP address. The platform's country for
+ * the visitor rides along as `X-Rekey-Visitor-Country-Hint`, which none of
+ * these calls read. A checkout does not go through this client: see
+ * {@link visitorCountryHint}.
  *
  * @internal Exported for `./lists.ts` only; stripped from the published types.
  */
@@ -135,10 +228,12 @@ export async function visitorClient(clientIp?: string | null): Promise<Rekey> {
   const h = await headers();
   const ip = clientIp === undefined ? visitorIpFrom(h) : clientIp;
   const userAgent = h.get('user-agent');
-  if (!ip && !userAgent) return client();
+  const countryHint = visitorCountryHintFrom(h);
+  if (!ip && !userAgent && !countryHint) return client();
   return client().with({
     ...(ip ? { clientIp: ip } : {}),
     ...(userAgent ? { clientUserAgent: userAgent } : {}),
+    ...(countryHint ? { visitorCountryHint: countryHint } : {}),
   });
 }
 

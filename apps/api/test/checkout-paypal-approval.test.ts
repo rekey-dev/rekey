@@ -71,7 +71,7 @@ describe('PayPal approval on the checkout page', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { slug: 'standard', name: 'Cloud Standard', amount: 9900 },
+      payload: { slug: 'standard', name: 'Cloud Standard', price: { currency: 'USD', amount: 9900 } },
     });
     const current = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
     await prisma.application.update({

@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  chosenProvider,
   isCheckoutProvider,
   managedElsewhere,
   resolveCheckoutProvider,
@@ -84,5 +85,17 @@ describe('resolveCheckoutProvider', () => {
       kind: 'refused',
       code: 'BILLING_PROVIDER_NOT_AVAILABLE',
     });
+  });
+});
+
+describe('chosenProvider', () => {
+  it('treats the provider the picker preselected as no choice', () => {
+    expect(chosenProvider('razorpay', 'razorpay')).toBe('');
+    expect(chosenProvider('', '')).toBe('');
+  });
+
+  it('keeps a provider the buyer changed to, and one posted with no preselection', () => {
+    expect(chosenProvider('stripe', 'razorpay')).toBe('stripe');
+    expect(chosenProvider('stripe', '')).toBe('stripe');
   });
 });

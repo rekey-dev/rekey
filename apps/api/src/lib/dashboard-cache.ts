@@ -14,7 +14,7 @@
  *
  * Keys in use, all `rk:` prefixed:
  *   rk:stats:app:<applicationId>   GET /tenant/applications/:id/stats, 60s
- *   rk:admin:overview              GET /admin/metrics/overview, 60s
+ *   rk:admin:overview:v2           GET /admin/metrics/overview, 60s
  *
  * The stale-while-revalidate variant with single-flight is in
  * `swr-cache.ts`; it shares this client and the version scheme below.

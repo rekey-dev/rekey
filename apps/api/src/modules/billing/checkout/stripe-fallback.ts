@@ -19,6 +19,9 @@ import type { FastifyBaseLogger } from 'fastify';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
 import { buildCheckoutSessionMetadata, couponForSession } from '../checkout-sessions.js';
+import { pricedPlan } from '../priced-plan.js';
+import { WITH_DEFAULT_PRICE } from '../../plans/default-price.js';
+import { reportingCurrency } from '../reporting-currency.js';
 import { getProviderForApplication } from '../providers/index.js';
 import type { BillingProvider } from '../providers/types.js';
 import { checkoutPageUrl, type EmbeddedSessionMetadata } from './sessions.service.js';
@@ -96,7 +99,13 @@ async function issue(session: SessionWithApp, provider: BillingProvider, token: 
   if (!provider.createHostedFallback) throw unavailable();
   const detail = await prisma.checkoutSession.findUniqueOrThrow({
     where: { id: session.id },
-    select: { endUser: true, subscription: { select: { plan: true } } },
+    select: {
+      currency: true,
+      unitAmount: true,
+      endUser: true,
+      planPrice: true,
+      subscription: { select: { plan: { include: WITH_DEFAULT_PRICE } } },
+    },
   });
   const meta = session.metadata as unknown as EmbeddedSessionMetadata;
   const pageUrl = checkoutPageUrl(session.application.slug, token);
@@ -106,7 +115,12 @@ async function issue(session: SessionWithApp, provider: BillingProvider, token: 
     hosted = await provider.createHostedFallback({
       application: { id: session.applicationId, slug: session.application.slug },
       endUser: detail.endUser,
-      plan: detail.subscription.plan,
+      plan: {
+        ...pricedPlan(detail.subscription.plan, detail.planPrice, detail.currency ?? reportingCurrency(session.application)),
+        // The price this session was opened at, not the row as it is now: a
+        // one-time price stays editable, and the buyer was shown this one.
+        ...(detail.currency !== null && detail.unitAmount !== null && { currency: detail.currency, amount: detail.unitAmount }),
+      },
       successUrl: pageUrl,
       cancelUrl: pageUrl,
       ...(meta.trialDays > 0 && { trial: { days: meta.trialDays } }),

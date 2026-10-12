@@ -83,7 +83,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       // used to default to USD while every fixture charged INR, which the
       // appliers happily recorded, the mismatch the plan cross-check now
       // refuses.
-      payload: { slug: 'pro_monthly', name: 'Pro', amount: 49900, currency: 'INR' },
+      payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'INR', amount: 49900 } },
     });
   }
 
@@ -247,7 +247,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'credit_pack', name: 'Credits', amount: 19900, currency: 'INR' },
+      payload: { slug: 'credit_pack', name: 'Credits', price: { currency: 'INR', amount: 19900 } },
     });
     const plan = await prisma.plan.findUniqueOrThrow({
       where: { applicationId_slug: { applicationId, slug: 'credit_pack' } },

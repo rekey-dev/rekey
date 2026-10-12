@@ -57,7 +57,7 @@ describe('Plan entitlements + provisioner', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug, name: slug, amount: 0, ...body },
+      payload: { slug, name: slug, ...body },
     });
     if (r.statusCode !== 201) throw new Error(`makePlan ${r.statusCode}: ${r.body}`);
     return (r.json().data as { id: string }).id;

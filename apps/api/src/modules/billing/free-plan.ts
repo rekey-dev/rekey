@@ -1,20 +1,19 @@
 import type { Plan } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { WITH_DEFAULT_PRICE, withDefaultPrice } from '../plans/default-price.js';
 
 /**
- * Whether a plan charges nothing at all.
+ * Whether a plan charges nothing at all: no flat price and no metered one.
  *
- * A plan carries exactly one price: `amount` per interval, plus
- * `pricePerUnitCents` for metered use. Free means both are empty. A zero
- * `amount` with a per-unit price is metered, not free.
+ * Read the plan through `withDefaultPrices` first. That is what keeps
+ * `isFree` true to a plan another build wrote.
  *
  * @example
- * costsNothing({ amount: 0, pricePerUnitCents: null }); // true
- * costsNothing({ amount: 0, pricePerUnitCents: 5 }); // false
+ * costsNothing({ isFree: true }); // true
  */
-export function costsNothing(plan: Pick<Plan, 'amount' | 'pricePerUnitCents'>): boolean {
-  return plan.amount === 0 && plan.pricePerUnitCents === null;
+export function costsNothing(plan: Pick<Plan, 'isFree'>): boolean {
+  return plan.isFree;
 }
 
 /**
@@ -34,8 +33,8 @@ export function freePlanNotFree(slug: string, attempt: 'nominate' | 'activate'):
         : `The Application's default plan "${slug}" is not free, so it cannot be self-activated.`,
     fix:
       attempt === 'nominate'
-        ? 'Nominate a plan with `amount` 0 and no `pricePerUnitCents`, or pass null to have no free tier. Buyers of a priced plan go through POST /api/v1/billing/checkout.'
-        : 'A self-activated plan must cost nothing on both axes: `amount` 0 and no `pricePerUnitCents`. Send buyers of a priced plan through POST /api/v1/billing/checkout instead.',
+        ? 'Nominate a plan whose `isFree` is true (one with no `price` that is not a USAGE plan), or pass null to have no free tier. Buyers of a priced plan go through POST /api/v1/billing/checkout.'
+        : 'A self-activated plan must be free: `isFree` true, which means no `price` and not a USAGE plan. Send buyers of a priced plan through POST /api/v1/billing/checkout instead.',
   });
 }
 
@@ -47,10 +46,8 @@ export function freePlanNotFree(slug: string, attempt: 'nominate' | 'activate'):
  * await assertNominatableFreePlan(application.id, 'free');
  */
 export async function assertNominatableFreePlan(applicationId: string, slug: string): Promise<void> {
-  const plan = await prisma.plan.findFirst({
-    where: { applicationId, slug, active: true },
-    select: { amount: true, pricePerUnitCents: true },
-  });
+  const row = await prisma.plan.findFirst({ where: { applicationId, slug, active: true }, include: WITH_DEFAULT_PRICE });
+  const plan = row === null ? null : await withDefaultPrice(row);
   if (!plan) {
     throw new RekeyError({
       statusCode: 400,

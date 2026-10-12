@@ -47,14 +47,14 @@ const CallbackBody = z.object({
  */
 const KEY_ERRORS = {
   401:
-    'API_KEY_MISSING — no `Authorization: Bearer` header; or API_KEY_INVALID — the secret ' +
-    'key is unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID — the publishable key ' +
+    'API_KEY_MISSING: no `Authorization: Bearer` header; or API_KEY_INVALID: the secret ' +
+    'key is unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID: the publishable key ' +
     'is unknown or was rotated out.',
   403:
-    'IP_NOT_ALLOWED — caller IP is outside the secret key\'s IP allowlist; or ' +
-    'ORIGIN_NOT_ALLOWED — the browser `Origin` is outside the publishable key\'s CORS ' +
-    'allowlist; or API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `auth:write` scope.',
-  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+    'IP_NOT_ALLOWED: caller IP is outside the secret key\'s IP allowlist; or ' +
+    'ORIGIN_NOT_ALLOWED: the browser `Origin` is outside the publishable key\'s CORS ' +
+    'allowlist; or API_KEY_SCOPE_INSUFFICIENT: the secret key lacks the `auth:write` scope.',
+  429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
 } as const;
 
 /**
@@ -63,10 +63,10 @@ const KEY_ERRORS = {
  */
 const USER_SESSION_ERRORS = {
   401:
-    `${KEY_ERRORS[401]}; or USER_TOKEN_MISSING — no \`X-Rekey-User-Token\` header; or ` +
-    'USER_TOKEN_INVALID — the user token is invalid, expired, or wrongly signed; or ' +
-    'USER_TOKEN_WRONG_APPLICATION — the token was issued by a different Application; or ' +
-    'IMPERSONATION_SESSION_ENDED — the impersonation session behind this token has ended.',
+    `${KEY_ERRORS[401]}; or USER_TOKEN_MISSING: no \`X-Rekey-User-Token\` header; or ` +
+    'USER_TOKEN_INVALID: the user token is invalid, expired, or wrongly signed; or ' +
+    'USER_TOKEN_WRONG_APPLICATION: the token was issued by a different Application; or ' +
+    'IMPERSONATION_SESSION_ENDED: the impersonation session behind this token has ended.',
   403: KEY_ERRORS[403].replace('the secret key lacks the `auth:write` scope.', 'the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).'),
   429: KEY_ERRORS[429],
 } as const;
@@ -109,10 +109,10 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'BAD_REQUEST — `state` is missing or too long; or OAUTH_PROVIDER_NOT_CONFIGURED ' +
-              '— this Application has no config (or no client secret) for this provider.',
+              'BAD_REQUEST: `state` is missing or too long; or OAUTH_PROVIDER_NOT_CONFIGURED: ' +
+              'this Application has no config (or no client secret) for this provider.',
             ...KEY_ERRORS,
-            404: 'OAUTH_PROVIDER_UNKNOWN — the provider is not registered (use google or github).',
+            404: 'OAUTH_PROVIDER_UNKNOWN: the provider is not registered (use google or github).',
           }),
         },
       },
@@ -177,21 +177,21 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — `code` is missing or too long; or ' +
-              'OAUTH_PROVIDER_NOT_CONFIGURED — this Application has no config (or no client ' +
-              'secret) for this provider; or OAUTH_NO_EMAIL — the provider did not return an ' +
+              'VALIDATION_ERROR: `code` is missing or too long; or ' +
+              'OAUTH_PROVIDER_NOT_CONFIGURED: this Application has no config (or no client ' +
+              'secret) for this provider; or OAUTH_NO_EMAIL: the provider did not return an ' +
               'email, so a new user cannot be created.',
             401:
-              `${KEY_ERRORS[401]}; or OAUTH_IDENTITY_WRONG_APPLICATION — defence-in-depth, ` +
-              'should be unreachable via normal flows; or OAUTH_EMAIL_NOT_VERIFIED — the ' +
+              `${KEY_ERRORS[401]}; or OAUTH_IDENTITY_WRONG_APPLICATION: defence-in-depth, ` +
+              'should be unreachable via normal flows; or OAUTH_EMAIL_NOT_VERIFIED: the ' +
               'provider did not verify the email and a local account with that email already ' +
               'exists (sign in with it, then link this provider explicitly instead).',
             403:
-              `${KEY_ERRORS[403]}; or SIGNUP_DISABLED — this Application does not allow new ` +
-              'sign-ups; or SIGNUP_REQUIRES_SECRET_KEY — OAuth-first sign-up needs a ' +
-              'secret-key caller on this Application; or TENANT_QUOTA_EXCEEDED — the ' +
+              `${KEY_ERRORS[403]}; or SIGNUP_DISABLED: this Application does not allow new ` +
+              'sign-ups; or SIGNUP_REQUIRES_SECRET_KEY: OAuth-first sign-up needs a ' +
+              'secret-key caller on this Application; or TENANT_QUOTA_EXCEEDED: the ' +
               "workspace's end-user limit would be exceeded by creating this user.",
-            404: 'OAUTH_PROVIDER_UNKNOWN — the provider is not registered (use google or github).',
+            404: 'OAUTH_PROVIDER_UNKNOWN: the provider is not registered (use google or github).',
             429: KEY_ERRORS[429],
           }),
         },
@@ -321,10 +321,10 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'BAD_REQUEST — `state` is missing or too long; or OAUTH_PROVIDER_NOT_CONFIGURED ' +
-              '— this Application has no config (or no client secret) for this provider.',
+              'BAD_REQUEST: `state` is missing or too long; or OAUTH_PROVIDER_NOT_CONFIGURED: ' +
+              'this Application has no config (or no client secret) for this provider.',
             ...USER_SESSION_ERRORS,
-            404: 'OAUTH_PROVIDER_UNKNOWN — the provider is not registered (use google or github).',
+            404: 'OAUTH_PROVIDER_UNKNOWN: the provider is not registered (use google or github).',
           }),
         },
       },
@@ -352,7 +352,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
       preHandler: refuseWhileImpersonating('link a sign-in provider to this account'),
       schema: {
         tags: ['Public · OAuth'],
-        summary: 'Complete an OAuth link — attaches the provider identity to the current user',
+        summary: 'Complete an OAuth link: attaches the provider identity to the current user',
         params: { type: 'object', properties: { provider: { type: 'string' } }, required: ['provider'] },
         body: {
           type: 'object',
@@ -381,15 +381,15 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — `code` is missing or too long; or ' +
-              'OAUTH_PROVIDER_NOT_CONFIGURED — this Application has no config (or no client ' +
+              'VALIDATION_ERROR: `code` is missing or too long; or ' +
+              'OAUTH_PROVIDER_NOT_CONFIGURED: this Application has no config (or no client ' +
               'secret) for this provider.',
             401:
-              `${USER_SESSION_ERRORS[401]}; or OAUTH_EMAIL_NOT_VERIFIED — the provider did ` +
+              `${USER_SESSION_ERRORS[401]}; or OAUTH_EMAIL_NOT_VERIFIED: the provider did ` +
               'not verify the email; refusing to link.',
             403: USER_SESSION_ERRORS[403],
-            404: 'OAUTH_PROVIDER_UNKNOWN — the provider is not registered (use google or github).',
-            409: 'OAUTH_IDENTITY_TAKEN — this provider account is already linked to a different user.',
+            404: 'OAUTH_PROVIDER_UNKNOWN: the provider is not registered (use google or github).',
+            409: 'OAUTH_IDENTITY_TAKEN: this provider account is already linked to a different user.',
             429: USER_SESSION_ERRORS[429],
           }),
         },
@@ -436,9 +436,9 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...USER_SESSION_ERRORS,
-            404: 'END_USER_NOT_FOUND — the current user no longer exists in this Application.',
+            404: 'END_USER_NOT_FOUND: the current user no longer exists in this Application.',
             409:
-              'OAUTH_UNLINK_WOULD_LOCK_OUT — removing this provider would leave the account ' +
+              'OAUTH_UNLINK_WOULD_LOCK_OUT: removing this provider would leave the account ' +
               'with no way to sign in (no password and no other linked provider).',
           }),
         },

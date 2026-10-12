@@ -81,8 +81,39 @@ describe('checkout page', () => {
     expect(html).not.toContain('Subscribe to');
     expect(html).not.toMatch(/Renews automatically|cancel any time|per month/);
     expect(html).toContain('Total due today');
+    expect(html).toContain('One-time payment. Nothing renews.');
     expect(html).toContain('Payments are processed securely by PayPal.');
     expect(html).toContain('Test mode: no real money moves. Pay with a PayPal sandbox account.');
+  });
+
+  it('never calls a subscription a one-time payment', () => {
+    expect(render('live')).not.toContain('One-time payment');
+  });
+
+  it('leads a discounted one-time order with what is charged, and keeps the list price as a line', () => {
+    const base = order();
+    const discounted: CheckoutPageOrder = {
+      ...base,
+      plan: { ...base.plan, amount: 14900, interval: null, kind: 'one_time' },
+      discountAmount: 400,
+      totalDueToday: 14500,
+      client: { provider: 'paypal', clientId: 'client-id', orderId: '5O190127TN364715T', sdk: 'v5-order', currency: 'USD' },
+    };
+    const html = render('live', discounted);
+    const headline = /<p class="[^"]*text-4xl[^"]*">([^<]*)</.exec(html)?.[1];
+    expect(headline).toBe('$145.00');
+    expect(html).toContain('$149.00');
+    expect(html).toContain('−$4.00');
+    expect(html).toContain('(USD)');
+  });
+
+  it('names the way to cancel: the account page, the support page, or the support address itself', () => {
+    const withManage = { ...order(), manageUrl: 'https://app.example/billing' };
+    expect(render('live', withManage)).toContain('href="https://app.example/billing"');
+    expect(render('live', order({ supportUrl: 'https://example.com/help' }))).toContain('Rekey Cloud support</a>');
+    const byEmail = render('live');
+    expect(byEmail).toContain('You can cancel any time by emailing');
+    expect(byEmail).toMatch(/href="mailto:help@example\.com"[^>]*>help@example\.com<\/a>/);
   });
 
   it('puts the nonce on every inline script and style it renders', () => {
@@ -134,6 +165,20 @@ describe('checkout formatting', () => {
     expect(readableAccent('#ffeb3b')).toBe('#171717');
     expect(readableSurface('#111111')).toBeNull();
     expect(readableSurface('#fafafa')).toBe('#fafafa');
+  });
+
+  it('refuses a surface that leaves the muted text unreadable, though near-black text would pass', () => {
+    expect(readableSurface('#808080')).toBeNull();
+    expect(readableSurface('#b0b0b0')).toBeNull();
+    expect(readableSurface('#e5e5e5')).toBe('#e5e5e5');
+  });
+
+  it('keeps an accent only when it is also readable on the surfaces it is drawn on', () => {
+    expect(readableAccent('#0f766e', ['#fafafa', null])).toBe('#0f766e');
+    expect(readableAccent('#0f766e', ['#d4d4d4'])).toBe('#171717');
+    const html = render('live', order({ primaryColor: '#0f766e', surfaceColor: '#d4d4d4' }));
+    expect(html).toContain('--ck-accent:#171717');
+    expect(html).toContain('--ck-surface:#d4d4d4');
   });
 });
 

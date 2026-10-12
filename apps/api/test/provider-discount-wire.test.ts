@@ -13,10 +13,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EndUser, Plan } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
-import type { CheckoutSessionInput } from '../src/modules/billing/providers/types.js';
+import type { CheckoutSessionInput, PricedPlan } from '../src/modules/billing/providers/types.js';
 
 const stripeSpy = vi.hoisted(() => ({
   coupons: [] as Record<string, unknown>[],
@@ -61,8 +62,8 @@ vi.mock('razorpay', () => {
 const PLAN_AMOUNT = 5000;
 const DISCOUNT_AMOUNT = 1250;
 
-function planFixture(over: Partial<Plan> = {}): Plan {
-  return {
+function planFixture(over: Partial<Plan> = {}): PricedPlan {
+  return pricedPlan({
     id: 'pl_1',
     applicationId: 'app_1',
     slug: 'pro',
@@ -72,7 +73,7 @@ function planFixture(over: Partial<Plan> = {}): Plan {
     interval: 'MONTH',
     metadata: { stripe: { priceId: 'price_fake' } },
     ...over,
-  } as unknown as Plan;
+  } as unknown as Plan, null);
 }
 
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;

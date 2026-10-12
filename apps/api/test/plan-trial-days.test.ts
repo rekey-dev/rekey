@@ -92,7 +92,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
     const res = await createPlan(token, appId, {
       slug: 'pro',
       name: 'Pro',
-      amount: 1000,
+      price: { currency: 'USD', amount: 1000 },
       kind: 'SUBSCRIPTION',
       trialDays: 14,
     });
@@ -109,7 +109,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
     // bounds that to once, which is not the same as fixing it.
     const { token, appId } = await setup('materialises');
     expect(
-      (await createPlan(token, appId, { slug: 'gen', name: 'Gen', amount: 1000, kind: 'SUBSCRIPTION' }))
+      (await createPlan(token, appId, { slug: 'gen', name: 'Gen', price: { currency: 'USD', amount: 1000 }, kind: 'SUBSCRIPTION' }))
         .statusCode,
     ).toBe(201);
     const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'gen' } });
@@ -141,7 +141,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
       (await createPlan(token, appId, {
         slug: 'tri',
         name: 'Tri',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         trialDays: 7,
       })).statusCode,
@@ -165,7 +165,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
       (await createPlan(token, appId, {
         slug: 'feat',
         name: 'Feat',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         trialDays: 7,
       })).statusCode,
@@ -188,7 +188,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
         applicationId: appId,
         slug: 'svc',
         name: 'Svc',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         trialDays: 7,
       }),
@@ -205,7 +205,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
         applicationId: appId,
         slug: 'svc-credits',
         name: 'Svc',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         trialDays: 7,
         creditsAmount: 100,
@@ -216,7 +216,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
   it('a trial added to an existing plain plan is accepted', async () => {
     const { token, appId } = await setup('held-update');
     expect(
-      (await createPlan(token, appId, { slug: 'basic', name: 'Basic', amount: 500 })).statusCode,
+      (await createPlan(token, appId, { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 500 } })).statusCode,
     ).toBe(201);
 
     const patched = await app.inject({
@@ -248,7 +248,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
           applicationId: 'irrelevant',
           slug: 'b',
           name: 'B',
-          amount: 100,
+          price: { currency: 'USD', amount: 100 },
           kind: 'SUBSCRIPTION',
           trialDays: bad,
         }),
@@ -259,7 +259,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
   it('still accepts a plan with no trial, and clearing one with 0', async () => {
     const { token, appId } = await setup('held-none');
     expect(
-      (await createPlan(token, appId, { slug: 'none', name: 'None', amount: 100 })).statusCode,
+      (await createPlan(token, appId, { slug: 'none', name: 'None', price: { currency: 'USD', amount: 100 } })).statusCode,
     ).toBe(201);
 
     // 0 is legal on UPDATE (its zod is `min(0)`; create's is `min(1)`), and must
@@ -282,7 +282,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
     // The read side is untouched and still correct; with the write side held,
     // every real row resolves to no trial.
     const { token, appId } = await setup('held-checkout');
-    await createPlan(token, appId, { slug: 'sub', name: 'Sub', amount: 1000 });
+    await createPlan(token, appId, { slug: 'sub', name: 'Sub', price: { currency: 'USD', amount: 1000 } });
     const row = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'sub' } });
     expect(resolveCheckoutTrial({ plan: row, provider: 'stripe', isOneTime: false })).toBeNull();
   });
@@ -295,7 +295,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
       (await createPlan(token, appId, {
         slug: 'legacy',
         name: 'Legacy',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         trialDays: 14,
       })).statusCode,

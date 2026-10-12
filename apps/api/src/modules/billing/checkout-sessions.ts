@@ -95,6 +95,8 @@ export interface SessionCoupon {
   couponId: string;
   /** Discount in the smallest currency unit, as resolved at checkout time. */
   discountAmount: number;
+  /** The currency the session charges, which `discountAmount` is in. Absent on sessions older than the field. */
+  currency?: string;
   /**
    * The `maxRedemptions` reservation this checkout took, when the coupon has a
    * global limit (see the RESERVED rows in coupons.service.ts). Carried on the session rather than
@@ -186,6 +188,7 @@ export function buildCheckoutSessionMetadata(input: {
     couponBySession[id] = {
       couponId: entry.couponId,
       discountAmount: typeof entry.discountAmount === 'number' ? entry.discountAmount : 0,
+      ...(typeof entry.currency === 'string' && { currency: entry.currency }),
       ...(typeof entry.holdId === 'string' && { holdId: entry.holdId }),
     };
   }
@@ -258,6 +261,7 @@ export function couponForSession(metadata: unknown, sessionId: string): SessionC
       couponId: perSession.couponId,
       discountAmount:
         typeof perSession.discountAmount === 'number' ? perSession.discountAmount : 0,
+      ...(typeof perSession.currency === 'string' && { currency: perSession.currency }),
       ...(typeof perSession.holdId === 'string' && { holdId: perSession.holdId }),
     };
   }

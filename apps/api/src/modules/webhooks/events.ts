@@ -84,6 +84,7 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'subscription.trial_will_end',
   'payment.succeeded',
   'payment.failed',
+  'payment.refunded',
   // Dunning lifecycle, emitted by `modules/billing/dunning.service.ts` when a
   // failed-payment recovery case opens, recovers, or exhausts (day 14 →
   // subscription canceled). Same transition-only + eventId-dedupe contract as
@@ -126,6 +127,11 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'contact.subscribed',
   'contact.unsubscribed',
   'contact.submission.created',
+  // Support mode. Written in the transaction that opened, changed or closed
+  // the case. Payload: `data.user.id` and `data.support`. Never the reason.
+  'support.opened',
+  'support.updated',
+  'support.closed',
 ] as const;
 
 /**

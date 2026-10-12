@@ -24,6 +24,7 @@ import { recordSecurityEventIn, requestContext } from '../../lib/security-events
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { paged } from '../../lib/pagination.js';
 import { resolveSelfBillingSubject } from '../billing/self-subject.js';
+import { logCreditsGranted } from '../billing/money-events.js';
 
 /**
  * Auth/gate errors shared by every route in this file: `requireApiKey`
@@ -32,13 +33,13 @@ import { resolveSelfBillingSubject } from '../billing/self-subject.js';
  */
 const READ_GATE_ERRORS = {
   401:
-    'API_KEY_MISSING — no Authorization header; or API_KEY_INVALID — the presented credential ' +
+    'API_KEY_MISSING: no Authorization header; or API_KEY_INVALID: the presented credential ' +
     'is not a valid Application secret key, or is unknown/revoked/expired.',
   403:
-    "IP_NOT_ALLOWED — caller IP outside the key's allowlist; or BILLING_DISABLED — billing is " +
-    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT — the key lacks the ' +
+    "IP_NOT_ALLOWED: caller IP outside the key's allowlist; or BILLING_DISABLED: billing is " +
+    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT: the key lacks the ' +
     '`billing:read` scope.',
-  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+  429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
 } as const;
 
 const WRITE_GATE_ERRORS = {
@@ -49,8 +50,8 @@ const WRITE_GATE_ERRORS = {
 
 /** `resolveSubject` refuses an org/end-user id that doesn't belong to this Application. */
 const SUBJECT_NOT_FOUND =
-  'ORGANIZATION_NOT_FOUND — `organizationId` does not name an organization in this ' +
-  'application; or END_USER_NOT_FOUND — `endUserId` does not name an end-user in this application.';
+  'ORGANIZATION_NOT_FOUND: `organizationId` does not name an organization in this ' +
+  'application; or END_USER_NOT_FOUND: `endUserId` does not name an end-user in this application.';
 
 /**
  * Prefix on the ledger idempotency key of a `POST /grant`. The caller's key is
@@ -149,7 +150,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(ref('CreditBalance'), "The subject's current credit balance."),
           ...errs({
-            400: 'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`.',
+            400: 'VALIDATION_ERROR: pass exactly one of `endUserId` or `organizationId`.',
             ...READ_GATE_ERRORS,
             404: SUBJECT_NOT_FOUND,
           }),
@@ -196,15 +197,15 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('ConsumeCreditsResult'), 'The balance after the drawdown.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`; or ' +
-              'IDEMPOTENCY_KEY_INVALID — the Idempotency-Key header is empty or exceeds 200 ' +
-              'characters; or METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit.',
+              'VALIDATION_ERROR: pass exactly one of `endUserId` or `organizationId`; or ' +
+              'IDEMPOTENCY_KEY_INVALID: the Idempotency-Key header is empty or exceeds 200 ' +
+              'characters; or METADATA_TOO_LARGE: `metadata` exceeds the 16KB limit.',
             ...WRITE_GATE_ERRORS,
-            402: 'CREDITS_INSUFFICIENT — the balance is below `amount`.',
+            402: 'CREDITS_INSUFFICIENT: the balance is below `amount`.',
             404: SUBJECT_NOT_FOUND,
             409:
-              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
-              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
+              'IDEMPOTENCY_KEY_IN_FLIGHT: a request with this Idempotency-Key is still being ' +
+              'processed; or IDEMPOTENCY_KEY_REUSED: the key was already used for a different ' +
               'method, path, or body.',
           }),
         },
@@ -313,9 +314,9 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
         ...(body.metadata !== undefined && { metadata: body.metadata }),
         // Written in the grant's transaction, so an applied grant always has
         // its audit row (and a failed audit write fails the grant). A replay
-        // writes no entry, so it is not audited twice.
-        afterEntry: (tx, entry) =>
-          recordSecurityEventIn(tx, {
+        // writes no entry, so it is not audited or logged twice.
+        afterEntry: async (tx, entry) => {
+          await recordSecurityEventIn(tx, {
             type: 'app.credits_granted_by_api_key',
             actorType: 'system',
             actorId: apiKey.id,
@@ -333,7 +334,15 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
               ledgerEntryId: entry.id,
               balance: entry.balanceAfter,
             },
-          }),
+          });
+          // The billing log has no actor type for a key. A secret key is the
+          // Application's own server, so it is `system`, named by the key id.
+          await logCreditsGranted(tx, entry, {
+            source: 'api_key',
+            actor: { type: 'system', id: apiKey.id },
+            log: req.log,
+          });
+        },
       });
       return reply.status(201).send({ success: true, data: result });
     },
@@ -362,7 +371,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: okPage(ref('CreditLedgerEntry'), "A page of the subject's credit ledger entries, newest first."),
           ...errs({
-            400: 'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`.',
+            400: 'VALIDATION_ERROR: pass exactly one of `endUserId` or `organizationId`.',
             ...READ_GATE_ERRORS,
             404: SUBJECT_NOT_FOUND,
           }),

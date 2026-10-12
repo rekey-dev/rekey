@@ -85,17 +85,17 @@ export async function stripeWebhookRoutes(app: FastifyInstance): Promise<void> {
           },
           ...errs({
             400:
-              'VALIDATION_ERROR — the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING ' +
-              '— internal misconfiguration (fastify-raw-body not wired); or ' +
-              "WEBHOOK_APPLICATION_MISMATCH — the event's `metadata.applicationId` names a " +
+              'VALIDATION_ERROR: the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING: ' +
+              'internal misconfiguration (fastify-raw-body not wired); or ' +
+              "WEBHOOK_APPLICATION_MISMATCH: the event's `metadata.applicationId` names a " +
               "different Application than the one whose secret signed this request.",
             401:
-              'WEBHOOK_SIGNATURE_MISSING — no `stripe-signature` header; or ' +
-              "WEBHOOK_SIGNATURE_INVALID — the signature does not verify against this " +
+              'WEBHOOK_SIGNATURE_MISSING: no `stripe-signature` header; or ' +
+              "WEBHOOK_SIGNATURE_INVALID: the signature does not verify against this " +
               "Application's stored webhook secret.",
-            404: 'APPLICATION_NOT_FOUND — no application with that slug.',
+            404: 'APPLICATION_NOT_FOUND: no application with that slug.',
             503:
-              'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no Stripe webhook ' +
+              'BILLING_CREDENTIALS_NOT_CONFIGURED: this Application has no Stripe webhook ' +
               'secret configured.',
           }),
         },

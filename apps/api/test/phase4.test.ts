@@ -195,15 +195,57 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
     const inList = await app
       .inject({
         method: 'GET',
-        url: '/api/v1/billing/providers',
-        headers: {
-          authorization: `Bearer ${b.liveKey}`,
-          'cf-ipcountry': 'IN',
-        },
+        url: '/api/v1/billing/providers?country=in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
       })
-      .then((r) => r.json().data as { country: string; providers: Array<{ provider: string }> });
+      .then((r) => r.json().data as { country: string; countrySource: string; routedProvider: string; providers: Array<{ provider: string }> });
     expect(inList.country).toBe('IN');
+    expect(inList.countrySource).toBe('declared');
     expect(inList.providers[0]!.provider).toBe('razorpay');
+    expect(inList.routedProvider).toBe('razorpay');
+
+    // A secret-key call comes from the operator's server, so the CDN's country
+    // for that connection is not the buyer's and is not used.
+    const fromServer = await app
+      .inject({
+        method: 'GET',
+        url: '/api/v1/billing/providers',
+        headers: { authorization: `Bearer ${b.liveKey}`, 'cf-ipcountry': 'IN' },
+      })
+      .then((r) => r.json().data as { country: string | null; routedProvider: string });
+    expect(fromServer.country).toBeNull();
+    expect(fromServer.routedProvider).toBe('stripe');
+
+    // A browser caller with the publishable key: its own word is a hint, the
+    // CDN's header on the request outranks it, and both route.
+    const { publicKey } = await prisma.application.findUniqueOrThrow({ where: { id: b.applicationId }, select: { publicKey: true } });
+    const fromBrowser = (url: string, headers: Record<string, string> = {}) =>
+      app
+        .inject({ method: 'GET', url, headers: { authorization: `Bearer ${publicKey}`, ...headers } })
+        .then((r) => r.json().data as { country: string | null; countrySource: string | null; routedProvider: string });
+    expect(await fromBrowser('/api/v1/billing/providers?country=IN')).toMatchObject({ country: 'IN', countrySource: 'hint', routedProvider: 'razorpay' });
+    expect(await fromBrowser('/api/v1/billing/providers?country=IN', { 'cf-ipcountry': 'DE' })).toMatchObject({
+      country: 'DE',
+      countrySource: 'hint',
+      routedProvider: 'paypal',
+    });
+    // Cloudflare's placeholder for Tor is forwarded as it is by many callers:
+    // it must read as "no country", never as a refused request.
+    for (const placeholder of ['T1', 'XX']) {
+      const tor = await app.inject({
+        method: 'GET',
+        url: `/api/v1/billing/providers?country=${placeholder}`,
+        headers: { authorization: `Bearer ${b.liveKey}` },
+      });
+      expect(tor.statusCode, tor.body).toBe(200);
+      expect(tor.json().data).toMatchObject({ country: null, routedProvider: 'stripe' });
+    }
+    const malformed = await app.inject({
+      method: 'GET',
+      url: '/api/v1/billing/providers?country=India',
+      headers: { authorization: `Bearer ${b.liveKey}` },
+    });
+    expect(malformed.statusCode).toBe(400);
 
     // Public /providers, no country → globals (stripe) first because
     // country-restricted ones don't have a known match. Within tiers,
@@ -230,11 +272,8 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
     const inAfterDisable = await app
       .inject({
         method: 'GET',
-        url: '/api/v1/billing/providers',
-        headers: {
-          authorization: `Bearer ${b.liveKey}`,
-          'cf-ipcountry': 'IN',
-        },
+        url: '/api/v1/billing/providers?country=IN',
+        headers: { authorization: `Bearer ${b.liveKey}` },
       })
       .then((r) => r.json().data as { providers: Array<{ provider: string }> });
     // For IN with razorpay disabled: no country-match, then globals (stripe),
@@ -250,7 +289,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${b.applicationId}/plans`,
       headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { slug: 'pro', name: 'Pro', amount: 999, currency: 'USD', interval: 'MONTH' },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 999 }, interval: 'MONTH' },
     });
     await app.inject({
       method: 'PUT',

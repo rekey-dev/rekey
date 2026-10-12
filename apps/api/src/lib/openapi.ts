@@ -80,6 +80,13 @@ import {
   BillingProviderInfoDtoSchema,
   OAuthProviderSummaryDtoSchema,
   BillingStatsDtoSchema,
+  BillingLogEntrySchema,
+  BillingLogPageSchema,
+  BillingOutboxStatusSchema,
+  PriceFallbackSummarySchema,
+  ReconciliationReportSchema,
+  ReportingCurrencyDtoSchema,
+  RoutingPreviewDtoSchema,
   CheckoutResultDtoSchema,
   CheckoutPageViewSchema,
   CheckoutReadinessSchema,
@@ -88,6 +95,7 @@ import {
   TrialEligibilityItemSchema,
   ConsumeCreditsResultDtoSchema,
   CouponDtoSchema,
+  CouponWithStatsDtoSchema,
   CreditBalanceDtoSchema,
   CreditLedgerEntryDtoSchema,
   EndUserDtoSchema,
@@ -110,6 +118,7 @@ import {
   OrganizationMemberDtoSchema,
   OrganizationWithRoleDtoSchema,
   PlanDtoSchema,
+  PlanPriceDtoSchema,
   PublicPlanDtoSchema,
   PublicCouponDtoSchema,
   RetryWebhookDeliveryResultDtoSchema,
@@ -192,6 +201,13 @@ function openClosedObjects(node: unknown): JsonSchema {
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
     if (key === 'additionalProperties' && value === false) continue;
     out[key] = openClosedObjects(value);
+  }
+  // `z.number().int().positive()` comes out as `minimum: 0, exclusiveMinimum:
+  // true`, the OpenAPI 3.0 spelling, which Fastify's validator (draft-07)
+  // refuses to compile. For an integer, "above n" is "at least n + 1".
+  if (out.type === 'integer' && out.exclusiveMinimum === true && typeof out.minimum === 'number') {
+    out.minimum += 1;
+    delete out.exclusiveMinimum;
   }
   return out as JsonSchema;
 }
@@ -546,7 +562,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       'token hashes, no MFA secrets or backup codes, no license key hash, no passkey ' +
       'public keys. Several sections are capped server-side, `notes` says which.',
     properties: {
-      exportVersion: { type: 'integer', description: '1 today. Bumps when the shape changes.' },
+      exportVersion: { type: 'integer', description: '2 today: a subscription\'s `plan` no longer carries an amount or a currency, and `price` is the subscription\'s own or null. Bumps when the shape changes.' },
       exportedAt: { type: 'string', format: 'date-time' },
       applicationId: { type: 'string' },
       notes: {
@@ -622,6 +638,21 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       usageRecords: { type: 'array', items: { type: 'object' } },
       securityEvents: { type: 'array', items: { type: 'object' } },
       impersonations: { type: 'array', items: { type: 'object' } },
+      supportCases: {
+        type: 'array',
+        description:
+          'Every support case opened on this user: status, capabilities, scope, devices and ' +
+          "times. The operator's reason and notes are left out.",
+        items: { type: 'object' },
+      },
+      billingEvents: {
+        type: 'array',
+        description:
+          "The billing log's events about this user, newest first: type, time, the ids of the " +
+          'subscription, payment, refund, plan and price involved, currency, amount, and `data` ' +
+          'shaped per type. The id of whoever acted is left out.',
+        items: { type: 'object' },
+      },
       contacts: {
         type: 'array',
         description:
@@ -649,6 +680,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       'usageRecords',
       'securityEvents',
       'impersonations',
+      'billingEvents',
     ],
   },
 
@@ -833,6 +865,7 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   SignInOutcome: SignInOutcomeDtoSchema,
 
   Plan: PlanDtoSchema,
+  PlanPrice: PlanPriceDtoSchema,
   PublicPlan: PublicPlanDtoSchema,
   FeatureCheck: FeatureCheckDtoSchema,
   Subscription: SubscriptionDtoSchema,
@@ -845,11 +878,19 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   CheckoutStatusPanel: CheckoutStatusPanelSchema,
   TrialEligibilityItem: TrialEligibilityItemSchema,
   Coupon: CouponDtoSchema,
+  CouponWithStats: CouponWithStatsDtoSchema,
   PublicCoupon: PublicCouponDtoSchema,
   ValidateCouponResult: ValidateCouponResultDtoSchema,
   BillingProviderInfo: BillingProviderInfoDtoSchema,
   OAuthProviderSummary: OAuthProviderSummaryDtoSchema,
   BillingStats: BillingStatsDtoSchema,
+  BillingLogEntry: BillingLogEntrySchema,
+  BillingLogPage: BillingLogPageSchema,
+  BillingOutboxStatus: BillingOutboxStatusSchema,
+  PriceFallbackSummary: PriceFallbackSummarySchema,
+  ReconciliationReport: ReconciliationReportSchema,
+  ReportingCurrency: ReportingCurrencyDtoSchema,
+  RoutingPreview: RoutingPreviewDtoSchema,
   MonthlyRevenuePoint: MonthlyRevenuePointSchema,
 
   License: LicenseDtoSchema,
@@ -948,7 +989,7 @@ export function okPage(item: JsonSchema, description = 'A page of results.'): Js
     {
       type: 'object',
       properties: {
-        items: { type: 'array', items: item },
+        items: { type: 'array', items: item, description: 'The rows of this page.' },
         page: ref('PageMeta'),
       },
       required: ['items', 'page'],

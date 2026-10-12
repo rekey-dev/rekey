@@ -52,11 +52,11 @@ const STATUS_QUERY_SCHEMA = {
 
 const USER_ERRORS = {
   401:
-    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID — the Application key is missing ' +
-    'or unknown; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION — the ' +
+    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID: the Application key is missing ' +
+    'or unknown; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION: the ' +
     'user JWT is missing, invalid, or issued by another Application.',
   403:
-    "IP_NOT_ALLOWED — a secret-key caller's IP is outside the allowlist; or ORIGIN_NOT_ALLOWED — a " +
+    "IP_NOT_ALLOWED: a secret-key caller's IP is outside the allowlist; or ORIGIN_NOT_ALLOWED: a " +
     "publishable-key caller's Origin is outside the CORS allowlist; or API_KEY_SCOPE_INSUFFICIENT.",
 } as const;
 
@@ -80,7 +80,7 @@ export async function devicesUserRoutes(app: FastifyInstance): Promise<void> {
         querystring: { type: 'object', properties: { ...STATUS_QUERY_SCHEMA, ...paginationJsonSchema } },
         response: {
           200: okPage(ref('EndUserDevice'), "A page of the end-user's devices."),
-          ...errs({ 400: 'VALIDATION_ERROR — a query parameter is out of range.', ...USER_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: a query parameter is out of range.', ...USER_ERRORS }),
         },
       },
     },
@@ -123,8 +123,8 @@ export async function devicesUserRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...USER_ERRORS,
-            404: 'DEVICE_NOT_FOUND — no device with that id belongs to this end-user.',
-            409: 'DEVICE_BLOCKED — the device is blocked; only an operator can unblock it.',
+            404: 'DEVICE_NOT_FOUND: no device with that id belongs to this end-user.',
+            409: 'DEVICE_BLOCKED: the device is blocked; only an operator can unblock it.',
           }),
         },
       },
@@ -150,8 +150,8 @@ export async function devicesUserRoutes(app: FastifyInstance): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const SERVER_ERRORS = {
-  401: 'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
-  403: "IP_NOT_ALLOWED — the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT — the key lacks the required scope.",
+  401: 'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
+  403: "IP_NOT_ALLOWED: the caller's IP is outside the key's allowlist; or API_KEY_SCOPE_INSUFFICIENT: the key lacks the required scope.",
 } as const;
 
 const EndUserQuery = z.object({ endUserId: z.string().min(1) });
@@ -188,9 +188,9 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: okPage(ref('Device'), "A page of the end-user's devices."),
           ...errs({
-            400: 'VALIDATION_ERROR — `endUserId` is missing or a query parameter is out of range.',
+            400: 'VALIDATION_ERROR: `endUserId` is missing or a query parameter is out of range.',
             ...SERVER_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -238,8 +238,8 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...SERVER_ERRORS,
-            404: 'DEVICE_NOT_FOUND — no device with that id belongs to that end-user in this Application.',
-            409: 'DEVICE_BLOCKED — the device is blocked; only an operator can unblock it.',
+            404: 'DEVICE_NOT_FOUND: no device with that id belongs to that end-user in this Application.',
+            409: 'DEVICE_BLOCKED: the device is blocked; only an operator can unblock it.',
           }),
         },
       },
@@ -264,16 +264,16 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
 
 const TENANT_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or TENANT_SESSION_INVALID — ' +
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or TENANT_SESSION_INVALID: ' +
     'the token is invalid, expired, or the operator account no longer exists.',
   403:
-    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
-    'TENANT_ROLE_INSUFFICIENT / APP_ACCESS_DENIED — the operator\'s grant on this Application ' +
+    'TENANT_MEMBERSHIP_REVOKED: the operator is no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT / APP_ACCESS_DENIED: the operator\'s grant on this Application ' +
     'does not permit this action.',
   404:
-    'APPLICATION_NOT_FOUND — no application with that id in this workspace (also returned to a ' +
-    'MEMBER holding no grant on it); or END_USER_NOT_FOUND — no end-user with that id in this ' +
-    'Application; or DEVICE_NOT_FOUND — no device with that id belongs to that end-user.',
+    'APPLICATION_NOT_FOUND: no application with that id in this workspace (also returned to a ' +
+    'MEMBER holding no grant on it); or END_USER_NOT_FOUND: no end-user with that id in this ' +
+    'Application; or DEVICE_NOT_FOUND: no device with that id belongs to that end-user.',
 } as const;
 
 const TenantParams = z.object({ id: z.string().min(1), euid: z.string().min(1) });
@@ -319,7 +319,7 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
         querystring: { type: 'object', properties: { ...STATUS_QUERY_SCHEMA, ...paginationJsonSchema } },
         response: {
           200: okPage(ref('Device'), "A page of the end-user's devices."),
-          ...errs({ 400: 'VALIDATION_ERROR — a query parameter is out of range.', ...TENANT_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: a query parameter is out of range.', ...TENANT_ERRORS }),
         },
       },
     },
@@ -351,7 +351,7 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
           200: ok(DEVICE_WITH_SESSIONS, 'The released device and how many sessions ended with it.'),
           ...errs({
             ...TENANT_ERRORS,
-            409: 'DEVICE_BLOCKED — the device is blocked; unblock it first.',
+            409: 'DEVICE_BLOCKED: the device is blocked; unblock it first.',
           }),
         },
       },

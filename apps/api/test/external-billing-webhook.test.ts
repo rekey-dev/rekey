@@ -111,7 +111,7 @@ describe('External billing provider webhook', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug, name: slug, amount: 2900, kind: 'SUBSCRIPTION', interval: 'MONTH', ...body },
+      payload: { slug, name: slug, price: { currency: 'USD', amount: 2900 }, kind: 'SUBSCRIPTION', interval: 'MONTH', ...body },
     });
     if (r.statusCode !== 201) throw new Error(`makePlan ${r.statusCode}: ${r.body}`);
     return (r.json().data as { id: string }).id;
@@ -868,7 +868,7 @@ describe('External billing provider webhook', () => {
 
   it('a second trial for the same buyer is granted without the trial, and the refusal is on the row', async () => {
     await proPlan();
-    await makePlan('basic', { amount: 900 });
+    await makePlan('basic', { price: { currency: 'USD', amount: 900 } });
     await post(activated('sub_first', 'pro', { email: 'twice@example.com' }, { trialEndsAt: daysFromNow(14).toISOString() }));
     expect((await subscriptionOf('sub_first')).status).toBe('TRIALING');
 

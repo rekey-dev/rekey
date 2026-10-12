@@ -36,6 +36,7 @@ const SELF_SUBSCRIPTION_KEYS = [
   'id',
   'metadata',
   'planId',
+  'price',
   'provider',
   'providerCapabilities',
   'providerSubId',
@@ -89,7 +90,7 @@ describe('the end-user view of their own subscriptions', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appId}/plans`,
         headers: auth(),
-        payload: { slug: plan, name: plan, amount, kind: 'SUBSCRIPTION' },
+        payload: { slug: plan, name: plan, ...(amount > 0 && { price: { currency: 'USD', amount } }), kind: 'SUBSCRIPTION' },
       });
       if (r.statusCode !== 201) throw new Error(`plan ${r.statusCode}: ${r.body}`);
     }

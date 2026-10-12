@@ -1003,8 +1003,25 @@ export interface ApplicationRow {
      * entitled. Unset = no free tier.
      */
     defaultPlanSlug?: string;
+    /**
+     * Whose word about a buyer's country may select a plan's local price.
+     * `trusted`: a country the operator's server passes, or one a trusted
+     * proxy vouches for. `any`: a country the buyer's browser reports too, so
+     * a buyer can pick their price.
+     */
+    localPrices: 'trusted' | 'any';
+    /**
+     * What a checkout does when the server names a currency no provider can
+     * charge and the request does not say: charge the default price, or
+     * refuse. A request that names its own choice wins.
+     */
+    onUnavailableCurrency: 'fallback' | 'refuse';
     provider: string;
-    currency: string;
+    /**
+     * The currency the Application reports in. Set with PUT
+     * /billing/reporting-currency. `USD` until an operator sets one.
+     */
+    reportingCurrency: string;
     metadata: Record<string, unknown>;
   };
   oauthConfig: Record<string, { clientId: string; redirectUri: string; scopes?: string[] }>;
@@ -1119,59 +1136,105 @@ export interface ApiRequestLogRow {
   createdAt: string;
 }
 
+/**
+ * One price a plan sells at, the default one included. `amount` is an integer
+ * in the minor unit of `currency`. Mirrors `PlanPriceDtoSchema`.
+ */
+export interface PlanPrice {
+  id: string;
+  currency: string;
+  amount: number;
+  /** ISO 3166-1 alpha-2. Empty means wherever `currency` is the local one. */
+  countries: string[];
+  /** The price a buyer pays when no other price applies. Exactly one per priced plan. */
+  isDefault: boolean;
+  /** A plan lists only the prices it sells at. */
+  archived: false;
+  /** Where this price stands at the payment provider. `error` is the provider's refusal when FAILED. */
+  registration: { status: PlanRegistrationStatus; error: string | null };
+  /** Whether the amount can still be changed, by the rule the API refuses an edit with. */
+  amountEditable: boolean;
+  /** Subscriptions that have not ended on this price. With any, the API refuses to remove it. */
+  liveSubscriptions: number;
+  /** Checkouts open on this price. With any, the API refuses to remove it. */
+  openCheckouts: number;
+}
+
+export type PlanRegistrationStatus = 'NOT_REQUIRED' | 'PENDING' | 'REGISTERED' | 'FAILED';
+
+/** One reason a plan cannot be bought. */
+export interface PlanBlocker {
+  /** null when the blocker belongs to no one provider (none configured). */
+  provider: string | null;
+  code: string;
+  message: string;
+  fix: string;
+}
+
+/** The price one buyer would be charged. For an operator reading their own plans, the default price. */
+export interface ResolvedPrice {
+  id: string;
+  currency: string;
+  amount: number;
+  formatted: string;
+  isDefault: boolean;
+  reason: 'bound' | 'requested' | 'country' | 'default' | 'fallback';
+  /** When `reason` is `fallback`: the currency selected for the buyer, which no enabled provider can charge. */
+  requestedCurrency: string | null;
+}
+
+/**
+ * A plan as its operator reads it. Mirrors `PlanDtoSchema`: the default price
+ * is `prices` where `isDefault`, and a plan with no flat price has none. Read
+ * it with `defaultPriceOf`.
+ */
 export interface PlanRow {
   id: string;
   applicationId: string;
   slug: string;
   name: string;
-  amount: number;
-  currency: string;
+  /** The default price, or null for a plan with no flat price (free, or usage with no base fee). */
+  price: ResolvedPrice | null;
+  /** Every price the plan sells at: the default first, then the others by currency. Empty with no flat price. */
+  prices: PlanPrice[];
+  /** The `prices[].id` of the default price, or null for a plan with no flat price. */
+  defaultPriceId: string | null;
+  /** Whether the plan charges nothing at all. A metered plan with no base fee is not free. */
+  isFree: boolean;
+  /**
+   * Whether a buyer's country may select one of this plan's other prices:
+   * INHERIT follows the Application's setting, TRUSTED needs a country a
+   * server declared or a proxy vouched for, OFF never does.
+   */
+  localPrices: 'INHERIT' | 'TRUSTED' | 'OFF';
   interval: 'MONTH' | 'YEAR';
   kind: 'SUBSCRIPTION' | 'LICENSE' | 'USAGE' | 'CREDIT';
+  trialDays: number | null;
   licenseKind: 'PERPETUAL' | 'TIMED' | 'SEATS' | null;
   licenseSeatsAllowed: number | null;
   licenseDurationDays: number | null;
   meterSlug: string | null;
-  pricePerUnitCents: number | null;
   creditsAmount: number | null;
   active: boolean;
   /**
-   * Whether this plan is registered with the payment provider.
-   *
-   * A plan is written un-purchasable FIRST and promoted only once the provider
-   * accepts it, so PENDING/FAILED means the row exists but nothing can be sold
-   * against it. FAILED carries the provider's own refusal in
-   * `registrationError`, usually a bad stored credential.
+   * Where the plan stands at the provider that registers plans when they are
+   * created. PENDING and FAILED mean the row exists and nothing can be sold
+   * against it. FAILED carries the provider's refusal in `registrationError`.
    */
-  registrationStatus: 'NOT_REQUIRED' | 'PENDING' | 'REGISTERED' | 'FAILED';
+  registrationStatus: PlanRegistrationStatus;
   registrationError: string | null;
   /**
-   * Whether a buyer sent to checkout for this plan would actually get one.
-   *
-   * Distinct from `registrationStatus`, which only reports how the CREATE went.
-   * `NOT_REQUIRED` covers two different plans: one on a provider that registers
-   * lazily at first checkout (PayPal, Razorpay, fine), and one created before
-   * this Application had any credentials, which was never registered and never
-   * will be, because connecting a provider afterwards does not reach back and
-   * repair plans that already exist. The second is the dangerous one and it is
-   * invisible anywhere else: it lists, it is `active`, the pricing page renders
-   * a Buy button, and the first thing that disagrees is a buyer clicking it.
-   *
-   * Optional because an older API predates the field. Treat absent as ready
-   * rather than inventing a warning we cannot substantiate.
+   * Whether a buyer sent to checkout for this plan would get one, and if not
+   * which provider refuses and how to repair it. Present on the plan list;
+   * the routes that return one plan after a write leave it out.
    */
   checkout?: {
     ready: boolean;
-    blockers: Array<{
-      /** null when the blocker belongs to no one provider (none configured). */
-      provider: string | null;
-      code: string;
-      message: string;
-      fix: string;
-    }>;
+    blockers: PlanBlocker[];
   };
   metadata: Record<string, unknown>;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface OrgBillingDto {
@@ -1225,8 +1288,14 @@ export interface CouponRow {
   id: string;
   code: string;
   discountType: 'PERCENT' | 'AMOUNT';
-  amountOff: number;
-  currency: string | null;
+  /** PERCENT: hundredths of a percent, 1500 is 15%. Null on an AMOUNT coupon. */
+  basisPoints: number | null;
+  /** AMOUNT: one amount per currency, in that currency's smallest unit. Empty on a PERCENT coupon. */
+  amounts: Array<{ currency: string; amountOff: number }>;
+  /** PERCENT: the currencies it is limited to. Empty means any. */
+  currencies: string[];
+  /** Every currency a checkout may use the coupon in. Null means any. */
+  coveredCurrencies: string[] | null;
   planSlugs: string[];
   active: boolean;
   startsAt: string | null;
@@ -1235,8 +1304,8 @@ export interface CouponRow {
   maxRedemptionsPerUser: number | null;
   /** Times redeemed (rows in coupon_redemptions). */
   redemptionCount: number;
-  /** Total discount granted across redemptions, smallest currency unit (best-effort). */
-  totalDiscountIssued: number;
+  /** One row per currency the coupon was redeemed in, the reporting currency first. Never added together. */
+  discountIssuedByCurrency: Array<{ currency: string; amount: number; redemptions: number }>;
 }
 
 /** GET /tenant/applications/:id/billing/stats, revenue dashboard numbers. */
@@ -1245,19 +1314,33 @@ export interface BillingStatsRow {
   pastDueSubscriptions: number;
   canceledLast30d: number;
   newSubscriptionsLast30d: number;
-  /** Monthly recurring revenue, smallest currency unit (YEAR plans normalized /12). */
-  mrrCents: number;
-  /** Currency of `mrrCents` (dominant across active plans); null when no MRR. */
-  mrrCurrency: string | null;
-  /** True when active subscription plans span more than one currency. */
-  mixedCurrencies: boolean;
-  revenueLast30dCents: number;
+  /** Live subscriptions on a plan with a flat price that record no price of their own. Zero on a healthy Application. */
+  unpricedLiveSubscriptions: number;
+  /** `billingConfig.reportingCurrency`: the first entry of every list below, present even at zero. */
+  reportingCurrency: string;
+  /** One entry per currency, never added together. YEAR plans count as a twelfth. */
+  mrr: Array<{ currency: string; mrrCents: number; activeSubscriptions: number }>;
+  /** Last 30 days per currency. `netCents` is `grossCents` less `refundedCents`. */
+  revenueLast30d: Array<{ currency: string; grossCents: number; refundedCents: number; netCents: number; payments: number }>;
+  /** Charges recorded and not applied, still held: never part of revenue or MRR. Empty when there are none. */
+  unverified: Array<{ currency: string; amountCents: number; payments: number }>;
   paymentsLast30d: { succeeded: number; failed: number };
-  /** Last 12 UTC months, oldest first, gap-filled. `month` is `YYYY-MM`. */
-  monthlyRevenue: Array<{ month: string; amountCents: number }>;
+  /** Per currency, the last 12 UTC months, oldest first, gap-filled. `month` is `YYYY-MM`. */
+  monthlyRevenue: Array<{ currency: string; months: Array<{ month: string; amountCents: number }> }>;
 }
 
-/** One row of GET /tenant/applications/:id/payments. */
+export type PaymentStatus = 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
+
+/** Why a payment cannot be refunded through Rekey, as the API judges it before it asks a provider. */
+export type RefundBlockedReason =
+  | 'payment_not_succeeded'
+  | 'no_provider_charge_id'
+  | 'already_refunded'
+  | 'provider_unknown'
+  | 'provider_cannot_refund'
+  | 'provider_not_configured';
+
+/** One row of GET /tenant/applications/:id/payments, and the whole of GET .../payments/:paymentId. */
 export interface PaymentRow {
   id: string;
   endUserId: string | null;
@@ -1265,10 +1348,47 @@ export interface PaymentRow {
   subscriptionId: string | null;
   amount: number;
   currency: string;
-  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED';
+  /** Cumulative amount refunded so far, in the smallest unit of `currency`. */
+  refundedAmount: number;
+  /** `unverified` for a charge recorded and not applied. It is in no revenue figure. */
+  verification: 'verified' | 'unverified';
+  status: PaymentStatus;
+  /** The provider that took the payment. Null when Rekey has no record of one. */
+  provider: string | null;
+  /** Whether a refund request would reach the provider. */
+  refundable: boolean;
+  /** Why not. Null exactly when `refundable` is true. */
+  refundBlockedReason: RefundBlockedReason | null;
   providerPaymentId: string | null;
   description: string | null;
   createdAt: string;
+}
+
+/** One row of GET /tenant/applications/:id/payments/:paymentId/refunds. */
+export interface RefundRow {
+  id: string;
+  paymentId: string;
+  providerRefundId: string | null;
+  amount: number;
+  /** The payment's currency. */
+  currency: string;
+  /** A failed refund counts for nothing in the payment's `refundedAmount`. */
+  status: 'pending' | 'succeeded' | 'failed';
+  reason: string | null;
+  initiatedBy: 'operator' | 'provider' | 'system';
+  createdAt: string;
+}
+
+/** What POST /tenant/applications/:id/payments/:paymentId/refunds answers. */
+export interface RefundResult {
+  refund: RefundRow;
+  payment: {
+    id: string;
+    amount: number;
+    currency: string;
+    refundedAmount: number;
+    status: 'SUCCEEDED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
+  };
 }
 
 /** One row of GET /tenant/applications/:id/dunning, failed-payment recovery. */
@@ -1514,6 +1634,8 @@ export interface BillingCredentialRow {
   enabled: boolean;
   mode: 'test' | 'live';
   countries: string[];
+  /** Currencies this account can charge. Empty means none: the provider is not used for any checkout. */
+  currencies: string[];
   priority: number;
   /** Whether the provider webhook secret/id is set (manually or auto-registered). */
   webhookConfigured: boolean;
@@ -1559,6 +1681,10 @@ export interface BillingProviderDescriptor {
   label: string;
   docsUrl: string;
   defaultCountries: string[];
+  /** Every currency the provider can charge, or `'all-sellable'` for every currency a price may be in. */
+  supportedCurrencies: string[] | 'all-sellable';
+  /** The currencies to pre-fill for a new credential row. */
+  preselectedCurrencies: string[];
   priority: number;
   capabilities: BillingProviderCapabilities;
   credentialFields: BillingCredentialFieldInfo[];
@@ -1568,6 +1694,9 @@ export interface BillingProviderDescriptor {
     enabled: boolean;
     mode: 'test' | 'live';
     countries: string[];
+    currencies: string[];
+    /** The stored currencies this provider cannot charge at all. Routing skips them. */
+    unsupportedCurrencies: string[];
     priority: number;
     webhookConfigured: boolean;
   } | null;

@@ -21,60 +21,111 @@
  *      why lives in their module descriptors.
  *   2. Is the resulting charge one a provider will actually accept?
  *
- * What is deliberately NOT re-checked here: the discount's sign and ceiling.
- * `couponsService.computeDiscount` floors PERCENT to whole units and clamps
- * both kinds with `Math.min(raw, amount)`, and coupon creation rejects a
- * negative `amountOff` and a PERCENT over 10000bp, so `0 <= discountAmount
- * <= plan.amount` already holds by construction. The over-price branch below
- * is a tripwire on that invariant, not a second implementation of it: a
- * provider call is the wrong place to discover the clamp regressed.
+ * What is deliberately NOT re-decided here: the discount's size.
+ * `computeDiscount` (coupons/coupon-terms.ts) rounds a percentage toward the
+ * buyer and caps both kinds at the price, in the currency charged, and
+ * `couponsService.validate` refuses a coupon that takes nothing off. So
+ * `0 < discountAmount <= plan.amount` already holds. The two branches below
+ * that test it are tripwires on that invariant, not a second implementation:
+ * a provider call is the wrong place to discover it regressed.
+ *
+ * The coupon preview calls this too, with the provider the checkout would
+ * pick, so the place a code is entered and the checkout give one answer.
+ * Each refusal is recorded in the billing log as `coupon.refused`.
  */
 
-import type { Plan } from '@prisma/client';
+import type { PricedPlan } from './providers/types.js';
 import { RekeyError } from '../../lib/error.js';
 import { discountUnsupported } from './providers/discount.js';
 import { getModule } from './providers/registry.js';
 import type { CheckoutDiscount } from './providers/types.js';
+import { recordCouponRefused } from '../coupons/coupon-events.js';
+import type { BillingLogLogger } from '../billing-log/index.js';
+
+interface CheckoutDiscountInput {
+  plan: PricedPlan;
+  /** Registry name of the provider the checkout resolved to. */
+  provider: string;
+  /** True for CREDIT packs and perpetual licences, a single charge. */
+  isOneTime: boolean;
+  coupon: { couponId: string; code: string; discountAmount: number };
+}
 
 /**
  * Turn a validated coupon into the discount the provider will be handed, or
  * throw the reason it cannot be. Called once per checkout, before the
  * provider is constructed, so a refusal costs nothing but the validation
  * queries, no local Subscription row, no redemption, no provider round-trip.
+ * A refusal is recorded in the billing log as `coupon.refused`.
  */
-export function resolveCheckoutDiscount(input: {
-  plan: Plan;
-  /** Registry name of the provider the checkout resolved to. */
-  provider: string;
-  /** True for CREDIT packs and perpetual licences, a single charge. */
-  isOneTime: boolean;
-  coupon: { couponId: string; code: string; discountAmount: number };
-}): CheckoutDiscount {
+export function resolveCheckoutDiscount(
+  input: CheckoutDiscountInput & {
+    /** The buyer, for the billing log's record of a refusal. */
+    endUserId?: string | undefined;
+    log?: BillingLogLogger | undefined;
+  },
+): CheckoutDiscount {
+  try {
+    return decideCheckoutDiscount(input);
+  } catch (error) {
+    if (error instanceof RekeyError) {
+      const { plan, coupon } = input;
+      // Not awaited: the refusal is the answer. The catch is what keeps a
+      // failed log write from ending the process as an unhandled rejection.
+      recordCouponRefused({
+        coupon: { id: coupon.couponId, applicationId: plan.applicationId, code: coupon.code },
+        endUserId: input.endUserId,
+        planId: plan.id,
+        planSlug: plan.slug,
+        reasonCode: error.code,
+        chargedCurrency: plan.currency.toUpperCase(),
+      }).catch((err: unknown) => {
+        (input.log ?? console).warn({ err, couponId: coupon.couponId }, 'billing log: coupon refusal not recorded');
+      });
+    }
+    throw error;
+  }
+}
+
+/**
+ * The decision `resolveCheckoutDiscount` makes, with nothing recorded: for a
+ * caller that asks what a checkout would do without a buyer opening one.
+ *
+ * @example
+ * decideCheckoutDiscount({ plan: priced, provider: 'stripe', isOneTime: false, coupon: { couponId, code: 'LAUNCH', discountAmount: 300 } });
+ */
+export function decideCheckoutDiscount(input: CheckoutDiscountInput): CheckoutDiscount {
   const { plan, provider, isOneTime, coupon } = input;
+  const refuse = (error: RekeyError): never => {
+    throw error;
+  };
 
   if (coupon.discountAmount <= 0) {
-    // Reachable without anything being broken: a PERCENT coupon floors to
-    // whole units, so 1% of a 50-cent plan is 0. Refuse rather than send a
-    // zero discount (Stripe rejects `amount_off: 0` outright) or, worse,
-    // accept it and burn one of the buyer's redemptions on nothing.
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'COUPON_NO_DISCOUNT',
-      message: `Coupon "${coupon.code}" works out to no discount on plan "${plan.slug}".`,
-      fix: 'The discount rounds down to zero at this price. Use a coupon worth at least one unit of the plan currency.',
-    });
+    // Tripwire: `couponsService.validate` refuses this first. Never send a
+    // zero discount on (Stripe rejects `amount_off: 0` outright) or burn one
+    // of the buyer's redemptions on nothing.
+    refuse(
+      new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_NO_DISCOUNT',
+        message: `Coupon "${coupon.code}" works out to no discount on plan "${plan.slug}".`,
+        fix: 'Check out without `couponCode` to pay the full price. This coupon takes nothing off this price.',
+      }),
+    );
   }
 
   if (coupon.discountAmount > plan.amount) {
-    // Tripwire, couponsService clamps to the plan amount, so reaching this
-    // means that clamp broke. Never send it on: a discount larger than the
-    // price is a negative charge, which is a refund with no audit trail.
-    throw new RekeyError({
-      statusCode: 500,
-      code: 'COUPON_DISCOUNT_EXCEEDS_PRICE',
-      message: `Coupon "${coupon.code}" resolved to a discount larger than plan "${plan.slug}".`,
-      fix: 'This is a Rekey bug, the coupon service is expected to clamp the discount to the plan amount. Report it with the coupon code and plan slug.',
-    });
+    // Tripwire: the discount is capped at the price where it is computed, so
+    // reaching this means that cap broke. Never send it on: a discount larger
+    // than the price is a negative charge, which is a refund with no audit trail.
+    refuse(
+      new RekeyError({
+        statusCode: 500,
+        code: 'COUPON_DISCOUNT_EXCEEDS_PRICE',
+        message: `Coupon "${coupon.code}" resolved to a discount larger than plan "${plan.slug}".`,
+        fix: 'This is a Rekey bug: a discount is capped at the price it is taken off. Report it with the coupon code and plan slug.',
+      }),
+    );
   }
 
   const module = getModule(provider);
@@ -82,7 +133,7 @@ export function resolveCheckoutDiscount(input: {
     ? module?.capabilities.discounts?.oneTime
     : module?.capabilities.discounts?.recurring;
   if (supported !== true) {
-    throw discountUnsupported(provider, isOneTime ? 'one-time' : 'recurring');
+    refuse(discountUnsupported(provider, isOneTime ? 'one-time' : 'recurring'));
   }
 
   if (isOneTime && coupon.discountAmount === plan.amount) {
@@ -96,12 +147,14 @@ export function resolveCheckoutDiscount(input: {
     // The recurring case is not refused here on purpose: a provider that
     // declares `discounts.recurring` settles a zero first invoice as paid and
     // still emits the activation, so a 100%-off first period works end to end.
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'COUPON_FULL_DISCOUNT_UNSUPPORTED',
-      message: `Coupon "${coupon.code}" covers the full price of "${plan.slug}", and a one-time purchase cannot be checked out for zero.`,
-      fix: 'Use a coupon worth less than the full price, or grant the credits/licence directly from the operator panel instead of charging for them.',
-    });
+    refuse(
+      new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_FULL_DISCOUNT_UNSUPPORTED',
+        message: `Coupon "${coupon.code}" covers the full ${plan.currency.toUpperCase()} price of "${plan.slug}", and a one-time purchase cannot be checked out for zero.`,
+        fix: 'Use a coupon worth less than the full price, or grant the credits/licence directly from the operator panel instead of charging for them.',
+      }),
+    );
   }
 
   return {

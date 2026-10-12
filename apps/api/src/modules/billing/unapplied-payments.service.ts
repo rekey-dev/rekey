@@ -15,13 +15,14 @@
  * operator knows things Rekey does not, so the decision is theirs.
  */
 
+import { formatMoney } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
+import { enqueueBillingEvent, type BillingEventInput } from '../billing-log/index.js';
+import { refundsService } from './refunds.service.js';
 import { emailService } from '../email/email.service.js';
 import { RekeyError } from '../../lib/error.js';
-import { getProviderForApplication } from './providers/index.js';
 import { getModule } from './providers/registry.js';
 import { entitlementsService } from './entitlements.service.js';
-import type { BillingProviderName } from './credentials.service.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -86,20 +87,11 @@ async function operatorRecipients(applicationId: string): Promise<string[]> {
   return memberships.map((m) => m.tenantUser.email);
 }
 
-/** Minor units to a human string, for the email only. */
-function formatAmount(minor: number, currency: string): string {
-  // Zero-decimal currencies would be shown 100x too small by a blind /100.
-  // This list is the email's own and deliberately small: it is display text,
-  // not money arithmetic, and the authoritative amount is the integer column.
-  const zeroDecimal = new Set(['JPY', 'KRW', 'VND', 'CLP', 'ISK', 'HUF', 'TWD']);
-  const code = currency.toUpperCase();
-  const major = zeroDecimal.has(code) ? String(minor) : (minor / 100).toFixed(2);
-  return `${major} ${code}`;
-}
-
 /**
- * Open a case for a payment that matched no local subscription, and tell the
- * operator.
+ * Open a case for a payment that was recorded and not applied (it matched no
+ * local subscription, or it did not match the price of the one it named), and
+ * tell the operator. The billing log's `payment.unapplied` goes to the outbox
+ * in the transaction that creates the case.
  *
  * Best-effort by construction, and called AFTER the payment transaction has
  * committed rather than inside it. The payment is the money record and must
@@ -117,6 +109,10 @@ export async function openUnappliedPaymentCase(
     currency: string;
     providerPaymentId: string | null;
     providerSubscriptionId: string | null;
+    /** Why the payment was not applied, as the billing log names it. */
+    reasonCode: 'no_subscription' | 'currency_mismatch' | 'amount_out_of_band' | 'price_not_on_plan';
+    /** The provider event that reported the payment. */
+    providerEventId?: string | undefined;
   },
   log: FastifyBaseLogger,
 ): Promise<void> {
@@ -124,15 +120,35 @@ export async function openUnappliedPaymentCase(
     input.endUserId ??
     (await attributeByProviderSubId(input.applicationId, input.providerSubscriptionId));
   try {
-    await prisma.unappliedPayment.create({
-      data: {
-        applicationId: input.applicationId,
-        paymentId: input.paymentId,
-        endUserId,
-        provider: input.provider,
-        amount: input.amount,
-        currency: input.currency,
-      },
+    await prisma.$transaction(async (tx) => {
+      const opened = await tx.unappliedPayment.create({
+        data: {
+          applicationId: input.applicationId,
+          paymentId: input.paymentId,
+          endUserId,
+          provider: input.provider,
+          amount: input.amount,
+          currency: input.currency,
+          metadata: { reasonCode: input.reasonCode },
+        },
+        select: { id: true },
+      });
+      await enqueueBillingEvent(
+        {
+          type: 'payment.unapplied',
+          applicationId: input.applicationId,
+          dedupeKey: `payment.unapplied:${opened.id}`,
+          actor: { type: 'system' },
+          ...(endUserId !== null && { endUserId }),
+          paymentId: input.paymentId,
+          ...(/^[A-Za-z0-9_.:-]{1,120}$/.test(input.provider) && { provider: input.provider }),
+          ...(input.providerEventId !== undefined && { providerEventId: input.providerEventId }),
+          ...(/^[A-Z]{3}$/.test(input.currency) && { currency: input.currency }),
+          amount: input.amount,
+          data: { unappliedPaymentId: opened.id, reasonCode: input.reasonCode },
+        },
+        tx,
+      );
     });
     // Mirrored onto the Payment too, so the payments list and any per-user
     // view show the charge against the customer it belongs to rather than
@@ -172,7 +188,7 @@ export async function openUnappliedPaymentCase(
   if (recipients.length === 0) {
     log.error(
       { applicationId: input.applicationId },
-      'unapplied payment: no operator to notify — case is open but unannounced',
+      'unapplied payment: no operator to notify, case is open but unannounced',
     );
     return;
   }
@@ -189,7 +205,7 @@ export async function openUnappliedPaymentCase(
       eventKey: 'billing_unapplied_payment',
       to,
       variables: {
-        amount: formatAmount(input.amount, input.currency),
+        amount: formatMoney(input.amount, input.currency),
         provider: input.provider,
         // The operator has to find this payment in the provider's own
         // dashboard to check it, so the provider's id is the useful one.
@@ -375,66 +391,24 @@ export const unappliedPaymentsService = {
       where: { id: args.applicationId },
     });
 
-    if (!kase.payment.providerPaymentId) {
-      throw new RekeyError({
-        statusCode: 409,
-        code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
-        message: 'This payment has no provider charge id, so Rekey cannot ask anyone to refund it.',
-        fix: 'Refund it in the provider dashboard directly, then dismiss this case with a note saying so.',
-      });
-    }
-    const remaining = kase.payment.amount - kase.payment.refundedAmount;
-    if (args.amount !== undefined && args.amount > remaining) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'BILLING_REFUND_AMOUNT_EXCEEDED',
-        message: `Only ${remaining} ${kase.currency} (minor units) of this payment has not been refunded.`,
-        fix: 'Lower the amount, or leave it blank to refund everything that remains.',
-      });
-    }
-
-    const provider = await getProviderForApplication(
+    // The refund itself, with its row and its log entry, is the refunds
+    // service's. Keyed on the CASE: two clicks on one case are the same
+    // refund and must stay one at the provider.
+    const issued = await refundsService.issue({
       application,
-      kase.provider as BillingProviderName,
-    );
-    if (!provider.refundPayment) {
-      throw new RekeyError({
-        statusCode: 409,
-        code: 'BILLING_REFUND_UNSUPPORTED',
-        message: `Rekey cannot issue refunds through ${kase.provider}.`,
-        fix: 'Refund it in the provider dashboard directly, then dismiss this case with a note saying so.',
-      });
-    }
-
-    const refundHref = (kase.payment.metadata as { refundHref?: string } | null)?.refundHref;
-    const result = await provider.refundPayment({
-      providerPaymentId: kase.payment.providerPaymentId,
+      paymentId: kase.paymentId,
       ...(args.amount !== undefined && { amount: args.amount }),
-      currency: kase.currency,
       ...(args.note && { reason: args.note }),
-      // Keyed on the CASE, not on the request. Two clicks on one case are the
-      // same refund and must stay one at the provider; a genuinely separate
-      // partial refund of the same payment would be a separate case.
+      actorId: args.actorId,
       idempotencyKey: `rekey-unapplied-${kase.id}`,
-      ...(refundHref && { refundHref }),
     });
 
-    const refundedTotal = kase.payment.refundedAmount + result.amount;
-    const [, updated] = await prisma.$transaction([
-      prisma.payment.update({
-        where: { id: kase.paymentId },
-        data: {
-          refundedAmount: refundedTotal,
-          // A partial refund leaves the buyer holding part of the charge, and
-          // saying REFUNDED there would be false to them and to the books.
-          status: refundedTotal >= kase.payment.amount ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
-        },
-      }),
-      prisma.unappliedPayment.update({
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.unappliedPayment.update({
         where: { id: kase.id },
         data: {
           status: 'REFUNDED',
-          providerRefundId: result.refundId,
+          providerRefundId: issued.refund.providerRefundId,
           resolutionNote: args.note ?? null,
           resolvedBy: args.actorId,
           resolvedAt: new Date(),
@@ -442,11 +416,13 @@ export const unappliedPaymentsService = {
           // Razorpay creates every refund pending and PayPal returns PENDING
           // for eCheck; the terminal answer arrives on a later webhook, so the
           // create-time answer is recorded rather than asserted as final.
-          metadata: { refundStatusAtCreate: result.status },
+          metadata: { refundStatusAtCreate: issued.refund.status },
         },
         include: { payment: true },
-      }),
-    ]);
+      });
+      await enqueueBillingEvent(resolvedEvent(row, 'refunded', args.actorId), tx);
+      return row;
+    });
     const endUser = updated.endUserId
       ? await prisma.endUser.findUnique({
           where: { id: updated.endUserId },
@@ -522,20 +498,32 @@ export const unappliedPaymentsService = {
       purchaseRef: `unapplied:${kase.id}`,
     });
 
-    const updated = await prisma.unappliedPayment.update({
-      where: { id: kase.id },
-      data: {
-        status: 'ENTITLEMENT_GRANTED',
-        resolutionNote: args.note ?? null,
-        resolvedBy: args.actorId,
-        resolvedAt: new Date(),
-        metadata: {
-          grantedDays: args.days,
-          subscriptionId: sub.id,
-          extendedTo: extendedTo.toISOString(),
+    // The case closes and its payment is applied in one transaction: from
+    // here the money was for this subscription, so it is verified and counts
+    // as revenue. A case that closed while its payment stayed unverified
+    // would leave the money out of revenue with nothing left to resolve.
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.unappliedPayment.update({
+        where: { id: kase.id },
+        data: {
+          status: 'ENTITLEMENT_GRANTED',
+          resolutionNote: args.note ?? null,
+          resolvedBy: args.actorId,
+          resolvedAt: new Date(),
+          metadata: {
+            grantedDays: args.days,
+            subscriptionId: sub.id,
+            extendedTo: extendedTo.toISOString(),
+          },
         },
-      },
-      include: { payment: true },
+        include: { payment: true },
+      });
+      await tx.payment.update({
+        where: { id: kase.paymentId },
+        data: { verification: 'VERIFIED', subscriptionId: sub.id },
+      });
+      await enqueueBillingEvent(resolvedEvent(row, 'entitlement_granted', args.actorId), tx);
+      return row;
     });
     const endUser = await prisma.endUser.findUnique({
       where: { id: kase.endUserId },
@@ -570,6 +558,7 @@ export const unappliedPaymentsService = {
       },
       include: { payment: true },
     });
+    await enqueueBillingEvent(resolvedEvent(updated, 'dismissed', args.actorId));
     const endUser = updated.endUserId
       ? await prisma.endUser.findUnique({
           where: { id: updated.endUserId },
@@ -579,3 +568,23 @@ export const unappliedPaymentsService = {
     return toRow(updated, endUser?.email ?? null);
   },
 };
+
+/** The billing log's record that an operator closed a case, and how. */
+function resolvedEvent(
+  kase: { id: string; applicationId: string; paymentId: string; endUserId: string | null; provider: string; amount: number; currency: string },
+  resolution: 'refunded' | 'entitlement_granted' | 'dismissed',
+  actorId: string,
+): BillingEventInput {
+  return {
+    type: 'payment.unapplied_resolved',
+    applicationId: kase.applicationId,
+    dedupeKey: `payment.unapplied_resolved:${kase.id}`,
+    actor: { type: 'operator', id: actorId },
+    ...(kase.endUserId !== null && { endUserId: kase.endUserId }),
+    paymentId: kase.paymentId,
+    ...(/^[A-Za-z0-9_.:-]{1,120}$/.test(kase.provider) && { provider: kase.provider }),
+    ...(/^[A-Z]{3}$/.test(kase.currency) && { currency: kase.currency }),
+    amount: kase.amount,
+    data: { unappliedPaymentId: kase.id, resolution },
+  };
+}

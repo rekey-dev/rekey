@@ -28,12 +28,14 @@ It is **identity, not authorization**. It names the Application and asserts "leg
 
 Pass it to `@rekey.dev/react`:
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <RekeyProvider apiUrl="https://api.rekey.example.com" publishableKey="rp_pub_myapp-prod_…">
   <App />
 </RekeyProvider>
 ```
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // Browser, no backend:
 const out = await client.signIn({ email, password });   // → SignInOutcome

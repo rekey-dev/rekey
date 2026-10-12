@@ -463,11 +463,11 @@ function classifySmtpError(e: unknown): string {
   const code = (e as { code?: string }).code ?? '';
   const responseCode = (e as { responseCode?: number }).responseCode;
   if (code === 'EAUTH' || responseCode === 535) {
-    return 'SMTP authentication was rejected — check the username and password.';
+    return 'SMTP authentication was rejected. Check the username and password.';
   }
   if (code === 'EENVELOPE') return 'SMTP server rejected the sender or recipient address.';
   if (code === 'ETIMEDOUT' || code === 'ESOCKET' || code === 'ECONNECTION') {
-    return 'Could not establish an SMTP connection — check the host, port and TLS setting.';
+    return 'Could not establish an SMTP connection. Check the host, port and TLS setting.';
   }
   return 'SMTP send failed.';
 }

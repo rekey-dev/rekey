@@ -97,7 +97,7 @@ describe('billing subject is exclusive per Application (#431)', () => {
     await adminPost(`/api/v1/admin/applications/${applicationId}/plans`, {
       slug: 'pro',
       name: 'Pro',
-      amount: 2900,
+      price: { currency: 'USD', amount: 2900 },
     });
   });
 

@@ -23,9 +23,9 @@
  * PaypalCredentials in credentials.service.ts).
  */
 
-import { CHECKOUT_BROWSER_ORIGINS } from '@rekey.dev/shared-types';
+import { CHECKOUT_BROWSER_ORIGINS, MAX_PRICE_AMOUNT } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../../../lib/error.js';
-import { paypalScale } from '../../paypal-money.js';
+import { PAYPAL_IN_COUNTRY_ONLY, PAYPAL_SUPPORTED_CURRENCIES, paypalMinorFromMajor } from '../../paypal-money.js';
 import { verifyPaypalWebhook } from '../../paypal.js';
 import type { PaypalCredentials } from '../../../credentials.service.js';
 import type {
@@ -38,6 +38,7 @@ import type {
   VerifyResult,
 } from '../../module-types.js';
 import type { FastifyBaseLogger } from 'fastify';
+import { paypalRefundStatus, refundedCaptureId } from './enrich.js';
 
 /** PayPal event envelope (only the fields we read). */
 interface PaypalEventPayload {
@@ -54,6 +55,8 @@ interface PaypalEventPayload {
     // PAYMENT.CAPTURE.* (Orders v2) is the only place the originating order id
     // appears, the capture resource's own `id` is the CAPTURE, not the order.
     supplementary_data?: { related_ids?: { order_id?: string } };
+    // A refund resource names the capture it refunds only by a link.
+    links?: Array<{ rel?: string; href?: string }>;
     // Subscription resources carry the schedule. `next_billing_time` is the
     // one field that says when the period the buyer has paid for runs out.
     billing_info?: { next_billing_time?: string };
@@ -93,41 +96,42 @@ function periodEndFromBillingInfo(
   if (typeof raw !== 'string') return undefined;
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) {
-    log.warn({ ...context, nextBillingTime: raw }, 'paypal next_billing_time unparseable — leaving period end untouched');
+    log.warn({ ...context, nextBillingTime: raw }, 'paypal next_billing_time unparseable, leaving period end untouched');
     return undefined;
   }
   return parsed;
 }
 
-/** Mirror of the shared applier cap, 100,000,000.00 in minor units. */
-const MAX_PAYMENT_AMOUNT = 10_000_000_000;
-
 /**
- * Parse a PayPal money string ("12.34") in major units into the smallest
- * currency unit (cents). Returns null on anything non-finite / out of
- * range, the amount-shape gate has to live here because the shared
- * applier's safeAmount expects integer minor units, and "unusable amount"
- * must skip the whole event (the bespoke handler recorded nothing).
+ * A PayPal money string ("12.34", major units) beside what it is in the stored
+ * smallest unit. A string that is not exactly an amount in that currency
+ * becomes NaN, and an amount too large for a payment row is passed on as it
+ * is: the applier refuses both and writes `payment.not_recorded` quoting
+ * `reportedAmount`, so the report is not lost here. Null when the payload
+ * carried no amount at all.
  */
-function paypalAmountToMinor(
+interface PaypalAmount {
+  amount: number;
+  /** PayPal's own string. */
+  reportedAmount: string;
+}
+
+function paypalAmount(
   value: string | undefined,
   currency: string | undefined,
   log: FastifyBaseLogger,
   context: Record<string, unknown>,
-): number | null {
+): PaypalAmount | null {
   if (value == null) return null;
-  const major = Number(value);
-  if (!Number.isFinite(major) || major < 0) {
-    log.warn({ ...context, value }, 'paypal amount non-finite/negative — dropping');
-    return null;
-  }
-  const minor = Math.round(major * paypalScale(currency));
-  if (minor > MAX_PAYMENT_AMOUNT) {
-    log.error({ ...context, value, max: MAX_PAYMENT_AMOUNT }, 'paypal amount exceeds max — refusing');
-    return null;
-  }
-  return minor;
+  const reportedAmount = String(value);
+  // The same fallback the events below apply to a payload naming no currency.
+  const amount = paypalMinorFromMajor(reportedAmount, currency ?? 'USD');
+  if (amount === null) log.warn({ ...context, value, currency }, 'paypal amount is not an exact amount in its currency');
+  return { amount: amount ?? Number.NaN, reportedAmount };
 }
+
+/** Whether a payment row can hold it: the column is as wide as a price's. */
+const storable = (amount: number): boolean => Number.isInteger(amount) && amount >= 0 && amount <= MAX_PRICE_AMOUNT;
 
 /**
  * Cross-check the `${appId}:${euId}` custom_id (set by
@@ -313,14 +317,14 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     // (sale not yet recorded + a prior succeeded payment exists) reproduces
     // the bespoke "2nd+ charge only, never on replay" rule (#72/#73).
     case 'PAYMENT.SALE.COMPLETED': {
-      const amount = paypalAmountToMinor(
+      const paid = paypalAmount(
         resource?.amount?.total ?? resource?.amount?.value,
         resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
-      if (amount === null) {
-        ctx.log.warn({ eventId: providerEventId }, 'sale.completed: no usable amount — skipping payment row');
+      if (paid === null) {
+        ctx.log.warn({ eventId: providerEventId }, 'sale.completed: no amount, skipping payment row');
         return [];
       }
       const currency = (
@@ -331,7 +335,8 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
       const agreementId = resource?.billing_agreement_id ?? null;
       const providerPaymentId = resource?.id ?? providerEventId;
       const events: DomainBillingEvent[] = [];
-      if (agreementId) {
+      // A sale the applier will refuse to record pays for no period.
+      if (agreementId && storable(paid.amount)) {
         events.push({
           type: 'subscription.period_advanced',
           providerEventId,
@@ -347,7 +352,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
         applicationId,
         providerPaymentId,
         providerSubscriptionId: agreementId,
-        amount,
+        ...paid,
         currency,
         description: null,
         // Never 'initial'-pinned: the bespoke handler always anchored on
@@ -372,14 +377,14 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     // collides with the grant the approval already made, a one-off purchase
     // has no periods to refill.
     case 'PAYMENT.CAPTURE.COMPLETED': {
-      const amount = paypalAmountToMinor(
+      const paid = paypalAmount(
         resource?.amount?.value ?? resource?.amount?.total,
         resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
-      if (amount === null) {
-        ctx.log.warn({ eventId: providerEventId }, 'capture.completed: no usable amount — skipping payment row');
+      if (paid === null) {
+        ctx.log.warn({ eventId: providerEventId }, 'capture.completed: no amount, skipping payment row');
         return [];
       }
       if (!applicationIdMatches(resource, applicationId)) {
@@ -402,7 +407,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           // recurring money arrives as PAYMENT.SALE.COMPLETED above.
           providerSubscriptionId: null,
           ...(orderId !== undefined && { checkoutSessionId: orderId }),
-          amount,
+          ...paid,
           currency,
           description: null,
           firstPeriod: true,
@@ -418,26 +423,29 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.SALE.REVERSED':
     case 'PAYMENT.CAPTURE.REVERSED':
     case 'PAYMENT.CAPTURE.REFUNDED': {
+      // A REFUNDED resource is the refund, and its `id` the refund's: the
+      // capture it pays back is the `up` link. A REVERSED resource is the
+      // sale or capture itself.
+      const refundedCapture = event.event_type === 'PAYMENT.CAPTURE.REFUNDED' ? refundedCaptureId(resource) : null;
       const currency = (
         resource?.amount?.currency_code ??
         resource?.amount?.currency ??
         'USD'
       ).toUpperCase();
-      const amount =
-        paypalAmountToMinor(
-          resource?.amount?.total ?? resource?.amount?.value,
-          currency,
-          ctx.log,
-          { eventId: providerEventId },
-        ) ?? 0;
+      const parsed = paypalAmount(resource?.amount?.total ?? resource?.amount?.value, currency, ctx.log, {
+        eventId: providerEventId,
+      });
       return [
         {
           type: 'payment.refunded',
           providerEventId,
           applicationId,
-          providerPaymentId: resource?.id ?? providerEventId,
+          providerPaymentId: refundedCapture ?? resource?.id ?? providerEventId,
+          ...(refundedCapture !== null && resource?.id !== undefined && { providerRefundId: resource.id }),
+          ...(refundedCapture !== null && { refundStatus: paypalRefundStatus(resource?.status) }),
           providerSubscriptionId: resource?.billing_agreement_id ?? null,
-          amount,
+          // A reversal or a denial that names no amount is for nothing.
+          ...(parsed ?? { amount: 0 }),
           currency,
           description: null,
           raw: payload,
@@ -445,13 +453,12 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
       ];
     }
     case 'PAYMENT.SALE.DENIED': {
-      const amount =
-        paypalAmountToMinor(
-          resource?.amount?.total ?? resource?.amount?.value,
-          resource?.amount?.currency_code ?? resource?.amount?.currency,
-          ctx.log,
-          { eventId: providerEventId },
-        ) ?? 0;
+      const parsed = paypalAmount(
+        resource?.amount?.total ?? resource?.amount?.value,
+        resource?.amount?.currency_code ?? resource?.amount?.currency,
+        ctx.log,
+        { eventId: providerEventId },
+      );
       const currency = (
         resource?.amount?.currency_code ??
         resource?.amount?.currency ??
@@ -464,7 +471,8 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           applicationId,
           providerPaymentId: resource?.id ?? providerEventId,
           providerSubscriptionId: resource?.billing_agreement_id ?? null,
-          amount,
+          // A reversal or a denial that names no amount is for nothing.
+          ...(parsed ?? { amount: 0 }),
           currency,
           description: null,
           raw: payload,
@@ -485,6 +493,11 @@ export const paypalModule: ProviderModule = {
     // number than Stripe, so if both are saved with these defaults Stripe wins,
     // but nothing applies them automatically; `pickProvider` reads the row.
     defaultCountries: [],
+    // PayPal has no INR. BRL, CNY and MYR are not preselected: PayPal takes
+    // them from accounts in Brazil, China and Malaysia only, so an operator
+    // there ticks theirs in the dialog.
+    supportedCurrencies: [...PAYPAL_SUPPORTED_CURRENCIES],
+    preselectedCurrencies: PAYPAL_SUPPORTED_CURRENCIES.filter((code) => !PAYPAL_IN_COUNTRY_ONLY.has(code)),
     priority: 110,
   },
   capabilities: {
@@ -559,6 +572,8 @@ export const paypalModule: ProviderModule = {
     extractEventType(payload: unknown): string {
       return (payload as PaypalEventPayload).event_type ?? 'unknown';
     },
+    // A sale names its billing agreement and not the plan it bills.
+    renewalPriceFromSubscription: true,
     translate,
   },
 };

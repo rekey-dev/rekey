@@ -46,6 +46,7 @@ const ROLLUP_ENDPOINTS = [
   'email-deliverability',
   'webhook-endpoint-health',
   'payments-by-app',
+  'billing-outbox',
 ] as const;
 
 /** Endpoints returning the paginated `Page<T>` envelope. */
@@ -229,8 +230,7 @@ describe('admin metrics', () => {
       applications: { total: number };
       endUsers: { total: number; newLast24h: number };
       subscriptions: { total: number };
-      mrrCents: number;
-      mrrCapped: boolean;
+      mrrByCurrency: unknown[];
     };
     expect(data.tenants.total).toBe(1);
     expect(data.tenants.newLast30d).toBe(1);
@@ -238,9 +238,8 @@ describe('admin metrics', () => {
     expect(data.endUsers.total).toBe(1);
     expect(data.endUsers.newLast24h).toBe(1);
     expect(data.subscriptions.total).toBe(0);
-    // No active subscriptions → zero MRR, and the read cap was not saturated.
-    expect(data.mrrCents).toBe(0);
-    expect(data.mrrCapped).toBe(false);
+    // No active subscriptions: MRR in no currency.
+    expect(data.mrrByCurrency).toEqual([]);
   });
 
   it('overview survives a completely empty deployment', async () => {

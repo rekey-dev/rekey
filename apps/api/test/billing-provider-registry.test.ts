@@ -332,7 +332,9 @@ describe('discovery projection (P4)', () => {
         'docsUrl',
         'label',
         'name',
+        'preselectedCurrencies',
         'priority',
+        'supportedCurrencies',
       ]);
       expect(d.name).toBe(name);
       expect(d.label.length).toBeGreaterThan(0);

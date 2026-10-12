@@ -19,13 +19,17 @@ import { registeredOrigins } from '../../../lib/app-url.js';
 import { billingCredentialsService, type BillingMode, type BillingProviderName } from '../credentials.service.js';
 import { getModule } from '../providers/registry.js';
 import { isOneTimePlan } from '../plan-kind.js';
+import { WITH_DEFAULT_PRICE, withDefaultPrices, type PlanWithDefaultPrice } from '../../plans/default-price.js';
+import type { ReadinessPlan } from '../../plans/plan-readiness.js';
+import type { PricedPlan } from '../providers/types.js';
 import { planCheckoutReadiness } from '../../plans/plan-readiness.js';
 import { checkReturnUrls } from '../checkout-return-url.js';
 import { probePortal, type ProbeResult } from './portal-probe.js';
 import { stripePublishableKeyFailure } from './stripe-readiness.js';
 import { razorpayKeyIdCheck } from './razorpay-readiness.js';
 import { label, modeWord, pass, type Kind } from './readiness-shared.js';
-import { latestVerifiedWebhook, secretsSavedAt, webhookCheck } from './readiness-webhook.js';
+import { noCurrencyCheck } from './readiness-currencies.js';
+import { latestVerifiedWebhook, lookUpWebhook, secretsSavedAt, webhookCheck, webhookStoredCheck } from './readiness-webhook.js';
 
 export { webhookCheck };
 
@@ -177,7 +181,7 @@ export async function plansCheck(
   applicationId: string,
   provider: BillingProviderName,
   mode: BillingMode,
-  plans: Plan[],
+  plans: readonly ReadinessPlan[],
 ): Promise<Check> {
   if (plans.length === 0) {
     return {
@@ -312,11 +316,17 @@ function notApplicable(mode: BillingMode): Check[] {
   ];
 }
 
-async function paidPlans(applicationId: string): Promise<Plan[]> {
-  return prisma.plan.findMany({ where: { applicationId, active: true, amount: { gt: 0 } }, orderBy: { slug: 'asc' } });
+async function paidPlans(applicationId: string): Promise<PlanWithDefaultPrice[]> {
+  return withDefaultPrices(
+    await prisma.plan.findMany({
+      where: { applicationId, active: true, defaultPriceId: { not: null } },
+      orderBy: { slug: 'asc' },
+      include: WITH_DEFAULT_PRICE,
+    }),
+  );
 }
 
-function kindsOf(plans: Plan[]): Set<Kind> {
+function kindsOf(plans: readonly ReadinessPlan[]): Set<Kind> {
   return new Set(plans.map((p) => (isOneTimePlan(p) ? 'one_time' : 'recurring')));
 }
 
@@ -341,10 +351,14 @@ export async function runCheckoutReadiness(app: Application): Promise<CheckoutRe
       continue;
     }
     const checks: Check[] = [portalCheck(probe)];
-    for (const { provider } of inMode) {
+    for (const { provider, currencies } of inMode) {
       const creds = await billingCredentialsService.loadDecrypted(app.id, provider).catch(() => null);
-      checks.push(providerCheck(provider, mode, kinds, app.environment, true, await providerProven(app.id, provider, mode)));
-      checks.push(await webhookCheck(app.id, provider, mode, creds, kinds));
+      const lookup = await lookUpWebhook(app, provider, creds);
+      // Any answer from the provider means it accepted these credentials.
+      const answered = lookup !== null && lookup.state !== 'unreachable';
+      const support = providerCheck(provider, mode, kinds, app.environment, true, answered || (await providerProven(app.id, provider, mode)));
+      checks.push(support.status !== 'FAIL' && currencies.length === 0 ? noCurrencyCheck(provider) : support);
+      checks.push(await webhookCheck(app.id, provider, mode, creds, kinds, lookup));
       checks.push(await plansCheck(app.id, provider, mode, plans));
       checks.push(browserCredentialCheck(provider, creds));
     }
@@ -393,7 +407,7 @@ export async function guardEmbeddedCheckout(args: {
   application: Application;
   provider: BillingProviderName;
   mode: BillingMode;
-  plan: Plan;
+  plan: PricedPlan;
   successUrl: string;
   cancelUrl: string;
 }): Promise<Check | null> {
@@ -410,10 +424,12 @@ export async function guardEmbeddedCheckout(args: {
   const credential = browserCredentialCheck(provider, creds);
   if (credential.status === 'FAIL') return credential;
 
-  const webhook = await webhookCheck(app.id, provider, mode, creds, kinds);
+  const webhook = webhookStoredCheck(provider, creds);
   if (webhook.status === 'FAIL') return webhook;
 
-  const plans = await plansCheck(app.id, provider, mode, [plan]);
+  // Judged at the price this checkout charges, so its currency stands in for the default's.
+  const judged = { ...plan, defaultPrice: plan.planPriceId === null ? null : { currency: plan.currency } };
+  const plans = await plansCheck(app.id, provider, mode, [judged]);
   if (plans.status === 'FAIL') return plans;
 
   const urls = requestReturnUrlsCheck(app, { successUrl: args.successUrl, cancelUrl: args.cancelUrl });

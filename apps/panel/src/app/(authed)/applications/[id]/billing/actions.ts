@@ -11,6 +11,8 @@
 
 import { redirect } from 'next/navigation';
 import { api, errorQuery, PanelApiError, type BillingProviderName } from '@/lib/api';
+import { parsePriceCurrency } from '@/lib/plan-prices';
+import { submittedCurrencies } from '@/lib/provider-currencies';
 
 function credentialsPath(applicationId: string, provider: BillingProviderName): string {
   return `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`;
@@ -48,21 +50,25 @@ export async function saveProviderCredentials(
     data[key] = value;
   }
   const countries = parseCountries(formData.get('countries'));
+  const currencies = submittedCurrencies(formData);
   const priority = parsePriority(formData.get('priority'));
   const mode = parseMode(formData.get('mode'));
+  let webhook: 'unchanged' | 'reconfigured' | 'failed';
   try {
-    await api({
+    ({ webhook } = await api<{ webhook: 'unchanged' | 'reconfigured' | 'failed' }>({
       method: 'PUT',
       path: credentialsPath(applicationId, provider),
-      body: { data, countries, priority, mode },
-    });
+      body: { data, countries, currencies, priority, mode },
+    }));
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`${tab(applicationId, 'providers')}?${await errorQuery(err, { edit: provider })}`);
     }
     throw err;
   }
-  redirect(`${tab(applicationId, 'providers')}?saved=${encodeURIComponent(provider)}`);
+  const name = encodeURIComponent(provider);
+  const webhookFlag = webhook === 'reconfigured' ? `&webhook=${name}` : webhook === 'failed' ? `&webhookStale=${name}` : '';
+  redirect(`${tab(applicationId, 'providers')}?saved=${name}${webhookFlag}`);
 }
 
 export async function toggleProviderEnabled(
@@ -126,6 +132,46 @@ export async function setDunningEnabled(applicationId: string, dunningEnabled: b
 
 export async function setBillingSubject(applicationId: string, billingSubject: 'user' | 'org'): Promise<void> {
   await patchConfig(applicationId, { billingSubject }, 'settings', 'subject');
+}
+
+/**
+ * Whose word about a buyer's country may select a plan's local price. `any`
+ * lets a buyer pick their price, so the settings page confirms it first.
+ */
+export async function setLocalPrices(applicationId: string, localPrices: 'trusted' | 'any'): Promise<void> {
+  await patchConfig(applicationId, { localPrices }, 'settings', 'localPrices');
+}
+
+/**
+ * The Application's default for a checkout whose server names a currency no
+ * provider can charge. A request that names its own choice wins. The API logs
+ * the change with the value before and after.
+ */
+export async function setOnUnavailableCurrency(applicationId: string, onUnavailableCurrency: 'fallback' | 'refuse'): Promise<void> {
+  await patchConfig(applicationId, { onUnavailableCurrency }, 'settings', 'unavailableCurrency');
+}
+
+/**
+ * The currency this Application's figures lead with. Nothing is converted and
+ * no price changes. The API holds the code to the currencies a plan can be
+ * priced in and logs the change with the value before and after.
+ */
+export async function setReportingCurrency(applicationId: string, formData: FormData): Promise<void> {
+  const reportingCurrency = parsePriceCurrency(String(formData.get('reportingCurrency') ?? ''));
+  if (reportingCurrency === null) redirect(`${tab(applicationId, 'settings')}?error=reportingCurrency`);
+  try {
+    await api({
+      method: 'PUT',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing/reporting-currency`,
+      body: { reportingCurrency },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${tab(applicationId, 'settings')}?${await errorQuery(err)}`);
+    }
+    throw err;
+  }
+  redirect(`${tab(applicationId, 'settings')}?saved=reportingCurrency`);
 }
 
 function parseCountries(raw: FormDataEntryValue | null): string[] {

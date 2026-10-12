@@ -148,26 +148,47 @@ describe('paypal module translate', () => {
     ]);
   });
 
-  it('SALE.COMPLETED with an unusable amount → no events (nothing recorded) + warning', () => {
+  it('SALE.COMPLETED with an amount that cannot be recorded is passed on with the amount as PayPal wrote it, and advances no period', () => {
     const c = ctx();
-    expect(
-      translate(
-        {
-          id: 'WH-9',
-          event_type: 'PAYMENT.SALE.COMPLETED',
-          resource: { id: 'SALE-3', billing_agreement_id: 'I-AGR', amount: { total: 'not-a-number' } },
-        },
-        c,
-      ),
-    ).toEqual([]);
+    const unparseable = translate(
+      {
+        id: 'WH-9',
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: { id: 'SALE-3', billing_agreement_id: 'I-AGR', amount: { total: 'not-a-number' } },
+      },
+      c,
+    );
+    expect(unparseable).toMatchObject([{ type: 'payment.succeeded', providerPaymentId: 'SALE-3', amount: Number.NaN, reportedAmount: 'not-a-number' }]);
     expect(c.log.warn).toHaveBeenCalled();
-    // Missing amount entirely is equally unusable.
-    expect(
-      translate(
-        { id: 'WH-10', event_type: 'PAYMENT.SALE.COMPLETED', resource: { id: 'SALE-4' } },
-        ctx(),
-      ),
-    ).toEqual([]);
+
+    const oversized = translate(
+      {
+        id: 'WH-9b',
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: { id: 'SALE-3b', billing_agreement_id: 'I-AGR', amount: { total: '30000000.00', currency: 'USD' } },
+      },
+      ctx(),
+    );
+    expect(oversized).toMatchObject([{ type: 'payment.succeeded', amount: 3_000_000_000, reportedAmount: '30000000.00', currency: 'USD' }]);
+
+    // No amount at all is not a charge of zero: nothing is recorded.
+    expect(translate({ id: 'WH-10', event_type: 'PAYMENT.SALE.COMPLETED', resource: { id: 'SALE-4' } }, ctx())).toEqual([]);
+  });
+
+  it('a capture, a refund and a denial with an unusable amount keep it as text; one that names no amount is zero', () => {
+    const resource = { id: 'X-1', amount: { value: '12.345', currency_code: 'USD' } };
+    for (const [eventType, type] of [
+      ['PAYMENT.CAPTURE.COMPLETED', 'payment.succeeded'],
+      ['PAYMENT.SALE.REVERSED', 'payment.refunded'],
+      ['PAYMENT.SALE.DENIED', 'payment.failed'],
+    ] as const) {
+      expect(translate({ id: `WH-${eventType}`, event_type: eventType, resource }, ctx())).toMatchObject([
+        { type, amount: Number.NaN, reportedAmount: '12.345' },
+      ]);
+    }
+    expect(translate({ id: 'WH-D0', event_type: 'PAYMENT.SALE.DENIED', resource: { id: 'X-2' } }, ctx())).toMatchObject([
+      { type: 'payment.failed', amount: 0 },
+    ]);
   });
 
   it('SALE.DENIED → payment.failed; a REVERSAL is a refund, not a failure', () => {

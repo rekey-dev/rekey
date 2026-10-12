@@ -23,6 +23,7 @@ import {
 import { licensesService, SELF_LICENSE_INCLUDE_LIMIT } from '../licenses/licenses.service.js';
 import { devicesService, forEndUser } from '../devices/devices.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
+import { SUPPORT_MODE_SCHEMA, supportModeFor } from '../support-cases/support-mode.js';
 
 const SUPPORTED = ME_INCLUDE_VALUES.join(', ');
 const BILLING_INCLUDES: ReadonlyArray<MeInclude> = ['entitlements', 'subscription', 'licenses'];
@@ -136,6 +137,8 @@ export async function resolveMeIncludes(
       // Capped, so the cap is said out loud rather than read as "that is all".
       return { items, truncated: total > items.length };
     },
+    support: () =>
+      supportModeFor({ applicationId: endUser.applicationId, endUserId: endUser.id, deviceId: session.deviceId }),
   };
 
   const requested = ME_INCLUDE_VALUES.filter((value) => include.has(value));
@@ -228,6 +231,14 @@ export const ME_INCLUDED_PROPERTIES_SCHEMA: JsonSchema = {
       },
       required: ['items', 'truncated'],
     },
+    support: {
+      ...SUPPORT_MODE_SCHEMA,
+      description:
+        'With `include=support`. Support mode for this session: the capabilities of the open ' +
+        "support case when it covers this session's device, otherwise `{ active: false, " +
+        'capabilities: [] }`. A case limited to devices is inactive on a session that is not ' +
+        'device-bound. Reported state only: check anything valuable on your backend.',
+    },
   },
 };
 
@@ -242,8 +253,9 @@ export const ME_INCLUDE_ERRORS = {
 
 /**
  * The scope a secret key needs for each value on `/users/me`, the scope of the
- * dedicated route that already serves it. `device` has none beyond the
- * route's own `auth:read`.
+ * dedicated route that already serves it. `device` and `support` have none
+ * beyond the route's own `auth:read`, which is what GET /users/:id/support
+ * needs too.
  */
 export const ME_INCLUDE_SCOPES: Partial<Record<MeInclude, string>> = {
   entitlements: 'billing:read',

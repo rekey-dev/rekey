@@ -12,10 +12,11 @@ import type {
   FeatureCheckDto,
   OrganizationBaseRole,
   PublicPlanCheckoutDto,
-  PlanDto,
+  ResolvedPriceDto,
   OrganizationWithRoleDto,
   ResolvedEntitlementsDto,
   SelfSubscriptionDto,
+  SupportModeDto,
 } from '@rekey.dev/shared-types';
 import type { Rekey } from '../src/index.js';
 
@@ -49,15 +50,26 @@ export async function licenses(): Promise<void> {
   void page.items[0]!.keyHash;
 }
 
+export async function support(): Promise<void> {
+  const me = await rekey.auth.getCurrentUser('token', { include: ['support'] });
+  expectTypeOf(me.support).toEqualTypeOf<SupportModeDto>();
+  expectTypeOf(me).not.toHaveProperty('device');
+  if (me.support.active) expectTypeOf(me.support.scope).toEqualTypeOf<'user' | 'device'>();
+  // @ts-expect-error `since` exists only on an active case
+  void me.support.since;
+  expectTypeOf(await rekey.users.getSupport('eu_1')).toEqualTypeOf<SupportModeDto>();
+  expectTypeOf(await rekey.users.getSupport('eu_1', { deviceId: 'dev_1' })).toEqualTypeOf<SupportModeDto>();
+}
+
 export async function featuresAndPlans(): Promise<void> {
   expectTypeOf(await rekey.billing.getFeature('token', 'reports')).toEqualTypeOf<FeatureCheckDto>();
   expectTypeOf(await rekey.billing.hasFeature('token', 'reports')).toEqualTypeOf<boolean>();
   expectTypeOf(await rekey.billing.hasFeatureFor('eu_1', 'reports')).toEqualTypeOf<boolean>();
   const plans = await rekey.billing.getPlans();
   expectTypeOf(plans.items[0]!.checkout).toEqualTypeOf<PublicPlanCheckoutDto>();
-  // Code typed against PlanDto before `checkout` appeared keeps compiling.
-  const asPlans: PlanDto[] = plans.items;
-  void asPlans;
+  expectTypeOf(plans.items[0]!.price).toEqualTypeOf<ResolvedPriceDto | null>();
+  // @ts-expect-error a price's provider registration is operator configuration
+  void plans.items[0]!.prices[0]!.registration;
   // @ts-expect-error the public catalogue carries no blocker detail
   void plans.items[0]!.checkout.blockers;
 }

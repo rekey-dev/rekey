@@ -402,7 +402,7 @@ export function rekeyErrorHandler(
     error: {
       code: 'INTERNAL_ERROR',
       message: 'An unexpected error occurred.',
-      fix: `Share request id ${requestId} with support — the matching server backtrace is keyed on it.`,
+      fix: `Share request id ${requestId} with support. The matching server backtrace is keyed on it.`,
       requestId,
     },
   });

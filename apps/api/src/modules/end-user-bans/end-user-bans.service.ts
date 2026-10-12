@@ -18,6 +18,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEventIn, withActorEmails } from '../../lib/security-events.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import { closeOpenCaseIn, operatorSupportActor } from '../support-cases/support-case-writes.js';
 
 export const BAN_REASON_MAX = 500;
 
@@ -48,7 +49,7 @@ export interface BanHistoryEntry {
   createdAt: string;
 }
 
-interface LockedRow {
+export interface LockedEndUser {
   application_id: string;
   erased_at: Date | null;
   banned_at: Date | null;
@@ -59,21 +60,31 @@ interface LockedRow {
 const HISTORY_TYPES = ['end_user.banned', 'end_user.unbanned'] as const;
 const HISTORY_LIMIT = 50;
 
+export const REASON_FIX =
+  'Send `reason` with a short note your team will understand later, for example the ticket it came from.';
+
 /**
- * Trimmed, control characters removed, 1..500. The reason is rendered in the
- * panel as plain text; stripping control characters keeps it one readable
- * block there and in CSV exports.
+ * Free text an operator wrote: trimmed, control characters removed, 1..`max`.
+ * It is rendered in the panel as plain text; stripping control characters
+ * keeps it one readable block there and in CSV exports.
+ *
+ * @example
+ *   normaliseOperatorText(' fraud ', {
+ *     max: 500, code: 'BAN_REASON_INVALID', message: 'A ban needs a reason of 1 to 500 characters.', fix: REASON_FIX,
+ *   }); // 'fraud'
  */
-export function normaliseBanReason(raw: string): string {
-  // eslint-disable-next-line no-control-regex
-  const cleaned = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
-  if (cleaned.length === 0 || cleaned.length > BAN_REASON_MAX) {
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'BAN_REASON_INVALID',
-      message: `A ban needs a reason of 1 to ${BAN_REASON_MAX} characters.`,
-      fix: 'Send `reason` with a short note your team will understand later, for example the ticket it came from.',
-    });
+export function normaliseOperatorText(
+  raw: string,
+  rule: { max: number; code: string; message: string; fix: string },
+): string {
+  // A browser submits a textarea's line break as CRLF and counts it as one.
+  const cleaned = raw
+    .replace(/\r\n?/g, '\n')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+  if (cleaned.length === 0 || cleaned.length > rule.max) {
+    throw new RekeyError({ statusCode: 400, code: rule.code, message: rule.message, fix: rule.fix });
   }
   return cleaned;
 }
@@ -94,7 +105,7 @@ export function withoutBanReason(type: string, metadata: Prisma.JsonValue): Pris
   return rest;
 }
 
-function notFound(endUserId: string): RekeyError {
+export function endUserNotFound(endUserId: string): RekeyError {
   return new RekeyError({
     statusCode: 404,
     code: 'END_USER_NOT_FOUND',
@@ -113,19 +124,40 @@ function erased(): RekeyError {
 }
 
 /**
- * Row lock on the end-user, so ban, unban and erasure are ordered against each
- * other and a repeated ban reads the state the previous one committed.
+ * Row lock on the end-user, so ban, unban, erasure, delete and support case
+ * writes are ordered against each other and each reads what the previous one
+ * committed. The caller decides what an erased or banned row means to it.
+ *
+ * `FOR NO KEY UPDATE`, not `FOR UPDATE`: a first sign-in on a new device
+ * inserts a `devices` row while holding the device lock, and that insert's
+ * foreign key takes `FOR KEY SHARE` on this row. `FOR UPDATE` conflicts with
+ * it, and a support write (this lock, then the device lock) deadlocked with
+ * that sign-in. This strength still conflicts with itself and with any UPDATE
+ * or DELETE of the row.
+ *
+ * @example
+ *   const row = await lockEndUser(tx, applicationId, endUserId);
+ *   if (row.erased_at !== null) throw erased();
  */
-async function lockEndUser(
+export async function lockEndUser(
   tx: Prisma.TransactionClient,
   applicationId: string,
   endUserId: string,
-): Promise<LockedRow> {
-  const rows = await tx.$queryRaw<LockedRow[]>`
+): Promise<LockedEndUser> {
+  const rows = await tx.$queryRaw<LockedEndUser[]>`
     SELECT application_id, erased_at, banned_at, banned_by, ban_reason
-    FROM end_users WHERE id = ${endUserId} FOR UPDATE`;
+    FROM end_users WHERE id = ${endUserId} FOR NO KEY UPDATE`;
   const row = rows[0];
-  if (!row || row.application_id !== applicationId) throw notFound(endUserId);
+  if (!row || row.application_id !== applicationId) throw endUserNotFound(endUserId);
+  return row;
+}
+
+async function lockLiveEndUser(
+  tx: Prisma.TransactionClient,
+  applicationId: string,
+  endUserId: string,
+): Promise<LockedEndUser> {
+  const row = await lockEndUser(tx, applicationId, endUserId);
   if (row.erased_at !== null) throw erased();
   return row;
 }
@@ -149,8 +181,9 @@ async function withBannerEmail(row: {
 
 export const endUserBansService = {
   /**
-   * Ban the end-user. Ends every session, OAuth/MCP grant, impersonation and
-   * outstanding sign-in link, then refuses every sign-in until `unban`.
+   * Ban the end-user. Ends every session, OAuth/MCP grant, impersonation,
+   * outstanding sign-in link and open support case, then refuses every sign-in
+   * until `unban`.
    * Banning a banned user is a no-op that keeps the original record; to change
    * the reason, lift the ban and ban again so both steps are audited.
    *
@@ -167,10 +200,15 @@ export const endUserBansService = {
     reason: string;
     actor: BanActor;
   }): Promise<{ state: BanState; alreadyBanned: boolean; sessionsRevoked: number }> {
-    const reason = normaliseBanReason(args.reason);
+    const reason = normaliseOperatorText(args.reason, {
+      max: BAN_REASON_MAX,
+      code: 'BAN_REASON_INVALID',
+      message: `A ban needs a reason of 1 to ${BAN_REASON_MAX} characters.`,
+      fix: REASON_FIX,
+    });
     const { applicationId, endUserId, actor } = args;
     const result = await prisma.$transaction(async (tx) => {
-      const current = await lockEndUser(tx, applicationId, endUserId);
+      const current = await lockLiveEndUser(tx, applicationId, endUserId);
       if (current.banned_at !== null) {
         return {
           row: { bannedAt: current.banned_at, bannedBy: current.banned_by, banReason: current.ban_reason },
@@ -216,7 +254,18 @@ export const endUserBansService = {
         userAgent: actor.userAgent,
         metadata: { endUserId, reason, sessionsRevoked: revoked.count, via: actor.via },
       });
-      return { row: updated, alreadyBanned: false, sessionsRevoked: revoked.count, deliveryIds };
+      const supportDeliveryIds = await closeOpenCaseIn(tx, {
+        applicationId,
+        endUserId,
+        cause: 'banned',
+        actor: operatorSupportActor(actor),
+      });
+      return {
+        row: updated,
+        alreadyBanned: false,
+        sessionsRevoked: revoked.count,
+        deliveryIds: [...deliveryIds, ...supportDeliveryIds],
+      };
     });
     kickDeliveries(result.deliveryIds);
     return {
@@ -241,7 +290,7 @@ export const endUserBansService = {
   }): Promise<{ state: BanState; wasBanned: boolean }> {
     const { applicationId, endUserId, actor } = args;
     const result = await prisma.$transaction(async (tx) => {
-      const current = await lockEndUser(tx, applicationId, endUserId);
+      const current = await lockLiveEndUser(tx, applicationId, endUserId);
       if (current.banned_at === null) return { wasBanned: false, deliveryIds: [] as string[] };
       await tx.endUser.update({
         where: { id: endUserId },
@@ -291,7 +340,7 @@ export const endUserBansService = {
       where: { id: endUserId },
       select: { applicationId: true, bannedAt: true, bannedBy: true, banReason: true },
     });
-    if (!row || row.applicationId !== applicationId) throw notFound(endUserId);
+    if (!row || row.applicationId !== applicationId) throw endUserNotFound(endUserId);
     const events = await prisma.securityEvent.findMany({
       where: { applicationId, subjectEndUserId: endUserId, type: { in: [...HISTORY_TYPES] } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

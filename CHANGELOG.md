@@ -4,6 +4,149 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0-rc.7
+
+A release candidate on the 2.2.0 line, and a breaking one. A plan can now be
+sold in more than one currency, a buyer's country routes them to a provider
+and a price, coupons hold an amount per currency, refunds are recorded one by
+one, and every money change is written to a billing log you can read per
+Application. To get there the price moved off the plan onto price rows, and
+several request and response shapes changed with no aliases kept.
+
+**Upgrading an existing deployment:** read
+[docs/migrating-to-2.2.0-rc.7.md](docs/migrating-to-2.2.0-rc.7.md) first. Run
+`docs/specs/billing-money-model.preflight.sql` against your database before
+you deploy: the first migration refuses to run when any plan, price,
+subscription, payment, checkout or coupon is in HUF, TWD, ISK, UGX or MGA,
+because this release changes how those amounts are sent to providers and
+nothing rescales stored rows. Deploy the API first, then the panel and portal,
+in one sitting. Upgrade the `@rekey.dev/*` packages together with the API: the
+rc.6 packages send fields this API refuses.
+
+### Changed
+
+Every item here changes a behaviour an existing 2.2.0-rc.6 deployment or
+integration can see.
+
+- **A plan's price is a price row.** Plans carry `price` (the default price,
+  resolved for the caller) and `prices[]`. The plan-level `amount`, `currency`
+  and `pricePerUnitCents` are refused on create and update with
+  `BILLING_FIELD_REMOVED` and are no longer returned. Create a plan with
+  `price: { currency, amount }`.
+- **The public plan list is an explicit shape.** `GET /api/v1/billing/plans`
+  no longer returns `metadata`, `applicationId`, `active`, registration status
+  or errors, or timestamps. It previously returned provider price ids and raw
+  provider error text to a publishable key.
+- **Coupons hold terms per kind.** A percentage coupon takes `basisPoints`; a
+  fixed coupon takes `amounts: [{ currency, amountOff }]`. Top-level
+  `amountOff` and `currency` are refused. A fixed coupon is refused, at preview
+  and at checkout, in a currency it has no amount for
+  (`COUPON_CURRENCY_NOT_COVERED`); nothing is converted. A percentage discount
+  rounds toward the buyer.
+- **A provider's empty currency list means it charges nothing.** It used to
+  mean any currency. The upgrade fills every enabled provider's list so none
+  is cut off, and a provider saved without a list starts with the currencies
+  it usually charges. Codes a provider does not publish are refused on save.
+- **`x-country` is refused.** Send the buyer's country in the checkout body
+  from your server, or let the SDK send `x-rekey-visitor-country-hint`.
+- **Billing stats and super-admin figures are per currency.** The scalar
+  `mrrCents`, `mrrCurrency`, `revenueLast30dCents`, `mixedCurrencies` and
+  `volumeCents` fields are gone; read the per-currency arrays. Revenue is net
+  of refunds and counts verified payments only. MRR counts a subscription at
+  its own price and leaves out one that has none.
+- **A subscription reports its own price.** `price` is null for a subscription
+  with no price of its own; it no longer borrows its plan's. Outbound
+  `subscription.*` webhooks carry the subscription's own amount and currency.
+- **A charge that matches nothing is recorded, not dropped.** It becomes an
+  unverified payment with an unapplied case and grants nothing until an
+  operator applies it.
+- **A price that something references keeps its amount.** Changing it archives
+  the row and adds a new one (`PLAN_PRICE_REFERENCED` on an in-place edit).
+- **`billingConfig.currency` is now `billingConfig.reportingCurrency`.**
+- **Several response fields that were optional are required**, among them the
+  checkout result's `currency`, `unitAmount`, `mode` and `warnings`.
+- **CLI:** `rekey plans create` takes the plan's price as its default price
+  row; the per-unit price flag is gone.
+
+### Added
+
+- **Prices in more than one currency on one plan**, each with the countries it
+  applies to, and a per-Application and per-plan rule for whose word about the
+  buyer's country counts (`localPrices`).
+- **Routing by country and currency.** A provider declares the currencies and
+  countries it serves; checkout picks the provider that can charge the price
+  selected. When no enabled provider can charge a local price the buyer is
+  charged the default price, is told before paying, and the fallback is
+  logged. `onUnavailableCurrency: 'refuse'`, per request or as the
+  Application's default, refuses instead.
+- **A routing preview**: for a country, plan and coupon, which price, currency
+  and provider a buyer would get and why. It calls the functions checkout runs
+  and creates nothing.
+- **The billing log**: an append-only record per Application of checkouts,
+  payments, refunds, subscription and price changes, coupon use and billing
+  settings changes, with who made each one. Read it from the panel, the API,
+  `@rekey.dev/node`, `rekey billing log` and MCP, as a whole or per
+  subscription, payment or end user. A "default price used" report and an
+  hourly read-only reconciliation come with it. See
+  [docs/billing-log.md](docs/billing-log.md).
+- **Refunds as records**: partial refunds, several per payment, and refunds an
+  operator starts from the panel or `POST .../payments/:id/refunds`. Outbound
+  `payment.refunded`; payments carry `refundedAmount` and `verification`.
+- **A reporting currency per Application.** There is no conversion: totals stay
+  per currency and this one is listed first.
+- **Webhook readiness asks the provider** whether the webhook exists and
+  listens for the right events, so going live no longer needs a paid event to
+  arrive first. Reconfigure re-registers it after credentials change.
+- **Support mode**: an operator opens a case on an end user, adds notes, and
+  closes it; outbound `support.opened`, `support.updated` and
+  `support.closed`; `support` is available in the `/me` include list.
+- **`RekeyOperator`** in `@rekey.dev/node` for operator-token calls (prices,
+  coupons, refunds, billing log, stats, routing preview, billing settings),
+  and money helpers (`formatMoney`, `validatePriceAmount`) re-exported from
+  every package so nothing computes decimals itself.
+- **`<PricingTable>`** shows the price resolved for the visitor, a note when a
+  local price is unavailable, and a plan that cannot be bought as unavailable.
+- **CLI**: `plans prices`, `coupons`, `billing log|preview|reconciliation|
+  price-fallbacks|reporting-currency|unavailable-currency`, `refunds`,
+  `payments show`, and money checks in `rekey doctor`.
+- **MCP**: operator and stdio tools for prices, coupons, refunds, the billing
+  log, the routing preview and the reporting currency.
+- **Panel**: plan prices, coupons per currency, billing settings, a Billing
+  log section, the routing preview, a per-currency overview, and a payment
+  page with refunds. A restriction is shown on the control before you submit.
+- **Docs**: [docs/currencies.md](docs/currencies.md), the billing log page and
+  the migration page. The TypeScript samples in the docs are compiled by a
+  test.
+
+### Fixed
+
+- Amounts in ISK and UGX at Stripe, HUF and TWD at PayPal, and MGA at Stripe
+  were sent at the wrong scale. Each provider now converts at its own edge.
+- The panel showed 100 times the charged amount for fifteen currencies with no
+  decimals in display. Every app formats money through one registry.
+- A browser naming a provider could select the cheaper of two prices.
+- The checkout page could show the default price while charging a local one.
+- The coupon preview could accept a code that checkout then refused.
+- A renewal at a price other than the subscription's was dropped; it is now
+  recorded and flagged.
+- The super-admin tenant list ranked only the newest page of tenants by MRR.
+- Concurrent saves of billing settings could overwrite one another.
+- Erasing an end user left their country in billing records.
+
+### Upgrade notes
+
+1. Run the preflight query and read its output. Rows in HUF, TWD, ISK, UGX or
+   MGA must be rescaled or removed by hand before the migration will run.
+2. Deploy the API; the migrations run on boot and backfill price rows,
+   subscription prices, payment fields, coupon terms and provider currency
+   lists. Then deploy the panel and portal.
+3. Upgrade every `@rekey.dev/*` package to 2.2.0-rc.7 and follow the before
+   and after tables in the migration page.
+4. Check each provider's currency list under Billing, Setup, Providers. A
+   Razorpay account that sells outside INR needs its other currencies ticked.
+5. The previous API image remains a safe rollback until the constraints in
+   `docs/specs/billing-money-model.step-z.sql` ship in a later release.
+
 ## 2.2.0-rc.6
 
 A release candidate on the 2.2.0 line. The Rekey checkout page now takes

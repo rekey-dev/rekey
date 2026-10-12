@@ -25,14 +25,14 @@ import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '.
  */
 const TENANT_SESSION_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or ' +
-    'TENANT_SESSION_INVALID — the access token is invalid, expired, or the operator account no longer exists.',
-  403: 'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of the active workspace.',
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or ' +
+    'TENANT_SESSION_INVALID: the access token is invalid, expired, or the operator account no longer exists.',
+  403: 'TENANT_MEMBERSHIP_REVOKED: the operator is no longer a member of the active workspace.',
 } as const;
 
 /** Extra 403 raised by the `requireTenantRole(['OWNER', 'ADMIN'])` preHandler. */
 const OWNER_ADMIN_ROLE_ERROR =
-  'TENANT_ROLE_INSUFFICIENT — the operator\'s live role in this workspace is below OWNER/ADMIN.';
+  'TENANT_ROLE_INSUFFICIENT: the operator\'s live role in this workspace is below OWNER/ADMIN.';
 
 // `MemberGrantRow`/`MemberRow`/`InvitationRow` (tenant-workspaces.service.ts) now match the
 // registered `MemberGrant`/`WorkspaceMember`/`WorkspaceInvitation` components field-for-field,
@@ -350,9 +350,9 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           ...errs({
             ...TENANT_SESSION_ERRORS,
             403:
-              'TENANT_ROLE_INSUFFICIENT — the operator is a MEMBER. Workspace usage is ' +
+              'TENANT_ROLE_INSUFFICIENT: the operator is a MEMBER. Workspace usage is ' +
               'aggregate across every application, including ones a MEMBER has no grant on.',
-            404: 'TENANT_NOT_FOUND — the active workspace no longer exists.',
+            404: 'TENANT_NOT_FOUND: the active workspace no longer exists.',
           }),
         },
       },
@@ -378,7 +378,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           200: ok(WorkspaceDetail, 'The active workspace.'),
           ...errs({
             ...TENANT_SESSION_ERRORS,
-            404: 'TENANT_NOT_FOUND — the active workspace no longer exists.',
+            404: 'TENANT_NOT_FOUND: the active workspace no longer exists.',
           }),
         },
       },
@@ -410,10 +410,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         response: {
           200: ok(WorkspaceSummary, 'The created workspace.'),
           ...errs({
-            400: 'WORKSPACE_NAME_INVALID — name is not 2–80 characters after trimming.',
+            400: 'WORKSPACE_NAME_INVALID: name is not 2–80 characters after trimming.',
             ...TENANT_SESSION_ERRORS,
             403:
-              `${TENANT_SESSION_ERRORS[403]} Or WORKSPACE_CREATION_DISABLED — this deployment ` +
+              `${TENANT_SESSION_ERRORS[403]} Or WORKSPACE_CREATION_DISABLED: this deployment ` +
               'has `WORKSPACE_CREATION=disabled`.',
           }),
         },
@@ -452,7 +452,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         response: {
           200: ok(WorkspaceSummary, 'The updated workspace.'),
           ...errs({
-            400: 'WORKSPACE_NAME_INVALID — name is not 2–80 characters after trimming.',
+            400: 'WORKSPACE_NAME_INVALID: name is not 2–80 characters after trimming.',
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
           }),
@@ -494,7 +494,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         response: {
           200: okPage(ref('WorkspaceMember'), 'A page of members of the active workspace.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...TENANT_SESSION_ERRORS,
           }),
         },
@@ -544,8 +544,8 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           ...errs({
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
-            404: 'MEMBERSHIP_NOT_FOUND — no membership with that id in this workspace.',
-            400: 'CANNOT_REMOVE_LAST_OWNER — this is the workspace\'s only OWNER.',
+            404: 'MEMBERSHIP_NOT_FOUND: no membership with that id in this workspace.',
+            400: 'CANNOT_REMOVE_LAST_OWNER: this is the workspace\'s only OWNER.',
           }),
         },
       },
@@ -594,11 +594,11 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           ...errs({
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
-            404: 'MEMBERSHIP_NOT_FOUND — no membership with that id in this workspace.',
+            404: 'MEMBERSHIP_NOT_FOUND: no membership with that id in this workspace.',
             400:
-              'CANNOT_REMOVE_LAST_OWNER — this would demote the workspace\'s only OWNER. ' +
-              'SCOPES_MEMBER_ONLY — scopes only apply to MEMBER roles. ' +
-              'SCOPE_INVALID — a scope is not one the registry knows.',
+              'CANNOT_REMOVE_LAST_OWNER: this would demote the workspace\'s only OWNER. ' +
+              'SCOPES_MEMBER_ONLY: scopes only apply to MEMBER roles. ' +
+              'SCOPE_INVALID: a scope is not one the registry knows.',
           }),
         },
       },
@@ -653,10 +653,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         response: {
           200: okPage(ref('MemberGrant'), "A page of the member's per-application grants."),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
-            404: 'MEMBERSHIP_NOT_FOUND — no membership with that id in this workspace.',
+            404: 'MEMBERSHIP_NOT_FOUND: no membership with that id in this workspace.',
           }),
         },
       },
@@ -707,10 +707,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
             404:
-              'MEMBERSHIP_NOT_FOUND — no membership with that id in this workspace; or ' +
-              'APPLICATION_NOT_FOUND — no application with that id in this workspace.',
+              'MEMBERSHIP_NOT_FOUND: no membership with that id in this workspace; or ' +
+              'APPLICATION_NOT_FOUND: no application with that id in this workspace.',
             400:
-              'APP_GRANT_MEMBER_ONLY — this membership is OWNER/ADMIN, which already has ' +
+              'APP_GRANT_MEMBER_ONLY: this membership is OWNER/ADMIN, which already has ' +
               'full access to every Application.',
           }),
         },
@@ -770,8 +770,8 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
             ...TENANT_SESSION_ERRORS,
             403: `${TENANT_SESSION_ERRORS[403]} Or ${OWNER_ADMIN_ROLE_ERROR}`,
             404:
-              'MEMBERSHIP_NOT_FOUND — no membership with that id in this workspace; or ' +
-              'APP_GRANT_NOT_FOUND — no grant for that application on this membership.',
+              'MEMBERSHIP_NOT_FOUND: no membership with that id in this workspace; or ' +
+              'APP_GRANT_NOT_FOUND: no grant for that application on this membership.',
           }),
         },
       },
@@ -815,10 +815,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         response: {
           200: okPage(ref('WorkspaceInvitation'), 'A page of invitations for this workspace, newest first.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...TENANT_SESSION_ERRORS,
             403:
-              `${TENANT_SESSION_ERRORS[403]}; or TENANT_ROLE_INSUFFICIENT — listing invitations ` +
+              `${TENANT_SESSION_ERRORS[403]}; or TENANT_ROLE_INSUFFICIENT: listing invitations ` +
               'requires OWNER or ADMIN, same as creating one.',
           }),
         },
@@ -873,9 +873,9 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           ...errs({
             ...TENANT_SESSION_ERRORS,
             403:
-              `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT — an ADMIN caller ` +
+              `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT: an ADMIN caller ` +
               'tried to invite an ADMIN or OWNER (ADMIN may only invite MEMBER).',
-            409: 'INVITE_TARGET_ALREADY_MEMBER — that email is already a member of this workspace.',
+            409: 'INVITE_TARGET_ALREADY_MEMBER: that email is already a member of this workspace.',
           }),
         },
       },
@@ -898,8 +898,8 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           /** True if Rekey sent the invitation email via the default Resend pool. False otherwise (caller forwards manually). */
           emailSent: result.emailSent,
           warning: result.emailSent
-            ? 'The invitation email was sent. The raw token is still here in case you need to re-share manually — it is shown only once.'
-            : 'Store this token now — it is shown exactly once and cannot be recovered. Share via the URL: ' +
+            ? 'The invitation email was sent. The raw token is still here in case you need to re-share manually. It is shown only once.'
+            : 'Store this token now. It is shown exactly once and cannot be recovered. Share via the URL: ' +
               '<panelUrl>/accept-invite?token=' + result.rawToken,
         },
       });
@@ -923,11 +923,11 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           ...errs({
             ...TENANT_SESSION_ERRORS,
             403:
-              `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT — an ADMIN caller ` +
+              `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT: an ADMIN caller ` +
               "tried to revoke an ADMIN's or OWNER's invitation.",
-            404: 'INVITATION_NOT_FOUND — no invitation with that id in this workspace.',
+            404: 'INVITATION_NOT_FOUND: no invitation with that id in this workspace.',
             400:
-              'INVITATION_ALREADY_ACCEPTED — already accepted; remove the resulting member instead.',
+              'INVITATION_ALREADY_ACCEPTED: already accepted; remove the resulting member instead.',
           }),
         },
       },
@@ -1078,11 +1078,11 @@ export async function tenantInvitationPublicRoutes(app: FastifyInstance): Promis
             'The workspace + role this invitation grants, without consuming it.',
           ),
           ...errs({
-            404: 'INVITATION_NOT_FOUND — the token is unknown.',
+            404: 'INVITATION_NOT_FOUND: the token is unknown.',
             400:
-              'INVITATION_REVOKED — the invitation was revoked; or ' +
-              'INVITATION_ALREADY_ACCEPTED — already used; or ' +
-              'INVITATION_EXPIRED — past its `expiresAt`.',
+              'INVITATION_REVOKED: the invitation was revoked; or ' +
+              'INVITATION_ALREADY_ACCEPTED: already used; or ' +
+              'INVITATION_EXPIRED: past its `expiresAt`.',
           }),
         },
       },
@@ -1141,9 +1141,9 @@ export async function tenantInvitationAuthRoutes(app: FastifyInstance): Promise<
           ...errs({
             ...TENANT_SESSION_ERRORS,
             400:
-              'INVITATION_NOT_USABLE — missing, revoked, or already accepted; or ' +
-              'INVITATION_EXPIRED — past its `expiresAt`.',
-            403: `${TENANT_SESSION_ERRORS[403]} Or INVITATION_EMAIL_MISMATCH — the signed-in ` +
+              'INVITATION_NOT_USABLE: missing, revoked, or already accepted; or ' +
+              'INVITATION_EXPIRED: past its `expiresAt`.',
+            403: `${TENANT_SESSION_ERRORS[403]} Or INVITATION_EMAIL_MISMATCH: the signed-in ` +
               "operator's email does not match the invitation's.",
           }),
         },

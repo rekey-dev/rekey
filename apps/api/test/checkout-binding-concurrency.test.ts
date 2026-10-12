@@ -78,12 +78,12 @@ describe('concurrent checkouts and the provider binding (#437)', () => {
   async function twoPlans(): Promise<{ basic: string; pro: string }> {
     const basic = await post<{ slug: string }>(
       `/api/v1/admin/applications/${applicationId}/plans`,
-      { slug: 'basic', name: 'Basic', amount: 900 },
+      { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 900 } },
     );
     const pro = await post<{ slug: string }>(`/api/v1/admin/applications/${applicationId}/plans`, {
       slug: 'pro',
       name: 'Pro',
-      amount: 2900,
+      price: { currency: 'USD', amount: 2900 },
     });
     return { basic: basic.slug, pro: pro.slug };
   }

@@ -17,6 +17,25 @@ export interface ProviderInfo {
   capabilities?: Pick<BillingProviderCapabilities, 'checkout'>;
 }
 
+/** The form field carrying the provider the picker had checked when the page rendered. */
+export const PRESELECTED_PROVIDER_FIELD = 'providerPreselected';
+
+/**
+ * The provider the buyer chose, or '' when they left the picker as it was.
+ *
+ * The radios always post the checked one, so the form also posts which one
+ * was checked to begin with. A preselected provider is not a choice: sending
+ * it would let it decide which of a plan's prices the buyer pays, where the
+ * API would otherwise pick the price for their country and then the provider.
+ *
+ * @example
+ * chosenProvider('stripe', 'stripe'); // ''
+ * chosenProvider('razorpay', 'stripe'); // 'razorpay'
+ */
+export function chosenProvider(posted: string, preselected: string): string {
+  return posted === preselected ? '' : posted;
+}
+
 /**
  * Whether this subscription is sold and billed by the operator's own system
  * (an inbound-only provider). Rekey cannot stop the money there, so the portal

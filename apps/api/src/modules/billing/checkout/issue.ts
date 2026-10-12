@@ -7,6 +7,7 @@
  * inside the returned page URL; the row keeps its hash.
  */
 
+import type { BuyerCountrySource } from '../buyer-country.js';
 import type { BillingProvider, CheckoutSessionInput } from '../providers/types.js';
 import type { BillingMode } from '../credentials.service.js';
 import { mintCheckoutToken } from './token.js';
@@ -16,17 +17,13 @@ import {
   type EmbeddedSessionMetadata,
   type RedirectSessionMetadata,
 } from './sessions.service.js';
-import type { ExpectedCharge } from './order-match.js';
+import type { PriceFallback } from '../checkout-price.js';
 
 export interface IssuedCheckout {
   sessionId: string;
   url: string;
   tokenHash: string | null;
   metadata: EmbeddedSessionMetadata | RedirectSessionMetadata;
-}
-
-function expectedChargeFor(input: CheckoutSessionInput): ExpectedCharge {
-  return { amount: input.plan.amount - (input.discount?.amount ?? 0), currency: input.plan.currency.toUpperCase() };
 }
 
 /**
@@ -46,7 +43,7 @@ export async function issueProviderCheckout(
       sessionId: session.sessionId,
       url: session.url,
       tokenHash: null,
-      metadata: opts.isOneTime ? { expectedCharge: expectedChargeFor(input) } : {},
+      metadata: {},
     };
   }
   if (!provider.createEmbeddedCheckout) {
@@ -69,7 +66,6 @@ export async function issueProviderCheckout(
       providerPlanId: result.providerPlanId,
       discountAmount: opts.discountAmount,
       trialDays: input.trial?.days ?? 0,
-      ...(opts.isOneTime && { expectedCharge: expectedChargeFor(input) }),
     },
   };
 }
@@ -90,6 +86,14 @@ export async function recordIssuedCheckout(
     isOneTime: boolean;
     successUrl: string;
     cancelUrl: string;
+    buyerCountry: string | null;
+    buyerCountrySource: BuyerCountrySource | null;
+    price: { currency: string; unitAmount: number };
+    discountAmount: number;
+    planPriceId: string | null;
+    plan: { id: string; slug: string };
+    /** The price selected first, when this checkout charges the default instead. */
+    priceFallback: PriceFallback | null;
   },
 ): Promise<{ id: string }> {
   return recordCheckoutSession({
@@ -105,5 +109,12 @@ export async function recordIssuedCheckout(
     cancelUrl: ctx.cancelUrl,
     tokenHash: issued.tokenHash,
     metadata: issued.metadata,
+    buyerCountry: ctx.buyerCountry,
+    buyerCountrySource: ctx.buyerCountrySource,
+    price: ctx.price,
+    discountAmount: ctx.discountAmount,
+    planPriceId: ctx.planPriceId,
+    plan: ctx.plan,
+    priceFallback: ctx.priceFallback,
   });
 }

@@ -69,9 +69,9 @@ const TenantSignInOutcome = {
  * Shared across /start and /callback, both resolve provider config via `configFor`.
  */
 const OAUTH_CONFIG_ERRORS = {
-  404: 'OAUTH_PROVIDER_UNKNOWN — no such provider is registered.',
-  400: 'OAUTH_PROVIDER_NOT_CONFIGURED — the provider is registered but missing client id/secret env vars.',
-  503: 'OAUTH_NOT_CONFIGURED — no panel base URL is configured to build the redirect URI.',
+  404: 'OAUTH_PROVIDER_UNKNOWN: no such provider is registered.',
+  400: 'OAUTH_PROVIDER_NOT_CONFIGURED: the provider is registered but missing client id/secret env vars.',
+  503: 'OAUTH_NOT_CONFIGURED: no panel base URL is configured to build the redirect URI.',
 } as const;
 
 const ProviderParam = z.object({ provider: z.string().min(1).max(40) });
@@ -117,7 +117,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
             },
             'OAuth providers enabled on this deployment via env vars.',
           ),
-          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.' }),
+          ...errs({ 429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.' }),
         },
       },
     },
@@ -131,7 +131,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
       schema: {
         tags: ['Tenant · OAuth'],
         security: [],
-        summary: 'Begin operator OAuth sign-in — returns the provider authorization URL',
+        summary: 'Begin operator OAuth sign-in: returns the provider authorization URL',
         params: { type: 'object', required: ['provider'], properties: { provider: { type: 'string' } } },
         body: {
           type: 'object',
@@ -179,16 +179,16 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
           200: ok(TenantSignInOutcome, 'A session, or an MFA challenge to resolve via /auth/mfa-verify.'),
           ...errs({
             ...OAUTH_CONFIG_ERRORS,
-            400: OAUTH_CONFIG_ERRORS[400] + '; or OAUTH_NO_EMAIL — the provider returned no email.',
-            401: 'OAUTH_EMAIL_NOT_VERIFIED — the provider reports the email as unverified.',
+            400: OAUTH_CONFIG_ERRORS[400] + '; or OAUTH_NO_EMAIL: the provider returned no email.',
+            401: 'OAUTH_EMAIL_NOT_VERIFIED: the provider reports the email as unverified.',
             403:
-              'OPERATOR_SIGNUP_CLOSED — sign-up is disabled on this deployment (only if this ' +
-              'login would create a new operator); or OPERATOR_INVITE_REQUIRED — invite mode ' +
-              'requires `inviteKey`; or OPERATOR_INVITE_INVALID — the invite key does not ' +
-              'match a pending invite; or OPERATOR_INVITE_EXPIRED — the invite has expired; ' +
+              'OPERATOR_SIGNUP_CLOSED: sign-up is disabled on this deployment (only if this ' +
+              'login would create a new operator); or OPERATOR_INVITE_REQUIRED: invite mode ' +
+              'requires `inviteKey`; or OPERATOR_INVITE_INVALID: the invite key does not ' +
+              'match a pending invite; or OPERATOR_INVITE_EXPIRED: the invite has expired; ' +
               'or OPERATOR_INVITE_EMAIL_MISMATCH: the key is bound to a workspace for a ' +
               'different email; or NO_TENANT_MEMBERSHIPS: the operator has no workspace memberships.',
-            409: 'OPERATOR_INVITE_USED — the invite was already consumed (race lost).',
+            409: 'OPERATOR_INVITE_USED: the invite was already consumed (race lost).',
           }),
         },
       },
@@ -240,13 +240,13 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
         response: {
           200: ok(TenantSignInOutcome, 'A session, or an MFA challenge to resolve via /auth/mfa-verify.'),
           ...errs({
-            401: 'OIDC_ASSERTION_INVALID — the token is unverifiable, expired, for another issuer or audience, carries an unverified email, or has already been redeemed.',
+            401: 'OIDC_ASSERTION_INVALID: the token is unverifiable, expired, for another issuer or audience, carries an unverified email, or has already been redeemed.',
             403:
-              'OPERATOR_SIGNUP_CLOSED / OPERATOR_INVITE_REQUIRED — this assertion would create a ' +
+              'OPERATOR_SIGNUP_CLOSED / OPERATOR_INVITE_REQUIRED: this assertion would create a ' +
               'new operator and the deployment does not permit it; or NO_TENANT_MEMBERSHIPS.',
-            404: 'OIDC_ASSERTION_NOT_CONFIGURED — this deployment accepts no ID Token assertions.',
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
-            503: 'DEPENDENCY_UNAVAILABLE — the replay store is unreachable, so single-use cannot be guaranteed.',
+            404: 'OIDC_ASSERTION_NOT_CONFIGURED: this deployment accepts no ID Token assertions.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
+            503: 'DEPENDENCY_UNAVAILABLE: the replay store is unreachable, so single-use cannot be guaranteed.',
           }),
         },
       },

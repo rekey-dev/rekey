@@ -130,7 +130,7 @@ describe('Operator MCP write tools', () => {
 
     await rpc(token, 'tools/call', {
       name: 'create_plan',
-      arguments: { applicationId, slug: 'pro', name: 'Pro', amount: 2900 },
+      arguments: { applicationId, slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 } },
     });
 
     const put = readToolResult(
@@ -214,11 +214,11 @@ describe('Operator MCP write tools', () => {
     const plan = readToolResult(
       (await rpc(token, 'tools/call', {
         name: 'create_plan',
-        arguments: { applicationId: appId, slug: 'pro', name: 'Pro', amount: 1500 },
+        arguments: { applicationId: appId, slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1500 } },
       })).body,
     );
     expect(plan.isError).toBe(false);
-    expect((plan.data as { amount: number }).amount).toBe(1500);
+    expect((plan.data as { price: { currency: string; amount: number } }).price).toMatchObject({ currency: 'USD', amount: 1500 });
 
     // create_webhook_endpoint, secret shown once
     const hook = readToolResult(
@@ -424,7 +424,7 @@ describe('Operator MCP write tools', () => {
           method: 'POST',
           url: `/api/v1/tenant/applications/${applicationId}/plans`,
           headers: { authorization: `Bearer ${ownerToken}` },
-          payload: { slug: 'real', name: 'Real', amount: 100 },
+          payload: { slug: 'real', name: 'Real', price: { currency: 'USD', amount: 100 } },
         });
 
         const out = await callTool(ctx, tool, {
@@ -616,7 +616,7 @@ describe('Operator MCP write tools', () => {
         (
           await rpc(token, 'tools/call', {
             name: 'create_plan',
-            arguments: { applicationId: appId, slug: 'pro', name: 'Pro', amount: 2900 },
+            arguments: { applicationId: appId, slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 } },
           })
         ).body,
       );

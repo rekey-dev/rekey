@@ -74,8 +74,7 @@ describeSandbox('razorpay', 'Razorpay test mode', razorpaySandbox, (creds) => {
       applicationId: fixture.applicationId,
       slug,
       name: `${HARNESS_PREFIX} Razorpay ${runId}`,
-      amount: 50_000,
-      currency: 'INR',
+      price: { currency: 'INR', amount: 50_000 },
       interval: 'MONTH',
     });
     return fixture;
@@ -160,8 +159,7 @@ describeSandbox('razorpay', 'Razorpay test mode', razorpaySandbox, (creds) => {
       applicationId: fixture.applicationId,
       code: `${HARNESS_PREFIX}-rzp`,
       discountType: 'AMOUNT',
-      amountOff: 5_000,
-      currency: 'INR',
+      amounts: [{ currency: 'INR', amountOff: 5_000 }],
     });
 
     const res = await startCheckout(fixture, {

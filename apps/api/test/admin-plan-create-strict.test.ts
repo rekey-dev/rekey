@@ -65,11 +65,29 @@ describe('admin plan create refuses unknown fields', () => {
       payload,
     });
 
+  it.each([
+    ['KWD', 1005, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
+    ['XAU', 1000, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
+    ['ZZZ', 1000, 'PLAN_PRICE_CURRENCY_INVALID'],
+    ['HUF', 150, 'PLAN_PRICE_AMOUNT_INVALID'],
+  ])('refuses a default price of %s %d, the route the CLI creates plans through', async (currency, amount, code) => {
+    const res = await createPlan({ slug: 'bad', name: 'Bad', price: { currency, amount } });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(await prisma.plan.count({ where: { applicationId } })).toBe(0);
+  });
+
+  it('stores a lower-case currency upper-case', async () => {
+    const res = await createPlan({ slug: 'lower', name: 'Lower', price: { currency: 'usd', amount: 900 } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data).toMatchObject({ price: { currency: 'USD', amount: 900 }, prices: [{ currency: 'USD', amount: 900, isDefault: true }] });
+  });
+
   it('refuses the per-kind fields the CLI used to send, and creates nothing', async () => {
     const res = await createPlan({
       slug: 'lic',
       name: 'Lic',
-      amount: 4900,
+      price: { currency: 'USD', amount: 4900 },
       kind: 'LICENSE',
       licenseKind: 'PERPETUAL',
     });
@@ -91,7 +109,7 @@ describe('admin plan create refuses unknown fields', () => {
     const res = await createPlan({
       slug: 'credits_500',
       name: '500 credits',
-      amount: 999,
+      price: { currency: 'USD', amount: 999 },
       kind: 'CREDIT',
       creditsAmount: 500,
     });
@@ -104,7 +122,7 @@ describe('admin plan create refuses unknown fields', () => {
   });
 
   it('refuses a typo rather than silently ignoring it', async () => {
-    const res = await createPlan({ slug: 'typo', name: 'T', amount: 100, intervall: 'YEAR' });
+    const res = await createPlan({ slug: 'typo', name: 'T', price: { currency: 'USD', amount: 100 }, intervall: 'YEAR' });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('VALIDATION_ERROR');
     expect(JSON.stringify(res.json().error)).toContain('intervall');
@@ -114,8 +132,7 @@ describe('admin plan create refuses unknown fields', () => {
     const res = await createPlan({
       slug: 'pro_yearly',
       name: 'Pro',
-      amount: 9900,
-      currency: 'EUR',
+      price: { currency: 'EUR', amount: 9900 },
       interval: 'YEAR',
       metadata: { note: 'kept' },
     });
@@ -123,7 +140,7 @@ describe('admin plan create refuses unknown fields', () => {
     expect(res.statusCode).toBe(201);
     const plan = res.json().data as Record<string, unknown>;
     expect(plan.slug).toBe('pro_yearly');
-    expect(plan.currency).toBe('EUR');
+    expect(plan.price).toMatchObject({ currency: 'EUR', amount: 9900 });
     expect(plan.interval).toBe('YEAR');
     expect(plan.kind).toBe('SUBSCRIPTION');
     expect((plan.metadata as { note?: string }).note).toBe('kept');
@@ -134,7 +151,7 @@ describe('admin plan create refuses unknown fields', () => {
     // gains `additionalProperties: false`, AJV (`removeAdditional: true`)
     // deletes `kind` and the handler sees a valid body: 201, silently wrong,
     // exactly the bug that was fixed. A 400 proves the key survived AJV.
-    const res = await createPlan({ slug: 'reach', name: 'R', amount: 1, kind: 'SUBSCRIPTION' });
+    const res = await createPlan({ slug: 'reach', name: 'R', price: { currency: 'USD', amount: 1 }, kind: 'SUBSCRIPTION' });
     expect(res.statusCode).toBe(400);
     expect(await prisma.plan.count({ where: { applicationId, slug: 'reach' } })).toBe(0);
   });

@@ -35,7 +35,7 @@ import { errs, ref, type JsonSchema } from '../../lib/openapi.js';
 // not the Rekey envelope.
 const OPERATOR_MCP_DISABLED_404 = {
   404:
-    'ROUTE_NOT_FOUND — this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
+    'ROUTE_NOT_FOUND: this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
     'MCP surface (including this discovery document) does not exist.',
 };
 
@@ -66,7 +66,7 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
           200: { description: 'Authorization-server metadata.', ...ref('OAuthAuthServerMetadata') },
           ...errs({
             ...OPERATOR_MCP_DISABLED_404,
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -88,7 +88,7 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
           200: { description: 'Protected-resource metadata.', ...ProtectedResourceMetadata },
           ...errs({
             ...OPERATOR_MCP_DISABLED_404,
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },

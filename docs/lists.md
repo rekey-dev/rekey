@@ -167,6 +167,7 @@ address). Members come oldest change first, paged with `cursor`. To sync, store
 the last `updatedAt` you saw and pass it as `updatedSince` next time; ask for
 `status=all` to hear about unsubscribes too.
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 import { Rekey } from '@rekey.dev/node';
 

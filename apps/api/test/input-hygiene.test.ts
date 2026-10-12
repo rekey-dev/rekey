@@ -193,8 +193,7 @@ describe('input hygiene', () => {
         payload: {
           slug: 'huge',
           name: 'Huge',
-          amount: HUGE,
-          currency: 'usd',
+          price: { currency: 'usd', amount: HUGE },
           interval: 'MONTH',
         },
       });
@@ -213,8 +212,7 @@ describe('input hygiene', () => {
         payload: {
           slug: 'realistic',
           name: 'Realistic',
-          amount: 4_900_000, // $49,000.00
-          currency: 'usd',
+          price: { currency: 'usd', amount: 4_900_000 }, // $49,000.00
           interval: 'MONTH',
         },
       });

@@ -136,13 +136,33 @@ describe('billing.getTrialEligibility', () => {
     expect(query.get('offset')).toBe('20');
   });
 
-  it('sends country as the x-country header, the way getProviders does', async () => {
+  it('getProviders sends planSlug, with or without a country', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: BODY }));
+    const client = makeClient(fetchSpy);
 
-    await makeClient(fetchSpy).billing.getTrialEligibility(TOKEN, { country: 'in' });
+    await client.billing.getProviders(undefined, { planSlug: 'pro' });
+    await client.billing.getProviders('in', { planSlug: 'pro' });
+    await client.billing.getProviders();
 
-    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
-    expect((init.headers as Record<string, string>)['x-country']).toBe('IN');
+    const [onlyPlan, both, bare] = (fetchSpy.mock.calls as Array<[string, RequestInit]>).map(([url]) => new URL(url));
+    expect(onlyPlan!.searchParams.get('planSlug')).toBe('pro');
+    expect(onlyPlan!.searchParams.has('country')).toBe(false);
+    expect(both!.searchParams.get('planSlug')).toBe('pro');
+    expect(both!.searchParams.get('country')).toBe('IN');
+    expect(bare!.search).toBe('');
+  });
+
+  it('sends country as a query parameter and never as the removed x-country header', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: BODY }));
+    const client = makeClient(fetchSpy);
+
+    await client.billing.getTrialEligibility(TOKEN, { country: 'in' });
+    await client.billing.getProviders('in');
+
+    for (const [url, init] of fetchSpy.mock.calls as Array<[string, RequestInit]>) {
+      expect(new URL(url).searchParams.get('country')).toBe('IN');
+      expect(Object.keys(init.headers as Record<string, string>).map((name) => name.toLowerCase())).not.toContain('x-country');
+    }
   });
 });
 
@@ -164,6 +184,29 @@ describe('billing.createCheckout: allowWithoutTrial', () => {
 
     const init = fetchSpy.mock.calls[0]![1] as RequestInit;
     expect(JSON.parse(init.body as string)).toMatchObject({ allowWithoutTrial: true });
+  });
+});
+
+describe('billing.createCheckout: currency', () => {
+  const RESULT = { url: 'https://checkout.example/session', subscription: SUBSCRIPTION, discountAmount: 0, provider: 'razorpay' };
+  const URLS = { successUrl: 'https://app.example.com/ok', cancelUrl: 'https://app.example.com/no' };
+
+  it('sends the currency the server chose', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: RESULT }));
+
+    await makeClient(fetchSpy).billing.createCheckout(TOKEN, { planSlug: 'pro', currency: 'INR', ...URLS });
+
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toMatchObject({ planSlug: 'pro', currency: 'INR' });
+  });
+
+  it('sends no currency when none is chosen, so the API picks the price', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: RESULT }));
+
+    await makeClient(fetchSpy).billing.createCheckout(TOKEN, { planSlug: 'pro', ...URLS });
+
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(init.body as string)).not.toHaveProperty('currency');
   });
 });
 

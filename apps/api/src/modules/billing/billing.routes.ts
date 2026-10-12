@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { billingService } from './billing.service.js';
 import { subscriptionGrantsService } from './grant.service.js';
@@ -6,7 +6,11 @@ import { requireApiKey, requirePublishableOrSecretKey, requireScope } from '../.
 import { requireUserSession } from '../../middleware/user-session.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { billingCredentialsService, type BillingProviderName } from './credentials.service.js';
-import { countryFromRequest, pickProvider } from './providers/index.js';
+import { costsNothing } from './free-plan.js';
+import { WITH_DEFAULT_PRICE, withDefaultPrice } from '../plans/default-price.js';
+import { reportingCurrency } from './reporting-currency.js';
+import { pickProvider } from './providers/index.js';
+import { COUNTRY_INPUT, resolveBuyerCountry } from './buyer-country.js';
 import { getModule, providerNameSchema } from './providers/registry.js';
 import {
   NULLABLE_SUBSCRIPTION_SCHEMA,
@@ -16,8 +20,10 @@ import {
   toSelfSubscription,
 } from './session-reads.js';
 import { entitlementsService } from './entitlements.service.js';
-import { serializePlans } from '../plans/plan-dto.js';
-import { resolveTrialEligibility, trialSubjectKey } from './trial-eligibility.service.js';
+import { serializePlans, toPriceFallbackDto, toResolvedPriceDto } from '../plans/plan-dto.js';
+import { resolveTrialEligibility, trialSubjectKey, type TrialProvider } from './trial-eligibility.service.js';
+import { loadCheckoutPreviewRows, planProviders, previewCheckoutProvider } from './checkout-preview.js';
+import { isOneTimePlan } from './plan-kind.js';
 import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -43,15 +49,15 @@ import { checkReturnUrls } from './checkout-return-url.js';
  */
 const READ_GATE_ERRORS = {
   401:
-    'API_KEY_MISSING / API_KEY_INVALID — the Authorization header is missing, or the secret key ' +
-    'is malformed, unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID — the publishable ' +
+    'API_KEY_MISSING / API_KEY_INVALID: the Authorization header is missing, or the secret key ' +
+    'is malformed, unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID: the publishable ' +
     'key is unknown or its rotation grace window has ended.',
   403:
-    "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or ORIGIN_NOT_ALLOWED — the " +
-    "request Origin is outside the publishable key's CORS allowlist; or BILLING_DISABLED — " +
-    'billing is not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT — the secret ' +
+    "IP_NOT_ALLOWED: caller IP outside the secret key's allowlist; or ORIGIN_NOT_ALLOWED: the " +
+    "request Origin is outside the publishable key's CORS allowlist; or BILLING_DISABLED: " +
+    'billing is not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT: the secret ' +
     'key lacks the `billing:read` scope (a publishable request is pre-authorized for this route).',
-  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+  429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
 } as const;
 
 /** Same chain, `billing:write` instead. */
@@ -65,9 +71,9 @@ const WRITE_GATE_ERRORS = {
 const USER_READ_GATE_ERRORS = {
   401:
     READ_GATE_ERRORS[401] +
-    ' USER_TOKEN_MISSING — no X-Rekey-User-Token header; USER_TOKEN_INVALID — the user token ' +
-    'is invalid, expired, or signed with a different secret; USER_TOKEN_WRONG_APPLICATION — ' +
-    'the token was issued for a different Application; IMPERSONATION_SESSION_ENDED — the ' +
+    ' USER_TOKEN_MISSING: no X-Rekey-User-Token header; USER_TOKEN_INVALID: the user token ' +
+    'is invalid, expired, or signed with a different secret; USER_TOKEN_WRONG_APPLICATION: ' +
+    'the token was issued for a different Application; IMPERSONATION_SESSION_ENDED: the ' +
     'impersonation session behind this token has ended.',
   403: READ_GATE_ERRORS[403],
   429: READ_GATE_ERRORS[429],
@@ -88,7 +94,9 @@ const CheckoutBody = z.object({
   // Registry-derived (P4): adding a provider module extends checkout's
   // accepted values without touching this file.
   provider: providerNameSchema.optional(),
-  country: z.string().length(2).optional(),
+  country: z.string().regex(COUNTRY_INPUT).optional(),
+  currency: z.string().regex(/^[A-Za-z]{3}$/).optional(),
+  onUnavailableCurrency: z.enum(['fallback', 'refuse']).optional(),
   /** Buy for an org (owner+beneficiary). Caller must be OWNER/ADMIN of it. */
   organizationId: z.string().min(1).optional(),
   /**
@@ -184,6 +192,20 @@ const FREE_TIER_ACTIVATED = {
 
 const EntitlementsQuery = z.object({ organizationId: z.string().min(1).optional() });
 
+const PlansQuery = z.object({ country: z.string().regex(COUNTRY_INPUT).optional() });
+
+/**
+ * The signed-in buyer when the request carries their token, so the catalogue
+ * can price for the currency they already pay in. A pricing page needs no
+ * token, so its absence is not an error; a token that is present and invalid
+ * is refused as it is everywhere else.
+ */
+async function optionalEndUserId(req: FastifyRequest, reply: FastifyReply): Promise<string | undefined> {
+  if (typeof req.headers['x-rekey-user-token'] !== 'string') return undefined;
+  await requireUserSession(req, reply);
+  return req.endUser?.id;
+}
+
 /** Entitlement keys are at most 80 characters (the plan entitlement PUT). */
 const FeatureParam = z.object({ key: z.string().min(1).max(80) });
 const FEATURE_PARAM_SCHEMA = {
@@ -212,6 +234,7 @@ async function namedEndUser(applicationId: string, endUserId: string): Promise<{
 const TrialEligibilityQuery = z.object({
   organizationId: z.string().min(1).optional(),
   planSlug: z.string().min(1).max(40).optional(),
+  country: z.string().regex(COUNTRY_INPUT).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
 });
@@ -263,26 +286,59 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'Each plan carries `checkout.ready`: false when a buyer sent to checkout for it would be ' +
           'refused by a provider they could be routed to (no provider connected, the plan was ' +
           'never registered with one, or it offers a trial a provider cannot express), so a ' +
-          'pricing page can hide it. Only the boolean: the operator plan list names the provider ' +
-          'and the repair. It describes checkout only; a free default plan applies without one.',
+          'pricing page can hide it. It is also false, for a signed-in buyer only, when the provider ' +
+          'they pay through can no longer charge the currency they pay in: `price` is then the price ' +
+          'they are bound to, and their checkout is refused with BILLING_CURRENCY_CONFLICT. Only the ' +
+          'boolean: the operator plan list names the provider and the repair. It describes checkout ' +
+          'only; a free default plan applies without one.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
-        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        querystring: {
+          type: 'object',
+          properties: {
+            ...paginationJsonSchema,
+            country: {
+              type: 'string',
+              description:
+                "The buyer's ISO 3166-1 alpha-2 country, from a server caller. Each plan's `price` is the one " +
+                'checkout would charge a buyer there. A browser caller is placed by the CDN instead.',
+            },
+          },
+        },
         response: {
           200: okPage(ref('PublicPlan'), 'A page of active plans for the calling application.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...READ_GATE_ERRORS,
           }),
         },
       },
     },
-    async (req) => {
+    async (req, reply) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
       const [plans, total] = await Promise.all([
         billingService.listActivePlans(req.application!, { take, skip }),
         billingService.countActivePlans(req.application!),
       ]);
-      const items = await serializePlans(req.application!.id, plans, 'public');
+      const { country } = PlansQuery.parse(req.query);
+      const billingConfig = BillingConfigSchema.parse(req.application!.billingConfig);
+      const endUserId = await optionalEndUserId(req, reply);
+      const items = await serializePlans(req.application!.id, plans, 'public', {
+        buyer: resolveBuyerCountry(req, country),
+        callerIsSecretKey: req.authKind === 'secret',
+        localPrices: billingConfig.localPrices,
+        unpricedCurrency: billingConfig.reportingCurrency,
+        endUserId,
+        // The organization a checkout from this session would bill: its
+        // subscriptions are what bind the price, not the buyer's own.
+        beneficiaryOrgId:
+          endUserId === undefined
+            ? undefined
+            : await billingSubjectOrganization(req.application!, {
+                applicationId: req.application!.id,
+                endUserId,
+                activeOrganizationId: req.activeOrganizationId,
+              }),
+      });
       return { success: true, data: paged(items, total, take, skip) };
     },
   );
@@ -311,7 +367,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
             ...USER_READ_GATE_ERRORS,
             403:
               USER_READ_GATE_ERRORS[403] +
-              ' ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
               'member of that organization.',
           }),
         },
@@ -378,13 +434,13 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(RESOLVED_ENTITLEMENTS_SCHEMA, "The named end-user's resolved entitlements."),
           ...errs({
-            400: 'VALIDATION_ERROR — `endUserId` is missing.',
-            401: 'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
+            400: 'VALIDATION_ERROR: `endUserId` is missing.',
+            401: 'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
             403:
-              "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or BILLING_DISABLED; or " +
-              'API_KEY_SCOPE_INSUFFICIENT — the key lacks `billing:read`; or ORGANIZATION_NOT_MEMBER — ' +
+              "IP_NOT_ALLOWED: caller IP outside the secret key's allowlist; or BILLING_DISABLED; or " +
+              'API_KEY_SCOPE_INSUFFICIENT: the key lacks `billing:read`; or ORGANIZATION_NOT_MEMBER: ' +
               '`organizationId` was passed but the end-user is not a member of it.',
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
             429: READ_GATE_ERRORS[429],
           }),
         },
@@ -574,11 +630,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(NULLABLE_SUBSCRIPTION_SCHEMA, 'The current subscription, or null when none exists.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `includeEnded` is not a boolean.',
+            400: 'VALIDATION_ERROR: `includeEnded` is not a boolean.',
             ...USER_READ_GATE_ERRORS,
             403:
               USER_READ_GATE_ERRORS[403] +
-              ' ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
               'member of that organization.',
           }),
         },
@@ -704,7 +760,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
             "A page of the calling end-user's own payments, newest first.",
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...USER_READ_GATE_ERRORS,
           }),
         },
@@ -768,21 +824,21 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('SelfSubscription'), 'The (now canceling or canceled) subscription.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
-              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID ' +
-              '— the Idempotency-Key header is empty or exceeds 200 characters.',
+              'VALIDATION_ERROR: the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
+              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID: ' +
+              'the Idempotency-Key header is empty or exceeds 200 characters.',
             ...USER_WRITE_GATE_ERRORS,
             403:
               USER_WRITE_GATE_ERRORS[403] +
-              ' ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
-              'member of it; or ORGANIZATION_ROLE_INSUFFICIENT — canceling an organization\'s ' +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
+              'member of it; or ORGANIZATION_ROLE_INSUFFICIENT: canceling an organization\'s ' +
               'subscription requires OWNER or ADMIN.',
             404:
               'SUBSCRIPTION_NOT_FOUND: the caller has no active/pending/past-due subscription to ' +
               "cancel, or `subscriptionId` is not one of the billing subject's subscriptions.",
             409:
-              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
-              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
+              'IDEMPOTENCY_KEY_IN_FLIGHT: a request with this Idempotency-Key is still being ' +
+              'processed; or IDEMPOTENCY_KEY_REUSED: the key was already used for a different ' +
               'method, path, or body; or SUBSCRIPTION_CHECKOUT_UNFINISHED: `subscriptionId` ' +
               'names a checkout that was never completed.',
           }),
@@ -842,9 +898,51 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['planSlug', 'successUrl', 'cancelUrl'],
           properties: {
-            planSlug: { type: 'string', minLength: 1, maxLength: 40 },
-            successUrl: { type: 'string', format: 'uri' },
-            cancelUrl: { type: 'string', format: 'uri' },
+            planSlug: { type: 'string', minLength: 1, maxLength: 40, description: 'The slug of the plan to buy.' },
+            successUrl: {
+              type: 'string',
+              format: 'uri',
+              description: 'Where the buyer is sent after paying. An http(s) URL.',
+            },
+            cancelUrl: {
+              type: 'string',
+              format: 'uri',
+              description: 'Where the buyer is sent when they leave the checkout without paying. An http(s) URL.',
+            },
+            country: {
+              type: 'string',
+              pattern: COUNTRY_INPUT.source,
+              description:
+                "The buyer's country, ISO 3166-1 alpha-2, for routing when no `provider` is named. " +
+                'From a secret key it is taken as fact and is the only country used: pass it, since ' +
+                'the connection is your server\'s. From a publishable key it is a hint.\n\n' +
+                'It also picks the price when the plan has prices in more than one currency: a ' +
+                'price that names the country, else the price in that country\'s own currency, ' +
+                'else the plan\'s default. A hint picks a local price only when the Application ' +
+                'sets `billingConfig.localPrices` to `any`.',
+            },
+            currency: {
+              type: 'string',
+              pattern: '^[A-Za-z]{3}$',
+              description:
+                'Secret key only. Charge the plan\'s price in this ISO 4217 currency instead of ' +
+                'the one the buyer\'s country selects. The plan must have a price in it ' +
+                '(BILLING_PLAN_CURRENCY_UNAVAILABLE otherwise). From a publishable key the ' +
+                'request is refused with BILLING_CURRENCY_NOT_ALLOWED. A buyer who already ' +
+                'holds a subscription or an unfinished checkout keeps that currency. A ' +
+                'currency no enabled provider can charge falls back to the default price or ' +
+                'is refused (see `onUnavailableCurrency`).',
+            },
+            onUnavailableCurrency: {
+              type: 'string',
+              enum: ['fallback', 'refuse'],
+              description:
+                'What to do when no provider this checkout can use is set up to charge `currency`. ' +
+                '`fallback` charges the plan\'s default price and reports it in `priceFallback`. ' +
+                '`refuse` answers BILLING_NO_PROVIDER_FOR_CURRENCY instead. Left out, the ' +
+                'Application\'s `billingConfig.onUnavailableCurrency` decides, which is `fallback` ' +
+                'unless the operator changed it. A value sent here wins over that setting.',
+            },
             couponCode: {
               type: 'string',
               minLength: 1,
@@ -877,30 +975,34 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('CheckoutResult'), 'The provider checkout session.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
-              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID ' +
-              '— the Idempotency-Key header is empty or exceeds 200 characters; or ' +
-              'BILLING_ORGANIZATION_REQUIRED — this Application bills per organization and no ' +
-              '`organizationId` was given; or PLAN_INACTIVE — the plan is not open for new ' +
+              'BILLING_CURRENCY_NOT_ALLOWED: `currency` was sent with a publishable key; or ' +
+              'BILLING_PLAN_CURRENCY_UNAVAILABLE: the plan has no price in the `currency` asked ' +
+              'for; or BILLING_NO_PROVIDER_FOR_CURRENCY / BILLING_PROVIDER_CURRENCY_UNSUPPORTED: no ' +
+              'enabled provider, or the one named, can charge the price selected; or ' +
+              'VALIDATION_ERROR: the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
+              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID: ' +
+              'the Idempotency-Key header is empty or exceeds 200 characters; or ' +
+              'BILLING_ORGANIZATION_REQUIRED: this Application bills per organization and no ' +
+              '`organizationId` was given; or PLAN_INACTIVE: the plan is not open for new ' +
               'sign-ups; or COUPON_INACTIVE / COUPON_NOT_YET_STARTED / COUPON_EXPIRED / ' +
-              'COUPON_NOT_APPLICABLE / COUPON_CURRENCY_REQUIRED / COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED ' +
-              '/ COUPON_USER_LIMIT_REACHED / COUPON_NO_DISCOUNT / COUPON_FULL_DISCOUNT_UNSUPPORTED ' +
-              '— the coupon failed validation for this plan/user; or BILLING_CREDENTIALS_NOT_CONFIGURED ' +
-              '— no provider is configured for this Application; or BILLING_PROVIDER_NOT_AVAILABLE ' +
-              '— the requested `provider` is not configured/enabled.',
+              'COUPON_NOT_APPLICABLE / COUPON_CURRENCY_NOT_COVERED / COUPON_REDEMPTION_LIMIT_REACHED ' +
+              '/ COUPON_USER_LIMIT_REACHED / COUPON_NO_DISCOUNT / COUPON_FULL_DISCOUNT_UNSUPPORTED: ' +
+              'the coupon failed validation for this plan/user; or BILLING_CREDENTIALS_NOT_CONFIGURED: ' +
+              'no provider is configured for this Application; or BILLING_PROVIDER_NOT_AVAILABLE: ' +
+              'the requested `provider` is not configured/enabled.',
             ...USER_WRITE_GATE_ERRORS,
             403:
               USER_WRITE_GATE_ERRORS[403] +
-              ' ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
-              'member of it; or ORGANIZATION_ROLE_INSUFFICIENT — buying for an organization ' +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
+              'member of it; or ORGANIZATION_ROLE_INSUFFICIENT: buying for an organization ' +
               'requires OWNER or ADMIN.',
-            404: 'PLAN_NOT_FOUND — no plan with that slug in this application; or COUPON_NOT_FOUND — no active coupon matching the code.',
+            404: 'PLAN_NOT_FOUND: no plan with that slug in this application; or COUPON_NOT_FOUND: no active coupon matching the code.',
             409:
-              'BILLING_TRIAL_ALREADY_USED — this billing subject has already used a free trial ' +
+              'BILLING_TRIAL_ALREADY_USED: this billing subject has already used a free trial ' +
               "under the Application's `trialPolicy`; retry with `allowWithoutTrial: true` AND a " +
               'NEW Idempotency-Key to buy at full price; or ' +
-              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
-              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
+              'IDEMPOTENCY_KEY_IN_FLIGHT: a request with this Idempotency-Key is still being ' +
+              'processed; or IDEMPOTENCY_KEY_REUSED: the key was already used for a different ' +
               'method, path, or body; or BILLING_PROVIDER_SWITCH_BLOCKED, meaning `provider` ' +
               'names a processor other than the one this buyer is bound to anywhere in the ' +
               'application, by a live subscription or by a checkout they have not finished ' +
@@ -910,14 +1012,16 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               'judged and so is returned whether or not one was named; or ' +
               'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT, meaning this buyer already holds a live ' +
               'subscription to this plan billed to a different subject (their personal account ' +
-              'vs an organization), and one buyer holds a plan once — the checkout would move ' +
+              'vs an organization), and one buyer holds a plan once. The checkout would move ' +
               'that subscription rather than start a second one; or ' +
               'COUPON_CHECKOUT_ALREADY_OPEN, meaning the caller already has an open checkout ' +
-              'holding this coupon; or CHECKOUT_EMBEDDED_NOT_READY, meaning the Application has ' +
+              'holding this coupon; or BILLING_PLAN_PRICE_NOT_READY, meaning the price selected is ' +
+              'being registered with the provider by another checkout, or was changed while this ' +
+              'one opened (retry); or CHECKOUT_EMBEDDED_NOT_READY, meaning the Application has ' +
               'the Rekey checkout page switched on with the failure behaviour "refuse", and a ' +
               'readiness check failed for this checkout (`fix` is that check\'s repair).',
             429:
-              'RATE_LIMITED — too many requests; honour Retry-After. Or CHECKOUT_RATE_LIMITED — this ' +
+              'RATE_LIMITED: too many requests; honour Retry-After. Or CHECKOUT_RATE_LIMITED: this ' +
               'end-user has started 10 checkouts in the last hour or 30 in the last day; `fix` says when to retry.',
           }),
         },
@@ -929,7 +1033,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         successUrl: body.successUrl,
         cancelUrl: body.cancelUrl,
       });
-      const country = body.country ?? countryFromRequest(req.headers);
+      const buyer = resolveBuyerCountry(req, body.country);
       if (body.organizationId) {
         // Only an OWNER/ADMIN of the org may spend on its behalf.
         await organizationsService.requireRole(
@@ -961,7 +1065,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           // providerNameSchema guarantees a REGISTERED name; the credentials
           // service's literal union is exactly the registered set today.
           ...(body.provider !== undefined && { provider: body.provider as BillingProviderName }),
-          ...(country !== undefined && { country }),
+          ...(buyer !== null && { country: buyer.country, countrySource: buyer.source }),
+          ...(body.currency !== undefined && { currency: body.currency }),
+          ...(body.onUnavailableCurrency !== undefined && { onUnavailableCurrency: body.onUnavailableCurrency }),
+          callerIsSecretKey: req.authKind === 'secret',
           ...(body.organizationId !== undefined && { beneficiaryOrgId: body.organizationId }),
           ...(body.allowWithoutTrial !== undefined && { allowWithoutTrial: body.allowWithoutTrial }),
           ...(body.mode !== undefined && { mode: body.mode }),
@@ -987,6 +1094,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           url: result.url,
           subscription: toSelfSubscription(result.subscription),
           discountAmount: result.discountAmount,
+          currency: result.currency,
+          unitAmount: result.unitAmount,
+          price: toResolvedPriceDto(result.price),
+          priceFallback: toPriceFallbackDto(result.price),
           provider: result.provider,
           warnings: allWarnings,
           mode: result.embedded ? 'embedded' : 'redirect',
@@ -1038,8 +1149,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           '- `ALREADY_REDEEMED`, some earlier trial spends the slot under this policy, with ' +
           '`redeemedAt`.\n\n' +
           '**Provider-dependent.** `PLAN_TRIAL_MISCONFIGURED` can be the resolved provider\'s ' +
-          'answer, so the response echoes `provider`; re-read this when the buyer changes ' +
-          'processor. Country comes from `x-country` (or `CF-IPCountry`), matching ' +
+          'answer. Each plan is judged against the provider its own checkout would go to for ' +
+          'this buyer: the one they already pay through, else the one routing picks for the ' +
+          'price their country selects. A recurring plan that offers a trial names it in its ' +
+          'own `provider`. The top-level `provider` is the default for the buyer\'s country ' +
+          'and can differ from a plan\'s. Re-read this when the buyer changes processor. ' +
+          'Country comes from `?country=`, matching ' +
           '`GET /billing/providers`.\n\n' +
           '**Advisory.** The authoritative decision is taken under a lock at checkout.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
@@ -1048,6 +1163,13 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             organizationId: { type: 'string', description: 'Answer for this org (member-only).' },
             planSlug: { type: 'string', description: 'One plan. Omit for the whole catalogue.' },
+            country: {
+              type: 'string',
+              pattern: COUNTRY_INPUT.source,
+              description:
+                "The buyer's country, ISO 3166-1 alpha-2. From a secret key it is taken as fact. " +
+                'From a publishable key it is a hint, used only when no trusted proxy vouched for one.',
+            },
             limit: { type: 'integer', minimum: 1, maximum: 100 },
             offset: { type: 'integer', minimum: 0 },
           },
@@ -1071,9 +1193,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 provider: {
                   type: 'string',
                   description:
-                    'The processor these answers were resolved against. Re-read this endpoint if ' +
-                    'the buyer picks a different one: a plan can be unbuyable on one and fine on ' +
-                    'another.',
+                    "The default processor for the buyer's country. An item that depends on a " +
+                    'provider carries its own `provider`, which is the one to read for that plan: ' +
+                    'a plan can be unbuyable on one and fine on another.',
                 },
               },
               required: ['items', 'page', 'policy', 'provider'],
@@ -1083,11 +1205,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...USER_READ_GATE_ERRORS,
             403:
-              'ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
+              'ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
               'member of it.',
             400:
-              'BILLING_ORGANIZATION_REQUIRED — this Application bills per organization and none ' +
-              'was given; or BILLING_ORGANIZATION_NOT_ACCEPTED — it bills per user and one was.',
+              'BILLING_ORGANIZATION_REQUIRED: this Application bills per organization and none ' +
+              'was given; or BILLING_ORGANIZATION_NOT_ACCEPTED: it bills per user and one was.',
           }),
         },
       },
@@ -1140,9 +1262,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       // disagrees with `GET /plans`.
       const [window, total] = q.planSlug
         ? await (async () => {
-            const one = await prisma.plan.findFirst({
+            const row = await prisma.plan.findFirst({
               where: { applicationId: req.application!.id, slug: q.planSlug!, active: true },
+              include: WITH_DEFAULT_PRICE,
             });
+            const one = row === null ? null : await withDefaultPrice(row);
             return [one ? [one] : [], one ? 1 : 0] as const;
           })()
         : await Promise.all([
@@ -1150,19 +1274,52 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
             billingService.countActivePlans(req.application!),
           ]);
 
+      const buyer = resolveBuyerCountry(req, q.country);
+      // For one plan the answer is resolved against the provider its checkout
+      // would get, which depends on the plan's currency. For the catalogue
+      // there is one `provider` field, so it is the country's default.
+      const onlyPlan = q.planSlug !== undefined ? window[0] : undefined;
       const provider = await pickProvider({
         application: req.application!,
-        ...(countryFromRequest(req.headers) !== undefined && {
-          country: countryFromRequest(req.headers)!,
-        }),
+        ...(buyer !== null && { country: buyer.country }),
+        ...(onlyPlan !== undefined &&
+          !costsNothing(onlyPlan) && {
+            currency: onlyPlan.defaultPrice?.currency ?? reportingCurrency(req.application!),
+          }),
       }).catch((e: unknown) => {
         throw e instanceof RekeyError && e.code === 'BILLING_PROVIDER_INBOUND_ONLY'
           ? inboundOnlyForTrials(req.application!.id, e)
           : e;
       });
+      // Each plan against the provider its own checkout would go to. Only
+      // plans whose answer depends on a provider are resolved. A plan whose
+      // checkout would be refused (no provider can take it) keeps the default.
+      const trialPlans = window.filter((plan) => (plan.trialDays ?? 0) > 0 && !isOneTimePlan(plan));
+      const who = {
+        application: req.application!,
+        endUserId: req.endUser!.id,
+        beneficiaryOrgId: orgId,
+        buyer,
+        callerIsSecretKey: req.authKind === 'secret',
+      };
+      // Read once for every plan, so the cost does not grow with the catalogue.
+      const rows = trialPlans.length > 0 ? await loadCheckoutPreviewRows(who, trialPlans) : null;
+      const providerByPlan = new Map<string, TrialProvider>();
+      await Promise.all(
+        trialPlans.map(async (plan) => {
+          const own = await previewCheckoutProvider({ ...who, plan, rows: rows! }).catch((e: unknown) => {
+            if (e instanceof RekeyError) return null;
+            throw e;
+          });
+          if (own !== null) {
+            providerByPlan.set(plan.slug, { provider: own, runsTrials: getModule(own)?.capabilities.trials === true });
+          }
+        }),
+      );
       const items = await resolveTrialEligibility({
         applicationId: req.application!.id,
         plans: window,
+        providerByPlan,
         subjectKey: trialSubjectKey({
           billingSubject: billingConfig.billingSubject,
           endUserId: req.endUser!.id,
@@ -1259,14 +1416,14 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           201: ok({ allOf: [ref('SelfSubscription'), FREE_TIER_ACTIVATED] }, 'Now on the free tier.'),
           ...errs({
             400:
-              'BILLING_ORGANIZATION_REQUIRED — the Application bills per organization and none ' +
+              'BILLING_ORGANIZATION_REQUIRED: the Application bills per organization and none ' +
               'was named or active on the session.',
             ...USER_WRITE_GATE_ERRORS,
             404:
-              'BILLING_NO_FREE_PLAN — the Application nominates no default plan, so there is no ' +
-              'free tier to join; or ORGANIZATION_NOT_FOUND — no such organization here.',
+              'BILLING_NO_FREE_PLAN: the Application nominates no default plan, so there is no ' +
+              'free tier to join; or ORGANIZATION_NOT_FOUND: no such organization here.',
             409:
-              'BILLING_FREE_PLAN_NOT_FREE — the nominated default plan charges money, on its ' +
+              'BILLING_FREE_PLAN_NOT_FREE: the nominated default plan charges money, on its ' +
               'amount or per metered unit, so it cannot be self-activated. Use POST ' +
               '/api/v1/billing/checkout. Or BILLING_FREE_TIER_ALREADY_CLAIMED: the plan grants ' +
               'credits or a licence and the caller already claimed it for another beneficiary. ' +
@@ -1318,8 +1475,32 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List enabled billing providers for the calling application',
         description:
           'Returns providers configured + enabled for this Application, in the order ' +
-          'the geo router would prefer them given the request country (CF-IPCountry header).',
+          'the router prefers them for the buyer\'s country. `routedProvider` is the one a checkout ' +
+          'that names no provider is sent to. The country is `?country=`; for a browser caller a ' +
+          'country vouched by a trusted proxy wins over it.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
+        querystring: {
+          type: 'object',
+          properties: {
+            country: {
+              type: 'string',
+              pattern: COUNTRY_INPUT.source,
+              description:
+                "The buyer's country, ISO 3166-1 alpha-2. From a secret key it is taken as fact. " +
+                'From a publishable key it is a hint, used only when no trusted proxy vouched for one.',
+            },
+            planSlug: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 40,
+              description:
+                'List only the providers a checkout of this plan accepts for this buyer, each judged at the ' +
+                'price that checkout would charge (a plan can have a local price), and make `routedProvider` ' +
+                'the one a checkout of it that names no provider is sent to. Without it a provider restricted ' +
+                'to other currencies is listed too.',
+            },
+          },
+        },
         response: {
           // Not okArray/okPage: the payload is `{country, providers}`, not a
           // bare list, and `providers` is bounded by construction (the fixed
@@ -1329,9 +1510,22 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               type: 'object',
               properties: {
                 country: { type: 'string', nullable: true, description: 'ISO 3166-1 alpha-2, or null when unresolvable.' },
+                countrySource: {
+                  type: 'string',
+                  nullable: true,
+                  enum: ['declared', 'vouched', 'hint', null],
+                  description:
+                    '`declared`: a secret-key caller said so. `vouched`: a trusted proxy or the portal ' +
+                    'forwarded it. `hint`: a browser caller or an unverified CDN header said so.',
+                },
+                routedProvider: {
+                  type: 'string',
+                  nullable: true,
+                  description: 'The provider a checkout that names none is routed to. Preselect it in a picker.',
+                },
                 providers: { type: 'array', items: ref('BillingProviderInfo') },
               },
-              required: ['country', 'providers'],
+              required: ['country', 'countrySource', 'routedProvider', 'providers'],
             },
             'Providers configured + enabled for this application, geo-ordered.',
           ),
@@ -1340,14 +1534,43 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
-      const country = countryFromRequest(req.headers);
+      const query = req.query as { country?: string; planSlug?: string };
+      const buyer = resolveBuyerCountry(req, query.country);
+      const country = buyer?.country;
       // "Where can I pay" is the question; an inbound-only provider is not an
       // answer to it, so it is left out even when configured and enabled.
-      const visible = await billingCredentialsService.listCheckoutEnabled(req.application!.id, country);
+      const configured = await billingCredentialsService.listCheckoutEnabled(req.application!.id, country);
+      // With a plan named, only the providers its checkout would accept at the
+      // price this caller would be charged: a picker must not offer one the
+      // checkout would then refuse.
+      // An unknown or inactive slug filters nothing: a public list must not
+      // tell a caller which slugs exist.
+      const plan =
+        query.planSlug === undefined
+          ? null
+          : await prisma.plan
+              .findFirst({
+                where: { applicationId: req.application!.id, slug: query.planSlug, active: true },
+                include: WITH_DEFAULT_PRICE,
+              })
+              .then((row) => (row === null ? null : withDefaultPrice(row)));
+      const forPlan =
+        plan === null
+          ? null
+          : await planProviders({
+              application: req.application!,
+              plan,
+              buyer,
+              callerIsSecretKey: req.authKind === 'secret',
+              configured,
+            });
+      const visible = forPlan === null ? configured : forPlan.accepted;
       return {
         success: true,
         data: {
           country: country ?? null,
+          countrySource: buyer?.source ?? null,
+          routedProvider: forPlan === null ? (configured[0]?.provider ?? null) : forPlan.routed,
           // P4 discovery additions (label/docsUrl/capabilities) are ADDITIVE,
           // the original three fields and the geo-router ordering are pinned
           // by SDK + portal consumers and must not change.
@@ -1357,6 +1580,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               provider: p.provider,
               priority: p.priority,
               countries: p.countries,
+              currencies: p.currencies,
               ...(m !== undefined && {
                 label: m.display.label,
                 docsUrl: m.display.docsUrl,

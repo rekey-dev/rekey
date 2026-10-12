@@ -23,7 +23,7 @@
  */
 
 import { createHmac } from 'node:crypto';
-import type { Plan } from '@prisma/client';
+import type { PricedPlan } from './types.js';
 import { readCappedBody } from '../../../lib/capped-body.js';
 import { RekeyError } from '../../../lib/error.js';
 import { assertSafeUrlResolved, pinnedFetchInit } from '../../../lib/ssrf-guard.js';
@@ -210,7 +210,7 @@ export class ExternalBillingProvider implements BillingProvider {
     };
   }
 
-  async ensurePlanRegistered(_plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(_plan: PricedPlan): Promise<ProviderPlanRef> {
     throw inboundOnly('plan registration');
   }
 

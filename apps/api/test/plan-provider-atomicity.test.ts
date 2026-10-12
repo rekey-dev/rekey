@@ -108,7 +108,7 @@ describe('plan provider registration is atomic and repairable', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${ctx.appId}/plans`,
       headers: { authorization: `Bearer ${ctx.operator}` },
-      payload: { name: 'Broken', amount: 4900, currency: 'usd', interval: 'MONTH', ...body },
+      payload: { name: 'Broken', price: { currency: 'usd', amount: 4900 }, interval: 'MONTH', ...body },
     });
 
   /** Make the NEXT provider construction hand back one that refuses to register. */
@@ -294,14 +294,13 @@ describe('plan provider registration is atomic and repairable', () => {
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${ctx.appId}/plans/brokenplan`,
       headers: { authorization: `Bearer ${ctx.operator}` },
-      payload: { name: 'Fixed', amount: 5900, currency: 'EUR', metadata: { tier: 'pro' } },
+      payload: { name: 'Fixed', price: { currency: 'EUR', amount: 5900 }, metadata: { tier: 'pro' } },
     });
     expect(patched.statusCode).toBe(200);
     expect(patched.json().data).toMatchObject({
       slug: 'brokenplan',
       name: 'Fixed',
-      amount: 5900,
-      currency: 'EUR',
+      price: { currency: 'EUR', amount: 5900 },
       active: false,
       registrationStatus: 'FAILED',
     });
@@ -359,7 +358,7 @@ describe('plan provider registration is atomic and repairable', () => {
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${ctx.appId}/plans/lockedplan`,
       headers: { authorization: `Bearer ${ctx.operator}` },
-      payload: { amount: 100 },
+      payload: { price: { currency: 'USD', amount: 100 } },
     });
     expect(repriced.statusCode).toBe(409);
     expect(repriced.json().error.code).toBe('PLAN_PRICE_IMMUTABLE');
@@ -427,7 +426,7 @@ describe('plan provider registration is atomic and repairable', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${ctx.appId}/coupons`,
       headers: { authorization: `Bearer ${ctx.operator}` },
-      payload: { code: 'LAUNCH50', discountType: 'PERCENT', amountOff: 5000 },
+      payload: { code: 'LAUNCH50', discountType: 'PERCENT', basisPoints: 5000 },
     });
     expect(res.statusCode).toBe(201);
     expect(vi.mocked(getProviderForApplication)).not.toHaveBeenCalled();

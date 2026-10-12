@@ -51,7 +51,7 @@ describe('banners rendering a URL error code', () => {
 
   it('PlanCreateForm shows the generic sentence for an unknown code, not the raw value', () => {
     const html = renderToStaticMarkup(
-      createElement(PlanCreateForm, { action: async () => undefined, meters: [], error: CRAFTED }),
+      createElement(PlanCreateForm, { action: async () => undefined, meters: [], defaultCurrency: 'USD', error: CRAFTED }),
     );
     expect(html).toContain(GENERIC_ERROR_MESSAGE);
     expect(html).not.toContain('suspended');

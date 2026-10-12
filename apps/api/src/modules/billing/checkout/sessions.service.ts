@@ -10,7 +10,8 @@
 
 import type { Application, CheckoutSession, PaymentMode, Prisma } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
-import type { CheckoutPageClient, CheckoutPageView } from '@rekey.dev/shared-types';
+import { PriceFallbackDtoSchema, formatMoney } from '@rekey.dev/shared-types';
+import type { CheckoutPageClient, CheckoutPageView, PriceFallbackDto } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
 import { hostedPortalUrl, portalBaseOrigin } from '../../../lib/portal-origins.js';
@@ -20,7 +21,11 @@ import type { BillingMode } from '../credentials.service.js';
 import { lookupHashFor } from './token.js';
 import { safeColor, safeText, safeUrl } from '../../../lib/branding.js';
 import { stripeFallbackUrl } from './stripe-fallback.js';
-import { expectedChargeOf, type ExpectedCharge } from './order-match.js';
+import { snapshotSubscriptionPrice } from '../subscription-snapshot.js';
+import { logCheckoutCompleted, type Origin } from '../money-events.js';
+import { logCheckoutExpired } from './expired-event.js';
+import { recordPriceFallback } from './price-fallback-event.js';
+import type { PriceFallback } from '../checkout-price.js';
 
 /**
  * Metadata stored on an EMBEDDED session. `client` is sent to the page;
@@ -34,18 +39,12 @@ export interface EmbeddedSessionMetadata {
   providerPlanId: string | null;
   discountAmount: number;
   trialDays: number;
-  /**
-   * One-time only: what the provider was asked to charge. Checked again on
-   * confirmation and before capture, and what the page shows, since an
-   * unregistered one-time plan can be re-priced while the order stays fixed.
-   */
-  expectedCharge?: ExpectedCharge;
+  /** Written when the checkout charges the default price in place of the one selected, for the page to tell the buyer. */
+  priceFallback?: PriceFallbackDto;
 }
 
-/** Metadata stored on a REDIRECT session: for a one-time order, what it charges, checked before capture. */
-export interface RedirectSessionMetadata {
-  expectedCharge?: ExpectedCharge;
-}
+/** Metadata stored on a REDIRECT session: none. What it charges is in the row's own columns. */
+export type RedirectSessionMetadata = Record<string, never>;
 
 export function toPaymentMode(mode: BillingMode): PaymentMode {
   return mode === 'live' ? 'LIVE' : 'TEST';
@@ -94,24 +93,84 @@ export async function recordCheckoutSession(input: {
   cancelUrl: string;
   tokenHash: string | null;
   metadata: EmbeddedSessionMetadata | RedirectSessionMetadata;
+  buyerCountry?: string | null;
+  buyerCountrySource?: string | null;
+  /** The plan price the checkout was opened at, before any discount. */
+  price: { currency: string; unitAmount: number };
+  /** The coupon discount this checkout carries, in the same currency. 0 with no coupon. */
+  discountAmount: number;
+  /** The price row that is. Null only for a plan with no flat price. */
+  planPriceId: string | null;
+  plan: { id: string; slug: string };
+  /** The price selected first, when this checkout charges the default instead. */
+  priceFallback: PriceFallback | null;
 }): Promise<CheckoutSession> {
-  return prisma.checkoutSession.create({
-    data: {
-      applicationId: input.applicationId,
-      endUserId: input.endUserId,
-      subscriptionId: input.subscriptionId,
-      provider: input.provider,
-      providerSessionId: input.providerSessionId,
-      mode: input.embedded ? 'EMBEDDED' : 'REDIRECT',
-      paymentMode: toPaymentMode(input.paymentMode),
-      kind: input.kind === 'one_time' ? 'ONE_TIME' : 'RECURRING',
-      successUrl: input.successUrl,
-      cancelUrl: input.cancelUrl,
-      tokenHash: input.tokenHash,
-      expiresAt: new Date(Date.now() + CHECKOUT_SESSION_LIFETIME_MS),
-      metadata: input.metadata as unknown as Prisma.InputJsonObject,
-    },
+  return prisma.$transaction(async (tx) => {
+    const session = await tx.checkoutSession.create({
+      data: {
+        applicationId: input.applicationId,
+        endUserId: input.endUserId,
+        subscriptionId: input.subscriptionId,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        mode: input.embedded ? 'EMBEDDED' : 'REDIRECT',
+        paymentMode: toPaymentMode(input.paymentMode),
+        kind: input.kind === 'one_time' ? 'ONE_TIME' : 'RECURRING',
+        successUrl: input.successUrl,
+        cancelUrl: input.cancelUrl,
+        tokenHash: input.tokenHash,
+        buyerCountry: input.buyerCountry ?? null,
+        buyerCountrySource: input.buyerCountrySource ?? null,
+        currency: input.price.currency,
+        unitAmount: input.price.unitAmount,
+        discountAmount: input.discountAmount,
+        chargeAmount: input.price.unitAmount - input.discountAmount,
+        planPriceId: input.planPriceId,
+        expiresAt: new Date(Date.now() + CHECKOUT_SESSION_LIFETIME_MS),
+        metadata: {
+          ...input.metadata,
+          ...(input.embedded && input.priceFallback !== null && {
+            priceFallback: fallbackForPage(input.priceFallback, { ...input.price, id: input.planPriceId ?? '' }),
+          }),
+        } as unknown as Prisma.InputJsonObject,
+      },
+    });
+    if (input.priceFallback !== null && input.planPriceId !== null) {
+      await recordPriceFallback(tx, session, input.plan, input.priceFallback);
+    }
+    return session;
   });
+}
+
+/**
+ * The fallback as the checkout page shows it: the price selected first and
+ * the default price this session charges, each written for a person.
+ */
+function fallbackForPage(
+  fallback: PriceFallback,
+  charged: { id: string; currency: string; unitAmount: number },
+): PriceFallbackDto {
+  return {
+    requested: {
+      id: fallback.requested.planPriceId,
+      currency: fallback.requested.currency.toUpperCase(),
+      amount: fallback.requested.amount,
+      formatted: formatMoney(fallback.requested.amount, fallback.requested.currency),
+    },
+    charged: {
+      id: charged.id,
+      currency: charged.currency.toUpperCase(),
+      amount: charged.unitAmount,
+      formatted: formatMoney(charged.unitAmount, charged.currency),
+    },
+    reason: fallback.reason,
+  };
+}
+
+/** What the session recorded when it was opened. Anything unreadable is no fallback. */
+function storedFallback(value: unknown): PriceFallbackDto | null {
+  const parsed = PriceFallbackDtoSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 function notFound(): RekeyError {
@@ -174,6 +233,7 @@ export async function assertSessionModeCurrent(session: SessionWithApp): Promise
   const recorded = fromPaymentMode(session.paymentMode);
   if (current === recorded) return;
   await expire(session);
+  await logCheckoutExpired(session.id, 'mode_mismatch');
   void recordSecurityEvent({
     type: 'app.checkout_mode_mismatch',
     actorType: 'system',
@@ -203,7 +263,10 @@ async function settle(session: SessionWithApp): Promise<SessionWithApp> {
       where: { id: session.id, status: 'OPEN' },
       data: { status: 'EXPIRED' },
     });
-    if (expired.count === 1) return { ...session, status: 'EXPIRED' };
+    if (expired.count === 1) {
+      await logCheckoutExpired(session.id, 'timed_out');
+      return { ...session, status: 'EXPIRED' };
+    }
     // Moved on (confirmed or completed) since it was read: use what it is now.
     const current = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: session.id }, select: { status: true } });
     return { ...session, status: current.status };
@@ -267,17 +330,25 @@ export async function checkoutPageView(token: string): Promise<CheckoutPageView>
   const detail = await prisma.checkoutSession.findUniqueOrThrow({
     where: { id: session.id },
     select: {
+      currency: true,
+      unitAmount: true,
+      chargeAmount: true,
+      discountAmount: true,
       endUser: { select: { email: true } },
-      subscription: { select: { plan: { select: { name: true, amount: true, currency: true, interval: true, kind: true, licenseKind: true } } } },
+      subscription: { select: { plan: { select: { name: true, interval: true, kind: true, licenseKind: true } } } },
     },
   });
   const meta = session.metadata as unknown as EmbeddedSessionMetadata;
   const plan = detail.subscription.plan;
   const oneTime = session.kind === 'ONE_TIME';
-  const charged = oneTime ? expectedChargeOf(meta) : null;
-  const amount = charged !== null ? charged.amount + meta.discountAmount : plan.amount;
-  const currency = charged !== null ? charged.currency : plan.currency;
-  const totalDueToday = charged !== null ? charged.amount : meta.trialDays > 0 ? 0 : Math.max(0, plan.amount - meta.discountAmount);
+  // The price this session was opened at and what it charges after its
+  // discount: the row's own columns, which is what the provider was sent.
+  if (detail.currency === null || detail.unitAmount === null) throw notFound();
+  const amount = detail.unitAmount;
+  const currency = detail.currency;
+  const discountAmount = detail.discountAmount ?? 0;
+  const charge = detail.chargeAmount ?? Math.max(0, amount - discountAmount);
+  const totalDueToday = !oneTime && meta.trialDays > 0 ? 0 : charge;
   return {
     ...base,
     status: session.status === 'CONFIRMING' ? 'confirming' : 'open',
@@ -291,13 +362,14 @@ export async function checkoutPageView(token: string): Promise<CheckoutPageView>
         interval: oneTime ? null : plan.interval,
         kind: oneTime ? 'one_time' : 'recurring',
       },
-      discountAmount: meta.discountAmount,
+      discountAmount,
       totalDueToday,
       buyerEmail: detail.endUser.email,
       successUrl: session.successUrl,
       cancelUrl: session.cancelUrl,
       manageUrl: manageUrlOf(session.application),
       expiresAt: session.expiresAt.toISOString(),
+      priceFallback: storedFallback(meta.priceFallback),
       client: meta.client,
     },
   };
@@ -369,19 +441,55 @@ export async function checkoutFallbackUrl(token: string, log?: FastifyBaseLogger
 }
 
 /**
- * Called by the webhook applier once a completion has been applied: the
- * session it named is COMPLETE. Only the webhook reaches this.
+ * Called by the webhook applier inside the transaction that activates the
+ * subscription: the session a verified completion names becomes COMPLETE, the
+ * subscription takes the price that session was opened at, and the billing
+ * log records the completed checkout. Returns the session that completed, or
+ * null when none did (a redelivery, or an order Rekey holds no session for).
+ *
+ * The price is written only on this transition. A redelivered completion for
+ * a session already COMPLETE finds nothing to flip, so it cannot put an older
+ * checkout's price back; and opening a checkout never reaches here, so it
+ * cannot change what a paying subscriber is charged against.
  *
  * @example
- * await markCheckoutSessionComplete(ev.applicationId, ev.checkoutSessionId);
+ * await prisma.$transaction((tx) => completeCheckoutSession(tx, ev.applicationId, ev.checkoutSessionId, origin));
  */
-export async function markCheckoutSessionComplete(applicationId: string, providerSessionId: string): Promise<void> {
-  await prisma.checkoutSession.updateMany({
-    // EXPIRED too: the webhook is a verified payment, and a buyer who
-    // approved just before the session ran out has paid all the same.
+export async function completeCheckoutSession(
+  tx: Prisma.TransactionClient,
+  applicationId: string,
+  providerSessionId: string,
+  origin: Origin,
+): Promise<{ id: string } | null> {
+  // EXPIRED too: the webhook is a verified payment, and a buyer who approved
+  // just before the session ran out has paid all the same.
+  const open = await tx.checkoutSession.findMany({
     where: { applicationId, providerSessionId, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED'] } },
-    data: { status: 'COMPLETE' },
+    include: { subscription: { select: { plan: { select: { id: true, slug: true } } } } },
+    orderBy: { createdAt: 'desc' },
   });
+  const completed: Array<(typeof open)[number]> = [];
+  for (const session of open) {
+    const flipped = await tx.checkoutSession.updateMany({
+      where: { id: session.id, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED'] } },
+      data: { status: 'COMPLETE' },
+    });
+    if (flipped.count === 1) completed.push(session);
+  }
+  for (const session of completed) {
+    if (session.currency !== null && session.unitAmount !== null) {
+      await snapshotSubscriptionPrice(tx, {
+        applicationId,
+        subscriptionId: session.subscriptionId,
+        planPriceId: session.planPriceId ?? 'default',
+        unitAmountOverride: session.unitAmount,
+        chargedCurrency: session.currency,
+        logged: { cause: 'checkout', checkoutSessionId: session.id, ...origin },
+      });
+    }
+    await logCheckoutCompleted(tx, session, session.subscription.plan, origin);
+  }
+  return completed[0] ?? null;
 }
 
 /**
@@ -404,6 +512,7 @@ export async function completionModeAllowed(
   });
   if (mismatched === null) return true;
   await prisma.checkoutSession.update({ where: { id: mismatched.id }, data: { status: 'EXPIRED' } });
+  await logCheckoutExpired(mismatched.id, 'mode_mismatch');
   void recordSecurityEvent({
     type: 'app.checkout_mode_mismatch',
     actorType: 'system',

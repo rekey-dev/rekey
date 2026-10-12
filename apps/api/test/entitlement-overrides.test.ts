@@ -69,7 +69,7 @@ describe('Per-subscription entitlement overrides', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: planSlug, name: planSlug, amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug: planSlug, name: planSlug, kind: 'SUBSCRIPTION' },
     });
     const planId = (pr.json().data as { id: string }).id;
 
@@ -473,7 +473,7 @@ describe('Per-subscription entitlement overrides', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: planSlug, name: planSlug, amount: 0, kind: 'CREDIT', creditsAmount: 100 },
+      payload: { slug: planSlug, name: planSlug, kind: 'CREDIT', creditsAmount: 100 },
     });
     const planId = (pr.json().data as { id: string }).id;
     const eu = await app.inject({

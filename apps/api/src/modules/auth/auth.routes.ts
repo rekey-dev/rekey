@@ -31,37 +31,37 @@ import { CREDENTIAL_BODY_LIMIT, SIGN_UP_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '
 // ---------------------------------------------------------------------------
 
 const BOOTSTRAP_401 =
-  'API_KEY_MISSING — no `Authorization: Bearer` header; or API_KEY_INVALID — the secret key ' +
-  'is unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID — the publishable key is ' +
+  'API_KEY_MISSING: no `Authorization: Bearer` header; or API_KEY_INVALID: the secret key ' +
+  'is unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID: the publishable key is ' +
   "unknown or has rotated out of its grace window.";
 const BOOTSTRAP_403 =
-  "IP_NOT_ALLOWED — a secret-key caller's IP is outside the Application's `ipAllowlist`; or " +
-  "ORIGIN_NOT_ALLOWED — a publishable-key caller's `Origin` is outside `corsOrigins`; or " +
-  'API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `auth:write` scope.';
-const RATE_LIMITED = 'RATE_LIMITED — too many requests for this window. Honour the `Retry-After` header.';
+  "IP_NOT_ALLOWED: a secret-key caller's IP is outside the Application's `ipAllowlist`; or " +
+  "ORIGIN_NOT_ALLOWED: a publishable-key caller's `Origin` is outside `corsOrigins`; or " +
+  'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks the `auth:write` scope.';
+const RATE_LIMITED = 'RATE_LIMITED: too many requests for this window. Honour the `Retry-After` header.';
 
 /** Shared by every route in the public-bootstrap plugin (`authRoutes`). */
 const BOOTSTRAP_ERRORS = { 401: BOOTSTRAP_401, 403: BOOTSTRAP_403, 429: RATE_LIMITED } as const;
 
 const USER_SESSION_401 =
   BOOTSTRAP_401 +
-  ' Or USER_TOKEN_MISSING — no `X-Rekey-User-Token` header; or USER_TOKEN_INVALID — the user ' +
+  ' Or USER_TOKEN_MISSING: no `X-Rekey-User-Token` header; or USER_TOKEN_INVALID: the user ' +
   'token is invalid, expired, or signed with a different secret; or ' +
-  'USER_TOKEN_WRONG_APPLICATION — the token was issued by a different Application; or ' +
-  'IMPERSONATION_SESSION_ENDED — the impersonation session backing this token has ended.';
+  'USER_TOKEN_WRONG_APPLICATION: the token was issued by a different Application; or ' +
+  'IMPERSONATION_SESSION_ENDED: the impersonation session backing this token has ended.';
 
 /** Shared by every route in the authenticated plugin (`authenticatedAuthRoutes`). */
 const AUTHENTICATED_ERRORS = {
   401: USER_SESSION_401,
   403: BOOTSTRAP_403.replace('the secret key lacks the `auth:write` scope.', 'the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).'),
-  404: 'END_USER_NOT_FOUND — the end-user behind this session no longer exists in this Application.',
-  410: 'END_USER_ERASED — this end-user was erased (GDPR) and can no longer authenticate.',
+  404: 'END_USER_NOT_FOUND: the end-user behind this session no longer exists in this Application.',
+  410: 'END_USER_ERASED: this end-user was erased (GDPR) and can no longer authenticate.',
   429: RATE_LIMITED,
 } as const;
 
 const IMPERSONATION_403 =
   BOOTSTRAP_403 +
-  ' Or IMPERSONATION_ACTION_FORBIDDEN — an impersonation session cannot rebind a credential ' +
+  ' Or IMPERSONATION_ACTION_FORBIDDEN: an impersonation session cannot rebind a credential ' +
   '(password, MFA, or passkey).';
 
 /** `navigator.credentials.{get,create}` options, opaque to the server, so modelled loosely. */
@@ -130,10 +130,10 @@ const DEVICE_BODY_SCHEMA = {
 } as const;
 
 const DEVICE_ERRORS_403 =
-  ' Or DEVICE_LIMIT_REACHED — the account is at its `max_devices` entitlement; `details.devices` ' +
-  'lists the active devices to release; or DEVICE_BLOCKED — an operator blocked this device.';
+  ' Or DEVICE_LIMIT_REACHED: the account is at its `max_devices` entitlement; `details.devices` ' +
+  'lists the active devices to release; or DEVICE_BLOCKED: an operator blocked this device.';
 const DEVICE_ERRORS_400 =
-  ' Or DEVICE_FINGERPRINT_REQUIRED — the Application requires a `device` binding on sign-in.';
+  ' Or DEVICE_FINGERPRINT_REQUIRED: the Application requires a `device` binding on sign-in.';
 
 /**
  * Append an end-user activity event to the security-events log. Fire-and-forget
@@ -385,21 +385,21 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...BOOTSTRAP_ERRORS,
             400:
-              'AUTH_METHOD_DISABLED — password sign-up is disabled for this Application; or ' +
-              'PASSWORD_TOO_SHORT — shorter than `authConfig.passwordMinLength`; or ' +
-              'PASSWORD_BREACHED — the password appears in a known breach corpus; or ' +
-              'METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit; or ' +
-              'METADATA_KEY_RESERVED — a publishable caller set the reserved `metadata.oidc` key.' +
+              'AUTH_METHOD_DISABLED: password sign-up is disabled for this Application; or ' +
+              'PASSWORD_TOO_SHORT: shorter than `authConfig.passwordMinLength`; or ' +
+              'PASSWORD_BREACHED: the password appears in a known breach corpus; or ' +
+              'METADATA_TOO_LARGE: `metadata` exceeds the 16KB limit; or ' +
+              'METADATA_KEY_RESERVED: a publishable caller set the reserved `metadata.oidc` key.' +
               DEVICE_ERRORS_400,
             403:
               BOOTSTRAP_403 +
               DEVICE_ERRORS_403 +
-              ' Also: SIGNUP_DISABLED — public sign-up is off for this Application; or ' +
-              'SIGNUP_REQUIRES_SECRET_KEY — the Application only allows creating end-users with ' +
-              "a secret key; or TENANT_QUOTA_EXCEEDED — the workspace's end-user limit is " +
-              'reached; or EMAIL_NOT_VERIFIED — `authConfig.requireEmailVerification` is on, so ' +
+              ' Also: SIGNUP_DISABLED: public sign-up is off for this Application; or ' +
+              'SIGNUP_REQUIRES_SECRET_KEY: the Application only allows creating end-users with ' +
+              "a secret key; or TENANT_QUOTA_EXCEEDED: the workspace's end-user limit is " +
+              'reached; or EMAIL_NOT_VERIFIED: `authConfig.requireEmailVerification` is on, so ' +
               'no session is issued (the account IS created and the verification email IS sent).',
-            409: 'EMAIL_ALREADY_EXISTS — another end-user in this Application already uses that email.',
+            409: 'EMAIL_ALREADY_EXISTS: another end-user in this Application already uses that email.',
           }),
         },
       },
@@ -453,17 +453,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — password sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
+            400: 'AUTH_METHOD_DISABLED: password sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
-              ' Or INVALID_CREDENTIALS — the email or password is wrong (we never disclose which).',
+              ' Or INVALID_CREDENTIALS: the email or password is wrong (we never disclose which).',
             403:
               BOOTSTRAP_403 +
-              ' Or EMAIL_NOT_VERIFIED — the password was correct but the address is unconfirmed.' +
+              ' Or EMAIL_NOT_VERIFIED: the password was correct but the address is unconfirmed.' +
               DEVICE_ERRORS_403,
             429:
               RATE_LIMITED +
-              ' Or TOO_MANY_FAILED_ATTEMPTS — this (Application, email) pair is locked out after ' +
+              ' Or TOO_MANY_FAILED_ATTEMPTS: this (Application, email) pair is locked out after ' +
               'repeated failures; see `retryAfterSeconds`.',
             503:
               'PASSWORD_VERIFY_BUSY: too many password checks were already queued on this ' +
@@ -515,11 +515,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('AuthResult'), 'A finished session.'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'VALIDATION_ERROR — the body failed schema validation.' + DEVICE_ERRORS_400,
+            400: 'VALIDATION_ERROR: the body failed schema validation.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
-              ' Or MFA_CHALLENGE_INVALID — the challenge token is invalid or expired; or ' +
-              'MFA_CHALLENGE_WRONG_APPLICATION — issued for a different Application; or ' +
+              ' Or MFA_CHALLENGE_INVALID: the challenge token is invalid or expired; or ' +
+              'MFA_CHALLENGE_WRONG_APPLICATION: issued for a different Application; or ' +
               'MFA_CODE_INVALID: the TOTP/backup code did not verify; or ' +
               'MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one; or ' +
               'MFA_BACKUP_CODE_USED: that backup code was already spent, use another one; or ' +
@@ -572,22 +572,22 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             ...BOOTSTRAP_ERRORS,
             401:
               BOOTSTRAP_401 +
-              ' Or REFRESH_TOKEN_INVALID — the token is unknown or not a session-kind token; or ' +
-              'REFRESH_TOKEN_REUSED — a rotated-out token was replayed (every session for this ' +
+              ' Or REFRESH_TOKEN_INVALID: the token is unknown or not a session-kind token; or ' +
+              'REFRESH_TOKEN_REUSED: a rotated-out token was replayed (every session for this ' +
               'user has been revoked as a precaution); or REFRESH_TOKEN_RACED, the token was ' +
               'rotated moments ago by another request and its successor is unused (nothing was ' +
-              'revoked; use the successor or sign in again); or REFRESH_TOKEN_REVOKED — this session ' +
+              'revoked; use the successor or sign in again); or REFRESH_TOKEN_REVOKED: this session ' +
               'was revoked, or its device was refused after the token was spent (`details.reason`); ' +
-              'or REFRESH_TOKEN_EXPIRED — the token has expired; or ' +
-              'REFRESH_TOKEN_WRONG_APPLICATION — the token belongs to a different Application; or ' +
-              'REFRESH_TOKEN_DEVICE_MISMATCH — the session is bound to a different device than ' +
+              'or REFRESH_TOKEN_EXPIRED: the token has expired; or ' +
+              'REFRESH_TOKEN_WRONG_APPLICATION: the token belongs to a different Application; or ' +
+              'REFRESH_TOKEN_DEVICE_MISMATCH: the session is bound to a different device than ' +
               'the one presenting it (every session for this user has been revoked as a precaution); ' +
-              'or SESSION_DEVICE_RELEASED — the device this session is bound to was released since.',
+              'or SESSION_DEVICE_RELEASED: the device this session is bound to was released since.',
             403:
               BOOTSTRAP_403 +
-              ' Or EMAIL_NOT_VERIFIED — re-checked on every refresh.' +
-              ' Or DEVICE_BLOCKED — an operator blocked the device this session is bound to.',
-            410: 'END_USER_ERASED — this end-user was erased (GDPR) since the token was issued.',
+              ' Or EMAIL_NOT_VERIFIED: re-checked on every refresh.' +
+              ' Or DEVICE_BLOCKED: an operator blocked the device this session is bound to.',
+            410: 'END_USER_ERASED: this end-user was erased (GDPR) since the token was issued.',
           }),
         },
       },
@@ -680,7 +680,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — password sign-in is disabled for this Application.',
+            400: 'AUTH_METHOD_DISABLED: password sign-in is disabled for this Application.',
           }),
         },
       },
@@ -740,7 +740,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — magic-link sign-in is disabled for this Application.',
+            400: 'AUTH_METHOD_DISABLED: magic-link sign-in is disabled for this Application.',
           }),
         },
       },
@@ -785,18 +785,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('SignInOutcome'), 'A finished session, or an MFA challenge.'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — magic-link sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
+            400: 'AUTH_METHOD_DISABLED: magic-link sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
-              ' Or MAGIC_LINK_INVALID — the token is unknown; or MAGIC_LINK_USED — already ' +
-              'consumed; or MAGIC_LINK_EXPIRED — the 15-minute window passed; or ' +
-              'MAGIC_LINK_WRONG_APPLICATION — issued for a different Application; or ' +
-              'MAGIC_LINK_STALE — the account email changed since the token was issued.',
+              ' Or MAGIC_LINK_INVALID: the token is unknown; or MAGIC_LINK_USED: already ' +
+              'consumed; or MAGIC_LINK_EXPIRED: the 15-minute window passed; or ' +
+              'MAGIC_LINK_WRONG_APPLICATION: issued for a different Application; or ' +
+              'MAGIC_LINK_STALE: the account email changed since the token was issued.',
             403:
               BOOTSTRAP_403 +
-              ' Also (new-user tokens only): SIGNUP_DISABLED — public sign-up is off; or ' +
-              'SIGNUP_REQUIRES_SECRET_KEY — this Application only allows creating end-users ' +
-              "with a secret key; or TENANT_QUOTA_EXCEEDED — the workspace's end-user limit is reached.",
+              ' Also (new-user tokens only): SIGNUP_DISABLED: public sign-up is off; or ' +
+              'SIGNUP_REQUIRES_SECRET_KEY: this Application only allows creating end-users ' +
+              "with a secret key; or TENANT_QUOTA_EXCEEDED: the workspace's end-user limit is reached.",
           }),
         },
       },
@@ -886,12 +886,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref('SignInOutcome'), 'A finished session (passkeys bypass the MFA challenge).'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'WEBAUTHN_AUTH_INVALID — the response is missing a credential id.' + DEVICE_ERRORS_400,
+            400: 'WEBAUTHN_AUTH_INVALID: the response is missing a credential id.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
-              ' Or WEBAUTHN_AUTH_INVALID — the credential is unknown to this Application, the ' +
+              ' Or WEBAUTHN_AUTH_INVALID: the credential is unknown to this Application, the ' +
               'challenge was stale, or the assertion did not verify.',
-            403: BOOTSTRAP_403 + ' Or EMAIL_NOT_VERIFIED — the account email is unconfirmed.',
+            403: BOOTSTRAP_403 + ' Or EMAIL_NOT_VERIFIED: the account email is unconfirmed.',
           }),
         },
       },
@@ -940,11 +940,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             ...BOOTSTRAP_ERRORS,
             401:
               BOOTSTRAP_401 +
-              ' Or EMAIL_VERIFICATION_TOKEN_INVALID — the token is unknown; or ' +
-              'EMAIL_VERIFICATION_TOKEN_USED — already consumed; or ' +
-              'EMAIL_VERIFICATION_TOKEN_EXPIRED — the 24-hour window passed; or ' +
-              'EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION — issued for a different Application; ' +
-              'or EMAIL_VERIFICATION_STALE — the account email changed since the token was issued.',
+              ' Or EMAIL_VERIFICATION_TOKEN_INVALID: the token is unknown; or ' +
+              'EMAIL_VERIFICATION_TOKEN_USED: already consumed; or ' +
+              'EMAIL_VERIFICATION_TOKEN_EXPIRED: the 24-hour window passed; or ' +
+              'EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION: issued for a different Application; ' +
+              'or EMAIL_VERIFICATION_STALE: the account email changed since the token was issued.',
           }),
         },
       },
@@ -1053,13 +1053,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...BOOTSTRAP_ERRORS,
             400:
-              'PASSWORD_TOO_SHORT — shorter than `authConfig.passwordMinLength`; or ' +
-              'PASSWORD_BREACHED — the password appears in a known breach corpus.',
+              'PASSWORD_TOO_SHORT: shorter than `authConfig.passwordMinLength`; or ' +
+              'PASSWORD_BREACHED: the password appears in a known breach corpus.',
             401:
               BOOTSTRAP_401 +
-              ' Or PASSWORD_RESET_TOKEN_INVALID — the token is unknown; or ' +
-              'PASSWORD_RESET_TOKEN_USED — already consumed; or PASSWORD_RESET_TOKEN_EXPIRED — ' +
-              'expired; or PASSWORD_RESET_TOKEN_WRONG_APPLICATION — issued for a different Application.',
+              ' Or PASSWORD_RESET_TOKEN_INVALID: the token is unknown; or ' +
+              'PASSWORD_RESET_TOKEN_USED: already consumed; or PASSWORD_RESET_TOKEN_EXPIRED: ' +
+              'expired; or PASSWORD_RESET_TOKEN_WRONG_APPLICATION: issued for a different Application.',
           }),
         },
       },
@@ -1143,9 +1143,9 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           ...errs({
             ...AUTHENTICATED_ERRORS,
             400:
-              'PASSWORD_TOO_SHORT — shorter than `authConfig.passwordMinLength`; or ' +
-              'PASSWORD_BREACHED — the password appears in a known breach corpus.',
-            401: USER_SESSION_401 + ' Or INVALID_CREDENTIALS — the current password is wrong.',
+              'PASSWORD_TOO_SHORT: shorter than `authConfig.passwordMinLength`; or ' +
+              'PASSWORD_BREACHED: the password appears in a known breach corpus.',
+            401: USER_SESSION_401 + ' Or INVALID_CREDENTIALS: the current password is wrong.',
             403: IMPERSONATION_403,
           }),
         },
@@ -1207,7 +1207,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           ),
           ...errs({
             ...AUTHENTICATED_ERRORS,
-            400: 'EMAIL_ALREADY_VERIFIED — no further action is needed.',
+            400: 'EMAIL_ALREADY_VERIFIED: no further action is needed.',
           }),
         },
       },
@@ -1287,7 +1287,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           ...errs({
             ...AUTHENTICATED_ERRORS,
             400:
-              'STEP_UP_UNAVAILABLE — a publishable caller has no password and no MFA enrolled, ' +
+              'STEP_UP_UNAVAILABLE: a publishable caller has no password and no MFA enrolled, ' +
               'so there is no second factor to step up with.',
             401:
               USER_SESSION_401 +
@@ -1373,9 +1373,9 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           ),
           ...errs({
             ...AUTHENTICATED_ERRORS,
-            401: USER_SESSION_401 + ' Or WEBAUTHN_REGISTRATION_FAILED — the ceremony did not verify.',
+            401: USER_SESSION_401 + ' Or WEBAUTHN_REGISTRATION_FAILED: the ceremony did not verify.',
             403: IMPERSONATION_403,
-            409: 'WEBAUTHN_ALREADY_REGISTERED — this passkey is already registered.',
+            409: 'WEBAUTHN_ALREADY_REGISTERED: this passkey is already registered.',
           }),
         },
       },
@@ -1412,7 +1412,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           // lastUsedAt, createdAt}`, matches the corrected `Passkey` component field-for-field.
           200: okPage(ref('Passkey'), "A page of the current user's registered passkeys."),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...AUTHENTICATED_ERRORS,
           }),
         },
@@ -1522,7 +1522,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
             "A page of the current user's active sessions (live refresh tokens), newest first.",
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...AUTHENTICATED_ERRORS,
           }),
         },

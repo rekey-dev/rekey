@@ -18,6 +18,8 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { Modal } from '@/components/Modal';
 import { Banner } from '@/components/Banner';
 import { formatDateTime } from '@/lib/date';
+import { formatMoney } from '@/lib/format';
+import { majorToMinor } from '@/lib/money-input';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
@@ -47,22 +49,13 @@ const STATUS_LABEL: Record<UnappliedStatus, string> = {
   DISMISSED: 'Closed',
 };
 
+const ERR: Record<string, string> = {
+  refundAmount:
+    'Type the refund as the currency is written, such as 19.99, with no more decimals than the currency has. Nothing was refunded.',
+};
+
 const inputCls =
   'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
-
-/**
- * Minor units to a readable amount.
- *
- * The zero-decimal set is small and local on purpose: this is display text,
- * and the integer from the API stays the authority. A blind `/100` would show
- * a ¥5,000 charge as ¥50.
- */
-const ZERO_DECIMAL = new Set(['JPY', 'KRW', 'VND', 'CLP', 'ISK', 'HUF', 'TWD']);
-function money(minor: number, currency: string): string {
-  const code = currency.toUpperCase();
-  const major = ZERO_DECIMAL.has(code) ? String(minor) : (minor / 100).toFixed(2);
-  return `${major} ${code}`;
-}
 
 /**
  * Colour for the age column.
@@ -77,18 +70,23 @@ function ageClass(status: UnappliedPaymentRow['status'], ageDays: number): strin
   return '';
 }
 
-async function refundCase(applicationId: string, caseId: string, formData: FormData): Promise<void> {
+async function refundCase(applicationId: string, caseId: string, currency: string, formData: FormData): Promise<void> {
   'use server';
   const raw = String(formData.get('amount') ?? '').trim();
   const note = String(formData.get('note') ?? '').trim();
   // Blank means "everything that remains", which is what every provider does
   // with an absent amount. Rekey never computes the remainder itself.
-  const amount = raw ? Math.round(Number(raw) * 100) : undefined;
+  const amount = raw ? majorToMinor(raw, currency) : undefined;
+  // An amount that cannot be read is refused here. Dropping it would refund
+  // everything that remains, which is not what was typed.
+  if (amount === null || amount === 0) {
+    redirect(`/applications/${applicationId}/unapplied-payments?error=refundAmount`);
+  }
   try {
     await api({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/unapplied-payments/${encodeURIComponent(caseId)}/refund`,
-      body: { ...(amount !== undefined && Number.isFinite(amount) ? { amount } : {}), ...(note ? { note } : {}) },
+      body: { ...(amount !== undefined ? { amount } : {}), ...(note ? { note } : {}) },
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -190,16 +188,16 @@ export default async function UnappliedPaymentsPage({
       <SectionHeader
         title="Unapplied payments"
         count={`(${cases.length === 0 ? 0 : `${offset + 1}–${offset + cases.length}`})`}
-        description="Money a payment provider captured that Rekey could not match to any subscription, usually a checkout that finished after Rekey stopped waiting for it. The customer has most likely paid for something they expect to receive. Rekey never refunds these automatically; the decision is yours."
+        description="Money a payment provider captured that Rekey could not match: a checkout that finished after Rekey stopped waiting for it, a charge in another currency than the subscription pays in, or an amount far from its price. The customer has most likely paid for something they expect to receive. Each one is held as an unverified payment and stays out of revenue until you decide. Rekey never refunds these automatically."
       />
 
       {errorCode && (
         <Banner tone="error">
-          <ApiErrorText code={errorCode} detail={errorDetail} fix={errorFix} fallback={errorCode} />
+          <ApiErrorText code={errorCode} detail={errorDetail} fix={errorFix} map={ERR} fallback={errorCode} />
         </Banner>
       )}
       {sp.refunded && <SavedBanner message="Refund sent to the provider." />}
-      {sp.extended && <SavedBanner message="Access extended and the case closed." />}
+      {sp.extended && <SavedBanner message="Access extended, the payment verified and the case closed." />}
       {sp.dismissed && <SavedBanner message="Case closed." />}
 
       {/* Ordering is the feature, not a detail, say so, because it is the
@@ -308,10 +306,10 @@ export default async function UnappliedPaymentsPage({
                   {c.provider}
                 </TD>
                 <TD align="right" mono className="whitespace-nowrap text-xs">
-                  {money(c.amount, c.currency)}
+                  {formatMoney(c.amount, c.currency)}
                   {c.refundedAmount > 0 && (
                     <span className="block text-[0.7rem] text-[var(--color-muted-fg)]">
-                      {money(c.refundedAmount, c.currency)} back
+                      {formatMoney(c.refundedAmount, c.currency)} back
                     </span>
                   )}
                 </TD>
@@ -362,9 +360,7 @@ function DecideModal({
   applicationId: string;
   row: UnappliedPaymentRow;
 }): React.JSX.Element {
-  const remainingMajor =
-    (row.amount - row.refundedAmount) /
-    (ZERO_DECIMAL.has(row.currency.toUpperCase()) ? 1 : 100);
+  const remaining = formatMoney(row.amount - row.refundedAmount, row.currency);
 
   return (
     <Modal
@@ -372,7 +368,7 @@ function DecideModal({
       modalValue={row.id}
       trigger="Decide"
       triggerClassName="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-surface-muted)]"
-      title={`${money(row.amount, row.currency)} from ${row.endUserEmail ?? 'an unknown customer'}`}
+      title={`${formatMoney(row.amount, row.currency)} from ${row.endUserEmail ?? 'an unknown customer'}`}
       description={`Captured at ${row.provider} ${row.ageDays} days ago${
         row.providerPaymentId ? ` as ${row.providerPaymentId}` : ''
       }. Rekey could not match it to a subscription, so nothing was provisioned and nothing was refunded.`}
@@ -383,7 +379,7 @@ function DecideModal({
             provider with no refund API it is not. */}
         {row.refundable ? (
           <ActionForm
-            action={refundCase.bind(null, applicationId, row.id)}
+            action={refundCase.bind(null, applicationId, row.id, row.currency)}
             className="space-y-2 rounded-lg border border-[var(--color-border)] p-3"
           >
             <div className="font-medium text-[var(--color-fg)]">Refund the customer</div>
@@ -396,10 +392,9 @@ function DecideModal({
                 <span className="block text-xs font-medium">Amount ({row.currency})</span>
                 <input
                   name="amount"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  placeholder={String(remainingMajor)}
+                  type="text"
+                  inputMode="decimal"
+                  placeholder={`All of ${remaining}`}
                   className={inputCls}
                 />
               </label>
@@ -428,7 +423,9 @@ function DecideModal({
             <div className="font-medium text-[var(--color-fg)]">Keep it and extend their access</div>
             <p className="text-xs text-[var(--color-muted-fg)]">
               Adds days to their current subscription period and re-provisions entitlements. Use
-              this when they still want what they paid for.
+              this when they still want what they paid for. It also marks the payment as verified
+              and links it to that subscription, so it counts as revenue from then on. A closed or
+              refunded case leaves the payment unverified.
             </p>
             <div className="flex flex-wrap items-end gap-2">
               <label className="block space-y-1">

@@ -83,18 +83,18 @@ const UpdateBody = z.object({
 /** Every route here sits behind `requireTenantSession` (plugin `onRequest` hook). */
 const TENANT_SESSION_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer <accessToken>` header; or ' +
-    'TENANT_SESSION_INVALID — the token is invalid, expired, or the operator account no ' +
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer <accessToken>` header; or ' +
+    'TENANT_SESSION_INVALID: the token is invalid, expired, or the operator account no ' +
     'longer exists.',
-  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+  429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
 } as const;
 
 /** Errors from `ensureAppAccess(req, id, 'read')`. */
 const APP_READ_ERRORS = {
   ...TENANT_SESSION_ERRORS,
-  403: 'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace.',
+  403: 'TENANT_MEMBERSHIP_REVOKED: you are no longer a member of this workspace.',
   404:
-    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'APPLICATION_NOT_FOUND: no Application with that id in this workspace (also returned, ' +
     'without disclosing existence, when a MEMBER holds no grant on it).',
 };
 
@@ -102,18 +102,18 @@ const APP_READ_ERRORS = {
 const APP_WRITE_ERRORS = {
   ...TENANT_SESSION_ERRORS,
   403:
-    'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace; or ' +
-    'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (no application grants anywhere) cannot ' +
-    'write; or APP_ACCESS_DENIED — your application grant role does not allow this action ' +
+    'TENANT_MEMBERSHIP_REVOKED: you are no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT: a legacy MEMBER (no application grants anywhere) cannot ' +
+    'write; or APP_ACCESS_DENIED: your application grant role does not allow this action ' +
     '(requires APP_ADMIN).',
   404:
-    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'APPLICATION_NOT_FOUND: no Application with that id in this workspace (also returned, ' +
     'without disclosing existence, when a MEMBER holds no grant on it).',
 };
 
 /** `WEBHOOK_ENDPOINT_NOT_FOUND`, from `ensureEndpointInApp`, folded into the write/read 404. */
 const ENDPOINT_NOT_FOUND_DESC =
-  'WEBHOOK_ENDPOINT_NOT_FOUND — no webhook endpoint with that id on this Application.';
+  'WEBHOOK_ENDPOINT_NOT_FOUND: no webhook endpoint with that id on this Application.';
 
 const WebhookEndpointSchema = {
   type: 'object',
@@ -160,7 +160,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: okPage(WebhookEndpointSchema, 'A page of webhook endpoints for this Application.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...APP_READ_ERRORS,
           }),
         },
@@ -237,10 +237,10 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — `url` or `events` failed schema validation; or ' +
-              'WEBHOOK_URL_UNSAFE — the URL resolves to a private/loopback/link-local address ' +
+              'VALIDATION_ERROR: `url` or `events` failed schema validation; or ' +
+              'WEBHOOK_URL_UNSAFE: the URL resolves to a private/loopback/link-local address ' +
               '(unless `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` on a self-hosted deploy); or ' +
-              'WEBHOOK_ENDPOINT_LIMIT_REACHED — the Application already has 100 webhook endpoints.',
+              'WEBHOOK_ENDPOINT_LIMIT_REACHED: the Application already has 100 webhook endpoints.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -276,7 +276,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           createdAt: result.endpoint.createdAt.toISOString(),
           secret: result.secret,
           warning:
-            'Store this secret now — it is shown exactly once. Use it to verify the X-Rekey-Signature header on inbound deliveries.',
+            'Store this secret now. It is shown exactly once. Use it to verify the X-Rekey-Signature header on inbound deliveries.',
         },
       });
     },
@@ -310,8 +310,8 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — `url` or `events` failed schema validation; or ' +
-              'WEBHOOK_URL_UNSAFE — the new URL resolves to a private/loopback/link-local address.',
+              'VALIDATION_ERROR: `url` or `events` failed schema validation; or ' +
+              'WEBHOOK_URL_UNSAFE: the new URL resolves to a private/loopback/link-local address.',
             ...APP_WRITE_ERRORS,
             404: `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}`,
           }),
@@ -584,7 +584,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
             ...APP_WRITE_ERRORS,
             404:
               `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}; or ` +
-              'WEBHOOK_DELIVERY_NOT_FOUND — no delivery with that id on this endpoint, or it ' +
+              'WEBHOOK_DELIVERY_NOT_FOUND: no delivery with that id on this endpoint, or it ' +
               'already SUCCEEDED.',
           }),
         },

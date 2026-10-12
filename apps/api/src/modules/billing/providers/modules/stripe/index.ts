@@ -21,10 +21,13 @@ import { STRIPE_API_VERSION } from '../../stripe-api-version.js';
 import { createStripeClient } from '../../stripe-client.js';
 import { detectStripeMode, stripeCredentialSchema, validateStripeCredentials } from './credentials.js';
 import { invoiceIdForPaymentIntent } from '../../stripe-invoice-payments.js';
+import { STRIPE_SUPPORTED_CURRENCIES, stripeWebhookAmount } from '../../stripe-money.js';
 import {
   applicationIdIn,
   chargePaymentRef,
+  invoicePriceId,
   invoiceSubscriptionId,
+  listedRefunds,
   periodEndOf,
   scopedApplicationId,
 } from './payload-shapes.js';
@@ -197,7 +200,7 @@ function oneTimeCharge(
       providerPaymentId,
       // `amount_total` is what the buyer was charged, net of the ad-hoc
       // coupon, which is the number that has to appear in revenue.
-      amount: session.amount_total,
+      amount: stripeWebhookAmount(session.currency, session.amount_total),
       currency: session.currency ?? null,
       description: null,
     },
@@ -340,6 +343,7 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
         ctx.log.info({ invoiceId: invoice.id }, 'first invoice charged nothing, no payment recorded');
         return [];
       }
+      const priceId = invoicePriceId(invoice);
       return [
         {
           type: 'payment.succeeded',
@@ -347,7 +351,7 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
           applicationId,
           providerPaymentId: invoice.id,
           providerSubscriptionId: invoiceSubscriptionId(invoice),
-          amount: invoice.amount_paid,
+          amount: stripeWebhookAmount(invoice.currency, invoice.amount_paid),
           currency: invoice.currency ?? null,
           description: invoice.description ?? null,
           // The FIRST invoice (billing_reason: subscription_create) pays for
@@ -360,6 +364,7 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
           // Only while the event is young: a checkout that never reaches
           // Rekey must still end up in front of the operator.
           deferUntilLinked: firstPeriod && isRecentEvent(event.created),
+          ...(priceId !== null && { providerPriceId: priceId }),
           raw: payload,
         },
       ];
@@ -381,7 +386,7 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
           applicationId,
           providerPaymentId: invoice.id,
           providerSubscriptionId: invoiceSubscriptionId(invoice),
-          amount: invoice.amount_due,
+          amount: stripeWebhookAmount(invoice.currency, invoice.amount_due),
           currency: invoice.currency ?? null,
           description: invoice.description ?? null,
           raw: payload,
@@ -406,8 +411,9 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
           applicationId,
           providerPaymentId: await chargePaymentId(charge, ctx),
           providerSubscriptionId: null,
-          amount: charge.amount_refunded,
-          refundedTotal: charge.amount_refunded,
+          amount: stripeWebhookAmount(charge.currency, charge.amount_refunded),
+          refundedTotal: stripeWebhookAmount(charge.currency, charge.amount_refunded),
+          ...listedRefunds(charge),
           currency: charge.currency ?? null,
           description: null,
           raw: payload,
@@ -454,6 +460,9 @@ export const stripeModule: ProviderModule = {
     // Historical geo-routing default: Stripe is the global fallback
     // (pickProvider treats an empty country list as "any country").
     defaultCountries: [],
+    supportedCurrencies: [...STRIPE_SUPPORTED_CURRENCIES],
+    // A Stripe account presents in every currency Stripe lists.
+    preselectedCurrencies: [...STRIPE_SUPPORTED_CURRENCIES],
     priority: 100,
   },
   capabilities: {

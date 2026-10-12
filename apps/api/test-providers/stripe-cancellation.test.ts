@@ -77,8 +77,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
       applicationId: fixture.applicationId,
       slug: 'monthly',
       name: `${HARNESS_PREFIX} Cancellable ${runId}`,
-      amount: 1900,
-      currency: 'usd',
+      price: { currency: 'usd', amount: 1900 },
       interval: 'MONTH',
     });
     await entitlementsService.upsert({

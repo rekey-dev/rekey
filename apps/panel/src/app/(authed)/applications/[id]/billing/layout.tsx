@@ -1,10 +1,11 @@
 /**
- * Billing setup shell: a heading and a tab strip over five jobs.
+ * Billing setup shell: a heading and a tab strip over six jobs.
  *
  *   Status         is billing on, and is anything stopping a buyer from paying
  *   Providers      which payment providers are connected, and their webhooks
  *   Checkout page  where buyers pay, and whether the Rekey page is ready
- *   Events         what the providers have posted to Rekey
+ *   Provider webhooks  what the providers have posted to Rekey
+ *   Routing preview    which price and provider one buyer would get
  *   Settings       who pays, and whether Rekey chases failed payments
  *
  * These used to be one scroll in which the provider table sat below a tall
@@ -48,7 +49,8 @@ export default async function BillingLayout({
             { href: base, label: 'Status', exact: true },
             { href: `${base}/providers`, label: 'Providers' },
             { href: `${base}/checkout`, label: 'Checkout page' },
-            { href: `${base}/events`, label: 'Events' },
+            { href: `${base}/events`, label: 'Provider webhooks' },
+            { href: `${base}/preview`, label: 'Routing preview' },
             { href: `${base}/settings`, label: 'Settings' },
           ]}
         />

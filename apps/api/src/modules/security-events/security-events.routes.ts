@@ -31,11 +31,11 @@ import { paged } from '../../lib/pagination.js';
  */
 const SECURITY_EVENTS_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or ' +
-    'TENANT_SESSION_INVALID — the access token is invalid, expired, or the operator account no longer exists.',
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or ' +
+    'TENANT_SESSION_INVALID: the access token is invalid, expired, or the operator account no longer exists.',
   403:
-    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of the active workspace; or ' +
-    "TENANT_ROLE_INSUFFICIENT — the operator's live role is below OWNER/ADMIN.",
+    'TENANT_MEMBERSHIP_REVOKED: the operator is no longer a member of the active workspace; or ' +
+    "TENANT_ROLE_INSUFFICIENT: the operator's live role is below OWNER/ADMIN.",
 } as const;
 
 const CSV_MAX_ROWS = 5000;

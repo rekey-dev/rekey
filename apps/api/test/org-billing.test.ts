@@ -66,7 +66,7 @@ describe('Org-beneficiary billing', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: 'team', name: 'Team', amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug: 'team', name: 'Team', kind: 'SUBSCRIPTION' },
     });
     await app.inject({
       method: 'PUT',
@@ -194,7 +194,7 @@ describe('Org-beneficiary billing', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appId}/plans`,
         headers: auth(),
-        payload: { slug, name: slug, amount: 0, kind: 'SUBSCRIPTION' },
+        payload: { slug, name: slug, kind: 'SUBSCRIPTION' },
       });
     }
     const personalPlan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'solo' } });

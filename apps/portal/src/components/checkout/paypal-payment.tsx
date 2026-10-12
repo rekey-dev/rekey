@@ -52,9 +52,11 @@ declare global {
 const LOAD_TIMEOUT_MS = 10_000;
 
 export const PAYMENT_MESSAGES: Partial<Record<Phase, string>> = {
+  loading: 'Loading secure payment…',
   processing: 'Processing…',
   cancelled: 'Payment not completed. You have not been charged.',
-  failed: 'PayPal could not complete this payment. You have not been charged. Try again, or continue on PayPal.',
+  // PayPal's onError does not say whether an approval went through, so this never says nothing was charged.
+  failed: 'PayPal could not complete this payment. If you approved it in PayPal, check your PayPal activity before paying again. Otherwise try again, or continue on PayPal.',
   script_failed: 'The secure payment form did not load.',
   unconfirmed: unconfirmedMessage(checkoutProviderCopy('paypal').name),
   confirming: 'Payment approved. Confirming your payment…',
@@ -153,12 +155,16 @@ export function PaypalPayment({
       <div
         ref={container}
         id="paypal-buttons"
-        className={phase === 'loading' ? 'min-h-[150px] animate-pulse rounded-lg bg-[var(--ck-muted)]' : 'min-h-[150px]'}
+        className={phase === 'loading' ? 'min-h-[116px] animate-pulse rounded-lg bg-[var(--ck-muted)]' : 'min-h-[116px]'}
         hidden={
           phase === 'confirming' || phase === 'handing_off' || phase === 'redirecting' || phase === 'script_failed' || phase === 'unconfirmed'
         }
       />
-      <p id="payment-status" role="status" aria-live="polite" className="mt-3 min-h-[1.25rem] text-sm text-[var(--ck-fg)]">
+      <p
+        id="payment-status"
+        role={phase === 'failed' ? 'alert' : 'status'}
+        className={message ? `mt-3 text-sm ${phase === 'failed' ? 'text-[#b91c1c]' : 'text-[var(--ck-fg)]'}` : 'sr-only'}
+      >
         {message ?? ''}
       </p>
       {showFallback && (

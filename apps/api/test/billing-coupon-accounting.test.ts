@@ -92,8 +92,8 @@ describe('coupon redemption is recorded once per purchase', () => {
     await configureSandboxPaypal(applicationId);
 
     for (const plan of [
-      { slug: 'pro', name: 'Pro', amount: SUB_AMOUNT },
-      { slug: 'pack', name: 'Credit pack', amount: PACK_AMOUNT, kind: 'CREDIT', creditsAmount: 100 },
+      { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: SUB_AMOUNT } },
+      { slug: 'pack', name: 'Credit pack', price: { currency: 'USD', amount: PACK_AMOUNT }, kind: 'CREDIT', creditsAmount: 100 },
     ]) {
       const res = await app.inject({
         method: 'POST',
@@ -178,7 +178,7 @@ describe('coupon redemption is recorded once per purchase', () => {
 
   describe('one-time purchases (no invoice is ever emitted for them)', () => {
     it('consumes the single redemption a maxRedemptions:1 coupon has, and refuses the next buyer', async () => {
-      await createCoupon({ code: 'onceonly', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000, maxRedemptions: 1 });
+      await createCoupon({ code: 'onceonly', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }], maxRedemptions: 1 });
 
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
@@ -236,7 +236,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('records what the buyer actually paid, not the list price', async () => {
-      await createCoupon({ code: 'fifteen', discountType: 'AMOUNT', currency: 'USD', amountOff: 1500 });
+      await createCoupon({ code: 'fifteen', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1500 }] });
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'fifteen',
@@ -284,7 +284,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('replaying the completion does not double the payment or the redemption', async () => {
-      await createCoupon({ code: 'replayme', discountType: 'AMOUNT', currency: 'USD', amountOff: 500 });
+      await createCoupon({ code: 'replayme', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }] });
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'replayme',
@@ -310,7 +310,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('PayPal: the approval redeems and the capture records the payment — one redemption total', async () => {
-      await createCoupon({ code: 'ppcoupon', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000, maxRedemptions: 1 });
+      await createCoupon({ code: 'ppcoupon', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }], maxRedemptions: 1 });
       const orderId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'ppcoupon',
@@ -367,7 +367,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     }
 
     it('redeems once for the discounted invoice, and not again on renewal', async () => {
-      await createCoupon({ code: 'firstmonth', discountType: 'PERCENT', amountOff: 5000 });
+      await createCoupon({ code: 'firstmonth', discountType: 'PERCENT', basisPoints: 5000 });
       const providerSubId = await activateWithCoupon('firstmonth');
 
       await fireInvoice(providerSubId, 'in_first', 'subscription_create');
@@ -393,7 +393,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       await createCoupon({
         code: 'peruser',
         discountType: 'PERCENT',
-        amountOff: 2000,
+        basisPoints: 2000,
         maxRedemptionsPerUser: 1,
       });
       const providerSubId = await activateWithCoupon('peruser');
@@ -432,7 +432,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       await createCoupon({
         code: 'racey',
         discountType: 'PERCENT',
-        amountOff: 2500,
+        basisPoints: 2500,
         maxRedemptions: 1,
       });
       const sessionId = await checkoutSessionId({ planSlug: 'pro', couponCode: 'racey', provider: 'stripe' });
@@ -490,7 +490,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     // The total used to be read back off `Subscription.metadata.discountAmount`
     // at display time, a value the buyer's NEXT checkout on the same plan
     // overwrites, so history changed under the operator.
-    await createCoupon({ code: 'stamped', discountType: 'PERCENT', amountOff: 4000 });
+    await createCoupon({ code: 'stamped', discountType: 'PERCENT', basisPoints: 4000 });
     const sessionId = await checkoutSessionId({ planSlug: 'pack', couponCode: 'stamped', provider: 'stripe' });
     await fireStripe('checkout.session.completed', {
       id: sessionId,
@@ -513,11 +513,14 @@ describe('coupon redemption is recorded once per purchase', () => {
       stats.json().data as {
         items: Array<{
           code: string;
-          totalDiscountIssued: number;
+          discountIssuedByCurrency: Array<{ currency: string; amount: number; redemptions: number }>;
           redemptionCount: number;
         }>;
       }
     ).items.find((c) => c.code === 'stamped');
-    expect(row).toMatchObject({ redemptionCount: 1, totalDiscountIssued: 2000 });
+    expect(row).toMatchObject({
+      redemptionCount: 1,
+      discountIssuedByCurrency: [{ currency: 'USD', amount: 2000, redemptions: 1 }],
+    });
   });
 });

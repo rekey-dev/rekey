@@ -1,5 +1,7 @@
 import type Stripe from 'stripe';
 import { planNotRegisteredError } from '../../plans/plan-registration.js';
+import { providerRegistration } from '../priced-plan.js';
+import { toProviderAmount } from './stripe-money.js';
 import type { CheckoutSessionInput } from './types.js';
 
 type SessionParams = Stripe.Checkout.SessionCreateParams;
@@ -25,7 +27,7 @@ function rekeyMetadata(input: CheckoutSessionInput): Record<string, string> {
  * const priceId = stripePriceIdFor(input);
  */
 export function stripePriceIdFor(input: CheckoutSessionInput): string {
-  const priceId = (input.plan.metadata as { stripe?: { priceId?: string } } | null)?.stripe?.priceId;
+  const priceId = providerRegistration(input.plan, 'stripe').priceId;
   if (!priceId) {
     // Reachable, and it was reached: a plan whose eager registration was
     // refused used to be committed active anyway. `plansService` now keeps
@@ -87,7 +89,7 @@ export function paymentPurchase(input: CheckoutSessionInput, discounts: Discount
         quantity: 1,
         price_data: {
           currency: input.plan.currency.toLowerCase(),
-          unit_amount: input.plan.amount,
+          unit_amount: toProviderAmount(input.plan.currency, input.plan.amount),
           product_data: { name: input.plan.name },
         },
       },

@@ -12,10 +12,11 @@ import type {
   FeatureCheckDto,
   OrganizationBaseRole,
   PublicPlanCheckoutDto,
-  PlanDto,
+  ResolvedPriceDto,
   OrganizationWithRoleDto,
   ResolvedEntitlementsDto,
   SelfSubscriptionDto,
+  SupportModeDto,
 } from '@rekey.dev/shared-types';
 import type { RekeyBrowserClient } from '../src/client.js';
 
@@ -36,13 +37,23 @@ export async function licenses(): Promise<void> {
   expectTypeOf((await client.listMyLicenses('token')).items).toEqualTypeOf<EndUserLicenseDto[]>();
 }
 
+export async function support(): Promise<void> {
+  const me = await client.getMe('token', { include: ['support'] });
+  if (!me) return;
+  expectTypeOf(me.support).toEqualTypeOf<SupportModeDto>();
+  expectTypeOf(me).not.toHaveProperty('device');
+  // @ts-expect-error `since` exists only on an active case
+  void me.support.since;
+}
+
 export async function featuresAndPlans(): Promise<void> {
   expectTypeOf(await client.getFeature('token', 'reports')).toEqualTypeOf<FeatureCheckDto>();
   expectTypeOf(await client.hasFeature('token', 'reports')).toEqualTypeOf<boolean>();
   const plans = await client.getPlans();
   expectTypeOf(plans.items[0]!.checkout).toEqualTypeOf<PublicPlanCheckoutDto>();
-  const asPlans: PlanDto[] = plans.items;
-  void asPlans;
+  expectTypeOf(plans.items[0]!.price).toEqualTypeOf<ResolvedPriceDto | null>();
+  // @ts-expect-error a price's provider registration is operator configuration
+  void plans.items[0]!.prices[0]!.registration;
 }
 
 export async function some(): Promise<void> {

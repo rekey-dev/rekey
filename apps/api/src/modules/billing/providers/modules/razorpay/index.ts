@@ -22,6 +22,7 @@
 import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { CHECKOUT_BROWSER_ORIGINS } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../../../lib/error.js';
+import { RAZORPAY_SUPPORTED_CURRENCIES, razorpayWebhookAmount } from '../../razorpay-money.js';
 import type {
   AppRef,
   DomainBillingEvent,
@@ -37,6 +38,7 @@ interface RzpSubscriptionEntity {
   status?: string;
   current_end?: number | null;
   paid_count?: number;
+  plan_id?: string;
 }
 
 interface RzpPaymentEntity {
@@ -203,11 +205,12 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerSubscriptionId: sub.id,
           checkoutSessionId: sub.id,
           requireLocalSubscription: true,
-          amount: payment.amount,
+          amount: razorpayWebhookAmount(payment.currency ?? 'INR', payment.amount),
           currency: payment.currency ?? 'INR',
           description: payment.description ?? null,
           firstPeriod: (sub.paid_count ?? 1) <= 1,
           ...(sub.current_end ? { currentPeriodEnd: new Date(sub.current_end * 1000) } : {}),
+          ...(typeof sub.plan_id === 'string' && sub.plan_id !== '' && { providerPriceId: sub.plan_id }),
           raw: payload,
         },
       ];
@@ -264,7 +267,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerSubscriptionId: sub.id,
           checkoutSessionId: sub.id,
           requireLocalSubscription: true,
-          amount: payment.amount,
+          amount: razorpayWebhookAmount(payment.currency ?? 'INR', payment.amount),
           currency: payment.currency ?? 'INR',
           description: payment.description ?? null,
           raw: payload,
@@ -301,7 +304,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerSubscriptionId: null,
           checkoutSessionId: link.id,
           requireLocalSubscription: true,
-          amount: payment.amount,
+          amount: razorpayWebhookAmount(payment.currency ?? 'INR', payment.amount),
           currency: payment.currency ?? 'INR',
           description: payment.description ?? null,
           firstPeriod: true,
@@ -335,7 +338,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerSubscriptionId: null,
           payment: {
             providerPaymentId: payment.id,
-            amount: payment.amount,
+            amount: razorpayWebhookAmount(payment.currency, payment.amount),
             currency: payment.currency ?? null,
             description: payment.description ?? null,
           },
@@ -361,6 +364,9 @@ export const razorpayModule: ProviderModule = {
     // Suggested only, the panel pre-fills "IN" here. `pickProvider` reads the
     // stored row, so India routes to Razorpay only once an operator saves it.
     defaultCountries: ['IN'],
+    // Other currencies need international payments activated on the account.
+    supportedCurrencies: [...RAZORPAY_SUPPORTED_CURRENCIES],
+    preselectedCurrencies: ['INR'],
     priority: 100,
   },
   capabilities: {

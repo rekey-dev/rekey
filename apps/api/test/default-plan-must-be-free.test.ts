@@ -87,10 +87,10 @@ describe('the free-tier default plan must cost nothing', () => {
     return slug;
   }
 
-  const priced = () => makePlan({ slug: 'pro', name: 'Pro', amount: 200_000, kind: 'SUBSCRIPTION' });
+  const priced = () => makePlan({ slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 200_000 }, kind: 'SUBSCRIPTION' });
   const metered = () =>
-    makePlan({ slug: 'metered', name: 'Metered', amount: 0, kind: 'USAGE', meterSlug: 'calls', pricePerUnitCents: 5 });
-  const free = () => makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' });
+    makePlan({ slug: 'metered', name: 'Metered', kind: 'USAGE', meterSlug: 'calls', });
+  const free = () => makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' });
 
   const tenantSet = (slug: string | null) =>
     app.inject({

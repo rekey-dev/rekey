@@ -189,7 +189,6 @@ describe("the signed-in user's read surface", () => {
     const created = await op('POST', `/api/v1/tenant/applications/${appId}/plans`, {
       slug,
       name: slug,
-      amount: 0,
       kind: 'SUBSCRIPTION',
     });
     expect(created.statusCode, created.body).toBe(201);

@@ -37,6 +37,95 @@ export {
   type CheckoutReadinessCheckId,
 } from './checkout.js';
 
+export {
+  CURRENCY_TABLE,
+  MAX_PRICE_AMOUNT,
+  chargeableStep,
+  currencyRecord,
+  currencySellability,
+  formatMoney,
+  isSellableCurrency,
+  localCurrencyOf,
+  minorUnitExponent,
+  percentageDiscount,
+  priceFallbackMessage,
+  sellableCurrencies,
+  validatePriceAmount,
+  type CurrencyRecord,
+  type CurrencySellability,
+  type PriceAmountRule,
+  type PriceAmountValidation,
+  type PriceFallbackSides,
+  type UnsellableReason,
+} from './currency/index.js';
+
+export { BILLING_MONEY_ERROR_CODES, isBillingMoneyError, type BillingMoneyErrorCode } from './billing-errors.js';
+
+export {
+  BillingCredentialDtoSchema,
+  BillingCredentialStatusDtoSchema,
+  BillingProviderModuleDtoSchema,
+  BillingProviderModulesDtoSchema,
+  CreatePlanRequestSchema,
+  CreateRefundRequestSchema,
+  PlanPriceInputSchema,
+  REFUND_BLOCKED_REASONS,
+  REFUND_INITIATORS,
+  REFUND_STATUSES,
+  RefundBlockedReasonSchema,
+  RefundDtoSchema,
+  RefundResultDtoSchema,
+  RefundedPaymentDtoSchema,
+  SetPlanPriceRequestSchema,
+  UpdatePlanRequestSchema,
+  refundBlockedMessage,
+  type BillingCredentialDto,
+  type BillingCredentialStatusDto,
+  type BillingProviderModuleDto,
+  type BillingProviderModulesDto,
+  type CreatePlanRequest,
+  type CreateRefundRequest,
+  type PaymentWebhookData,
+  type PlanPriceInput,
+  type RefundBlockedReason,
+  type RefundDto,
+  type RefundResultDto,
+  type RefundedPaymentDto,
+  type SetPlanPriceRequest,
+  type SubscriptionWebhookData,
+  type UpdatePlanRequest,
+} from './billing-operator.js';
+
+export {
+  AdminPaymentRowDtoSchema,
+  AdminSubscriptionRowDtoSchema,
+  type AdminPaymentRowDto,
+  type AdminSubscriptionRowDto,
+} from './admin-billing.js';
+
+export {
+  BILLING_EVENT_ACTOR_TYPES,
+  BILLING_EVENT_DATA,
+  BILLING_EVENT_TIER,
+  BILLING_EVENT_TIERS,
+  BILLING_EVENT_TYPES,
+  BillingEventSchema,
+  RECONCILIATION_FINDING_KINDS,
+  diagnosticReasonOf,
+  BOUNDED_DIAGNOSTIC_TYPES,
+  NOT_RECORDED_REASONS,
+  type NotRecordedReason,
+  type BoundedDiagnosticType,
+  type ReconciliationFindingKind,
+  type BillingEvent,
+  type BillingEventActorType,
+  type BillingEventData,
+  type BillingEventOf,
+  type BillingEventTier,
+  type BillingEventType,
+  type DiagnosticBillingEventType,
+} from './billing-events.js';
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -49,6 +138,7 @@ export {
 export { RekeyError } from './error.js';
 export type { RekeyErrorShape } from './error.js';
 import { type RekeyErrorShape } from './error.js';
+import { RefundBlockedReasonSchema } from './billing-operator.js';
 
 // Decides the `Secure` attribute on a session cookie from the REQUEST rather
 // than from a build-time NODE_ENV. Lives in its own zero-import module for the
@@ -641,6 +731,13 @@ export type AuthConfig = z.infer<typeof AuthConfigSchema>;
  * rejected server-side by the registry-derived enum.
  */
 export const BillingProviderSchema = z.string().min(1);
+
+/**
+ * A country as the billing routes accept it: two characters, a letter first.
+ * Wider than ISO 3166-1 alpha-2 on purpose, so a caller can forward its CDN's
+ * country header unchanged; the API decides what is actually a country.
+ */
+const COUNTRY_INPUT = /^[A-Za-z][A-Za-z0-9]$/;
 export type BillingProvider = z.infer<typeof BillingProviderSchema>;
 
 export const BillingConfigSchema = z.object({
@@ -714,8 +811,38 @@ export const BillingConfigSchema = z.object({
    * tier (current behavior). See #36 / BILLING_MODEL.md.
    */
   defaultPlanSlug: z.string().optional(),
-  /** Default currency for this application. ISO 4217. */
-  currency: z.string().length(3).default('USD'),
+  /**
+   * Which buyers a plan's local-currency price is offered to.
+   *
+   * `trusted` (the default) offers it only when the buyer's country was
+   * declared by a secret key or vouched for by a trusted proxy. A cheaper
+   * local price is worth lying for, and a country a browser states is a hint.
+   * `any` also accepts a hint, which lets a buyer choose their price: for
+   * operators who price for convenience, not purchasing power.
+   */
+  localPrices: z.enum(['trusted', 'any']).default('trusted'),
+  /**
+   * The currency this Application reports in: the headline on the Revenue
+   * page and the MRR tile, the currency offered first for a new price or
+   * coupon, and the currency of a plan with no flat price. ISO 4217. Nothing
+   * is converted into it: totals in other currencies are listed beside it.
+   * Set through `PUT /tenant/applications/:id/billing/reporting-currency`,
+   * which holds it to the sellable set.
+   */
+  reportingCurrency: z.string().length(3).default('USD'),
+  /**
+   * What a checkout does when the server names a `currency` no provider it
+   * can use is able to charge, for a request that does not say itself.
+   *
+   * `fallback` (the default) charges the plan's default price and logs it.
+   * `refuse` answers `BILLING_NO_PROVIDER_FOR_CURRENCY` and charges nobody. A
+   * request that sends its own `onUnavailableCurrency` wins over this.
+   *
+   * It decides nothing else. A local price selected by the buyer's country
+   * always falls back, a subscriber is never moved off the currency they pay
+   * in, and a default price nobody can charge is refused either way.
+   */
+  onUnavailableCurrency: z.enum(['fallback', 'refuse']).default('fallback'),
   /** Provider-specific config, Stripe account id, PayPal merchant id, etc. */
   metadata: z.record(z.unknown()).default({}),
 });
@@ -1169,10 +1296,10 @@ export type SubscriptionStatusType = Open<KnownSubscriptionStatus>;
  * today means the Application has no billing provider configured at all.
  */
 export const PlanCheckoutBlockerSchema = z.object({
-  provider: z.string().nullable(),
-  code: z.string(),
-  message: z.string(),
-  fix: z.string(),
+  provider: z.string().nullable().describe('The provider that refuses the plan. Null when the blocker belongs to no single provider.'),
+  code: z.string().describe('The error code a buyer\'s checkout would raise.'),
+  message: z.string().describe('What is wrong, for a person.'),
+  fix: z.string().describe('How to repair it.'),
 });
 export type PlanCheckoutBlockerDto = z.infer<typeof PlanCheckoutBlockerSchema>;
 
@@ -1183,66 +1310,196 @@ export type PlanCheckoutBlockerDto = z.infer<typeof PlanCheckoutBlockerSchema>;
  * as working to whoever happened to test from the lucky country.
  */
 export const PlanCheckoutReadinessSchema = z.object({
-  ready: z.boolean(),
-  blockers: z.array(PlanCheckoutBlockerSchema),
+  ready: z.boolean().describe('Whether every provider a buyer could be routed to would open a checkout for this plan.'),
+  blockers: z.array(PlanCheckoutBlockerSchema).describe('One entry per provider that refuses the plan. Empty when `ready` is true.'),
 });
 export type PlanCheckoutReadinessDto = z.infer<typeof PlanCheckoutReadinessSchema>;
 
-export const PlanDtoSchema = z.object({
+export const PlanRegistrationStatusSchema = z.enum(['NOT_REQUIRED', 'PENDING', 'REGISTERED', 'FAILED']);
+
+/**
+ * Whether a payment provider holds this price. `error` is the provider's own
+ * refusal when `status` is FAILED.
+ */
+export const PlanPriceRegistrationSchema = z.object({
+  status: PlanRegistrationStatusSchema.describe('Where the price stands at the payment provider.'),
+  error: z.string().nullable().describe('The provider\'s own refusal when `status` is FAILED, otherwise null.'),
+});
+export type PlanPriceRegistrationDto = z.infer<typeof PlanPriceRegistrationSchema>;
+
+/**
+ * One price of a plan as the public catalogue shows it: the default price or
+ * a price in another currency. `countries` is where a non-default price
+ * applies; empty means wherever that currency is the local one.
+ */
+export const PublicPlanPriceDtoSchema = z.object({
   id: z.string(),
-  applicationId: z.string(),
-  slug: z.string(),
-  name: z.string(),
-  /** Amount in the smallest currency unit (cents/paise/sen). Always integer. */
-  amount: z.number().int(),
-  currency: z.string(),
-  interval: PlanIntervalSchema,
-  /** What this plan sells. Defaults to SUBSCRIPTION for plans created before kinds existed. */
-  kind: PlanKindSchema,
-  // ── LICENSE-kind config (null for non-LICENSE plans) ──
-  licenseKind: LicenseKindSchema.nullable(),
-  licenseSeatsAllowed: z.number().int().nullable(),
+  /** Upper-case ISO 4217. */
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  /** Amount in the smallest unit of `currency`. Always integer. */
+  amount: z.number().int().describe('Amount in the smallest unit of `currency`. Always integer.'),
+  /** Upper-case ISO 3166-1 alpha-2. */
+  countries: z.array(z.string()).describe('Upper-case ISO 3166-1 alpha-2.'),
+  /** The price a buyer pays when no other price applies. Exactly one per priced plan. */
+  isDefault: z.boolean().describe('The price a buyer pays when no other price applies. Exactly one per priced plan.'),
+  /** A plan lists only the prices it sells at. */
+  archived: z.literal(false).describe('A plan lists only the prices it sells at.'),
+});
+export type PublicPlanPriceDto = z.infer<typeof PublicPlanPriceDtoSchema>;
+
+/**
+ * One price of a plan as its operator reads it, with where it stands at the
+ * payment provider, whether its amount may still change, and who is on it.
+ * All of that is the operator's to know, so the public catalogue carries
+ * {@link PublicPlanPriceDtoSchema} instead.
+ */
+export const PlanPriceDtoSchema = PublicPlanPriceDtoSchema.extend({
+  registration: PlanPriceRegistrationSchema.describe('Whether a payment provider holds this price.'),
+  /**
+   * Whether `amount` can still be changed. False once a payment provider
+   * holds the price or is registering it: the route that changes the amount
+   * refuses by the same rule. `countries` can change either way.
+   */
+  amountEditable: z.boolean().describe('Whether `amount` can still be changed. False once a payment provider holds the price or is registering it (`PLAN_PRICE_IMMUTABLE`), or a live subscription, an open checkout, an ended subscription, a payment or a credit grant names it (`PLAN_PRICE_REFERENCED`): the route that changes the amount refuses by the same rule. `countries` can change either way.'),
+  /** How many subscriptions that have not ended are on this price. */
+  liveSubscriptions: z.number().int().describe('How many subscriptions that have not ended (not CANCELED or EXPIRED) are on this price. A count, not money. A price with any cannot be removed (`PLAN_PRICE_IN_USE`).'),
+  /** How many checkouts are open on this price. */
+  openCheckouts: z.number().int().describe('How many checkouts are open on this price: being confirmed, or opened and not yet expired. A count, not money. A price with any cannot be removed (`PLAN_PRICE_IN_USE`).'),
+});
+export type PlanPriceDto = z.infer<typeof PlanPriceDtoSchema>;
+
+/**
+ * Why a price was selected:
+ *
+ * - `bound`: the buyer already pays in this currency.
+ * - `requested`: the operator's server named the currency.
+ * - `country`: it is the price for the buyer's country.
+ * - `default`: nothing else applied.
+ * - `fallback`: another price was selected and no provider can charge it.
+ */
+export const PRICE_REASONS = ['bound', 'requested', 'country', 'default', 'fallback'] as const;
+export const PriceReasonSchema = z.enum(PRICE_REASONS);
+export type PriceReason = z.infer<typeof PriceReasonSchema>;
+
+/**
+ * The price one buyer would be charged for a plan, resolved by the function
+ * checkout uses. A pricing page renders `formatted` and needs no logic.
+ */
+export const ResolvedPriceDtoSchema = z.object({
+  /** The `prices[].id` selected. */
+  id: z.string(),
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  amount: z.number().int().describe('Integer, in the minor unit of `currency` (cents for USD, whole yen for JPY).'),
+  /** `amount` written for a person, such as "$19.00" or "₹1,499.00". */
+  formatted: z.string().describe('`amount` written for a person, such as "$19.00" or "₹1,499.00".'),
+  isDefault: z.boolean().describe('Whether this is the plan\'s default price.'),
+  reason: PriceReasonSchema.describe('Why this price was selected: `bound` (the buyer already pays in this currency), `requested` (the operator\'s server named the currency), `country` (it is the price for the buyer\'s country), `default` (nothing else applied), or `fallback` (another price was selected and no provider can charge it).'),
+  /**
+   * When `reason` is `fallback`: the currency selected for the buyer, which no
+   * enabled provider can charge. Null for every other reason.
+   */
+  requestedCurrency: z
+    .string()
+    .nullable()
+    .describe('When `reason` is `fallback`: the currency selected for the buyer, upper-case ISO 4217, which no enabled provider can charge. Null for every other reason.'),
+});
+export type ResolvedPriceDto = z.infer<typeof ResolvedPriceDtoSchema>;
+
+/** One side of a price fallback: a price row and what it charges. */
+export const FallbackPriceDtoSchema = z.object({
+  /** The `prices[].id`. */
+  id: z.string(),
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  amount: z.number().int().describe('Integer, in the minor unit of `currency`.'),
+  formatted: z.string().describe('`amount` written for a person, such as "$19.00".'),
+});
+
+/**
+ * A checkout that charges the plan's default price because no provider could
+ * charge the price selected for the buyer.
+ */
+export const PriceFallbackDtoSchema = z.object({
+  requested: FallbackPriceDtoSchema.describe('The price selected for the buyer, which no enabled provider can charge.'),
+  charged: FallbackPriceDtoSchema.describe('The plan\'s default price, which the checkout charges instead.'),
+  reason: z.enum(['no_provider_for_currency']).describe('Why the selected price was not charged.'),
+});
+export type PriceFallbackDto = z.infer<typeof PriceFallbackDtoSchema>;
+
+/** What any reader of a plan gets: what it is and what it sells, with nothing about how it is configured. */
+const planCommonShape = {
+  id: z.string(),
+  slug: z.string().describe('The plan\'s stable name within the Application, used in checkout requests.'),
+  name: z.string().describe('Display name.'),
+  /** What this plan sells. */
+  kind: PlanKindSchema.describe('What this plan sells.'),
+  interval: PlanIntervalSchema.describe('How often a SUBSCRIPTION plan bills.'),
+  /** Whether the plan charges nothing at all. A metered plan with no base fee is not free. */
+  isFree: z.boolean().describe('Whether the plan charges nothing at all. A metered plan with no base fee is not free.'),
+  /** Free trial length in days, or null for none. */
+  trialDays: z.number().int().nullable().describe('Free trial length in days, or null for none.'),
+  // LICENSE-kind config (null for non-LICENSE plans)
+  licenseKind: LicenseKindSchema.nullable().describe('LICENSE-kind config (null for non-LICENSE plans)'),
+  licenseSeatsAllowed: z.number().int().nullable().describe('For SEATS licenses: how many seats a key carries. Null otherwise.'),
   /** For TIMED licenses: key lifetime in days from purchase. */
-  licenseDurationDays: z.number().int().nullable(),
-  // ── USAGE-kind config (null for non-USAGE plans) ──
-  /** Slug of the usage meter this plan bills against. */
-  meterSlug: z.string().nullable(),
-  /** Per-unit price in the smallest currency unit. `amount` is the base/recurring fee. */
-  pricePerUnitCents: z.number().int().nullable(),
-  // ── CREDIT-kind config (null for non-CREDIT plans) ──
+  licenseDurationDays: z.number().int().nullable().describe('For TIMED licenses: key lifetime in days from purchase.'),
+  /** Slug of the usage meter a USAGE plan bills against. */
+  meterSlug: z.string().nullable().describe('Slug of the usage meter a USAGE plan bills against.'),
   /** Credits granted to the buyer on successful payment of a CREDIT-kind plan. */
-  creditsAmount: z.number().int().nullable(),
-  active: z.boolean(),
-  metadata: z.record(z.unknown()),
+  creditsAmount: z.number().int().nullable().describe('Credits granted to the buyer on successful payment of a CREDIT-kind plan.'),
+  /**
+   * The price this caller's buyer would be charged, or null for a plan with
+   * no flat price. Resolved by the function checkout uses, from the buyer's
+   * country (`?country=`), the currency they already pay in when the request
+   * carries their token, and what the providers can charge.
+   */
+  price: ResolvedPriceDtoSchema.nullable().describe('The price this caller\'s buyer would be charged, or null for a plan with no flat price. Resolved by the function checkout uses, from the buyer\'s country (`?country=`), the currency they already pay in when the request carries their token, and what the providers can charge.'),
+};
+
+export const PlanLocalPricesSchema = z.enum(['INHERIT', 'TRUSTED', 'OFF']);
+
+/** A plan as its operator reads it. */
+export const PlanDtoSchema = z.object({
+  ...planCommonShape,
+  applicationId: z.string().describe('The Application the plan belongs to.'),
+  /**
+   * Every price the plan sells at: the default price first, then the others
+   * sorted by currency. Empty for a plan with no flat price. Checkout picks
+   * between them by the buyer's country; see `localPrices` on the billing config.
+   */
+  prices: z.array(PlanPriceDtoSchema).describe('Every price the plan sells at: the default price first, then the others sorted by currency. Empty for a plan with no flat price. Checkout picks between them by the buyer\'s country; see `localPrices` on the billing config.'),
+  /** The `prices[].id` of the default price, or null for a plan with no flat price. */
+  defaultPriceId: z.string().nullable().describe('The `prices[].id` of the default price, or null for a plan with no flat price.'),
+  /**
+   * Whether a buyer's country may select one of this plan's other prices:
+   * `INHERIT` follows the Application's `localPrices`, `TRUSTED` needs a
+   * country a server declared or a CDN vouched for, `OFF` never does.
+   */
+  localPrices: PlanLocalPricesSchema.describe('Whether a buyer\'s country may select one of this plan\'s other prices: `INHERIT` follows the Application\'s `localPrices`, `TRUSTED` needs a country a server declared or a CDN vouched for, `OFF` never does.'),
+  active: z.boolean().describe('Whether the operator offers the plan. `checkout` says whether the providers will honour it.'),
+  /** Where the plan stands at the provider that registers plans when they are created. */
+  registrationStatus: PlanRegistrationStatusSchema.describe('Where the plan stands at the provider that registers plans when they are created.'),
+  /** The provider's own refusal when `registrationStatus` is FAILED. */
+  registrationError: z.string().nullable().describe('The provider\'s own refusal when `registrationStatus` is FAILED.'),
+  metadata: z.record(z.unknown()).describe('Operator and provider data kept on the plan.'),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   /**
    * Whether a buyer sent to checkout for this plan would actually get a
    * checkout, and if not, which provider refuses and how to repair it.
+   * Present on the routes that list plans; the routes that return one plan
+   * after a write leave it out.
    *
-   * OPERATOR-FACING, and present only on operator routes. `active` says what
-   * the operator INTENDED; this says what the providers will honour, and the
-   * two disagree in one common case: a plan created before the Application had
-   * provider credentials was never registered, has no price behind it, and
-   * stays that way because configuring a provider does not reach back and fix
-   * plans that already exist. Such a plan is indistinguishable from a working
-   * one until a buyer clicks Buy.
-   *
-   * The public catalogue (`GET /billing/plans`) carries `checkout.ready`
-   * only, see {@link PublicPlanDtoSchema}: a buyer has no repair to perform
-   * and `blockers` names internal state.
+   * `active` says what the operator INTENDED; this says what the providers
+   * will honour, and the two disagree in one common case: a plan created
+   * before the Application had provider credentials was never registered, has
+   * no price behind it, and stays that way because configuring a provider
+   * does not reach back and fix plans that already exist.
    */
-  checkout: PlanCheckoutReadinessSchema.optional(),
+  checkout: PlanCheckoutReadinessSchema.optional().describe('Whether a buyer sent to checkout for this plan would actually get a checkout, and if not, which provider refuses and how to repair it. Present on the routes that list plans; the routes that return one plan after a write leave it out. `active` says what the operator INTENDED; this says what the providers will honour, and the two disagree in one common case: a plan created before the Application had provider credentials was never registered, has no price behind it, and stays that way because configuring a provider does not reach back and fix plans that already exist.'),
 });
-export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind' | 'checkout'> & {
+export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind'> & {
   /** {@link Open}, always give your `switch` a default branch. */
   kind: PlanKindType;
-  /**
-   * `blockers` is optional in this type so a public catalogue row
-   * ({@link PublicPlanDto}, `ready` only) is still a `PlanDto`. The operator
-   * routes always send it.
-   */
-  checkout?: { ready: boolean; blockers?: PlanCheckoutBlockerDto[] };
 };
 
 /**
@@ -1253,12 +1510,27 @@ export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind' | 'checkout'> &
  * checkout only, so a free default plan granted without checkout can read
  * false while still applying to every signed-in user.
  */
-export const PublicPlanCheckoutSchema = z.object({ ready: z.boolean() });
+export const PublicPlanCheckoutSchema = z.object({
+  ready: z.boolean().describe('False when a buyer sent to checkout for this plan would be refused.'),
+});
 export type PublicPlanCheckoutDto = z.infer<typeof PublicPlanCheckoutSchema>;
 
-/** A plan as `GET /billing/plans` returns it: the plan plus `checkout.ready`. */
-export const PublicPlanDtoSchema = PlanDtoSchema.extend({ checkout: PublicPlanCheckoutSchema });
-export type PublicPlanDto = Omit<PlanDto, 'checkout'> & { checkout: PublicPlanCheckoutDto };
+/**
+ * A plan as `GET /billing/plans` returns it to a publishable key or a buyer:
+ * what a pricing page shows. It carries no operator configuration: no
+ * provider ids, no registration state, no `metadata`.
+ */
+export const PublicPlanDtoSchema = z
+  .object({
+    ...planCommonShape,
+    prices: z.array(PublicPlanPriceDtoSchema).describe('Every price the plan sells at, the default price first. Empty for a plan with no flat price.'),
+    checkout: PublicPlanCheckoutSchema.describe('Whether a buyer sent to checkout for this plan would get one.'),
+  })
+  .strict();
+export type PublicPlanDto = Omit<z.infer<typeof PublicPlanDtoSchema>, 'kind'> & {
+  /** {@link Open}, always give your `switch` a default branch. */
+  kind: PlanKindType;
+};
 
 /**
  * One feature's value for a subject (`GET /billing/entitlements/features/:key`).
@@ -1422,20 +1694,19 @@ export interface CreditWebhookData {
  */
 export const BillingProviderCapabilitiesSchema = z.object({
   /**
-   * Whether buyers can be sent to this provider to pay. Optional because a
-   * server may predate the field; absent means it can (the three hosted
-   * providers always could). `false` marks an inbound-only provider, one
-   * that only receives events from the operator's own billing system.
+   * Whether buyers can be sent to this provider to pay. `false` marks an
+   * inbound-only provider, one that only receives events from the operator's
+   * own billing system.
    */
-  checkout: z.boolean().optional(),
+  checkout: z.boolean(),
   oneTime: z.boolean(),
   captureStep: z.boolean(),
   autoWebhookRegister: z.boolean(),
   periodRotationEvents: z.boolean(),
   onlineVerify: z.boolean(),
   /**
-   * Whether an ad-hoc coupon discount can be applied, per flow. Optional
-   * because a provider module may predate the field, and absent means
+   * Whether an ad-hoc coupon discount can be applied, per flow. A provider
+   * module that declares nothing leaves it out, and absent means
    * "cannot", never "unknown, try it": a checkout that sends a coupon to a
    * provider that drops it charges the buyer full price. Use it to hide the
    * coupon field when the only provider on offer cannot honour one.
@@ -1484,8 +1755,8 @@ export const SubscriptionDtoSchema = z.object({
    * through Rekey is refused, so a portal should not offer one.
    *
    * Null when `provider` is null or unknown to this server. Served by
-   * `GET /billing/subscription`; optional because other routes returning a
-   * subscription, and servers that predate the field, leave it out.
+   * `GET /billing/subscription`; the other routes that return a subscription
+   * leave it out.
    */
   providerCapabilities: BillingProviderCapabilitiesSchema.nullable().optional(),
   providerSubId: z.string().nullable(),
@@ -1528,11 +1799,19 @@ export const SelfSubscriptionDtoSchema = SubscriptionDtoSchema.extend({
   beneficiaryOrgId: z.string().nullable(),
   /** When a TRIALING subscription's free trial ends; null when there is none. */
   trialEndsAt: z.string().datetime().nullable(),
+  /**
+   * What this subscriber pays each period: the price their checkout, grant or
+   * import fixed, which can differ from the plan's default price. Render
+   * `formatted`. Null for a subscription to a plan with no flat price, and
+   * for a checkout that has not been paid yet.
+   */
+  price: FallbackPriceDtoSchema.nullable(),
 });
 export type SelfSubscriptionDto = Omit<SubscriptionDto, 'metadata'> & {
   metadata: SelfSubscriptionMetadata;
   beneficiaryOrgId: string | null;
   trialEndsAt: string | null;
+  price: z.infer<typeof FallbackPriceDtoSchema> | null;
 };
 
 /**
@@ -1662,8 +1941,24 @@ export const CreateCheckoutRequestSchema = z.object({
    * per-provider routing rules.
    */
   provider: BillingProviderSchema.optional(),
-  /** ISO 3166-1 alpha-2. Used by the geo router when `provider` is absent. */
-  country: z.string().length(2).optional(),
+  /**
+   * ISO 3166-1 alpha-2. Used by the geo router when `provider` is absent, and
+   * to pick between a plan's prices when it has more than one currency.
+   */
+  country: z.string().regex(COUNTRY_INPUT).optional(),
+  /**
+   * Secret key only. Charge the plan's price in this ISO 4217 currency
+   * instead of the one the buyer's country selects. The plan must have a
+   * price in it. A publishable-key request that sends it is refused with
+   * `BILLING_CURRENCY_NOT_ALLOWED`.
+   */
+  currency: z.string().length(3).optional(),
+  /**
+   * What to do when no provider can charge `currency`. `fallback`, the
+   * default, charges the plan's default price instead and says so in
+   * `priceFallback`. `refuse` answers `BILLING_NO_PROVIDER_FOR_CURRENCY`.
+   */
+  onUnavailableCurrency: z.enum(['fallback', 'refuse']).optional(),
   /**
    * Buy on behalf of an organization (owner+beneficiary). The caller must be
    * an OWNER/ADMIN of it; benefits flow to the org (shared pool / member
@@ -1715,11 +2010,11 @@ export const CreateCheckoutRequestWithCouponSchema = CreateCheckoutRequestSchema
  *   origin: 'https://shop.example', message: '…', fix: '…' }
  */
 export const CheckoutReturnUrlWarningSchema = z.object({
-  code: z.literal('CHECKOUT_RETURN_URL_UNREGISTERED'),
-  field: z.enum(['successUrl', 'cancelUrl']),
-  origin: z.string(),
-  message: z.string(),
-  fix: z.string(),
+  code: z.literal('CHECKOUT_RETURN_URL_UNREGISTERED').describe('Always `CHECKOUT_RETURN_URL_UNREGISTERED`.'),
+  field: z.enum(['successUrl', 'cancelUrl']).describe('Which URL points at an unregistered origin.'),
+  origin: z.string().describe('The origin that is not registered on the Application.'),
+  message: z.string().describe('What is wrong, for a person.'),
+  fix: z.string().describe('How to repair it.'),
 });
 export type CheckoutReturnUrlWarning = z.infer<typeof CheckoutReturnUrlWarningSchema>;
 
@@ -1730,10 +2025,10 @@ export type CheckoutReturnUrlWarning = z.infer<typeof CheckoutReturnUrlWarningSc
  * the failed check and `fix` is that check's repair.
  */
 export const CheckoutFellBackWarningSchema = z.object({
-  code: z.literal('CHECKOUT_EMBEDDED_FELL_BACK'),
-  check: z.string(),
-  message: z.string(),
-  fix: z.string(),
+  code: z.literal('CHECKOUT_EMBEDDED_FELL_BACK').describe('Always `CHECKOUT_EMBEDDED_FELL_BACK`.'),
+  check: z.string().describe('The readiness check that failed.'),
+  message: z.string().describe('What is wrong, for a person.'),
+  fix: z.string().describe('How to repair that check.'),
 });
 export type CheckoutFellBackWarning = z.infer<typeof CheckoutFellBackWarningSchema>;
 
@@ -1744,24 +2039,39 @@ export const CheckoutWarningSchema = z.discriminatedUnion('code', [
 export type CheckoutWarning = z.infer<typeof CheckoutWarningSchema>;
 
 export const CheckoutResultDtoSchema = z.object({
-  url: z.string().url(),
-  subscription: SelfSubscriptionDtoSchema,
+  url: z.string().url().describe('Where to send the buyer to pay.'),
+  subscription: SelfSubscriptionDtoSchema.describe('The PENDING subscription this checkout opened. It activates when the provider confirms payment.'),
   /** Discount applied (smallest currency unit). 0 if no coupon. */
-  discountAmount: z.number().int().min(0),
+  discountAmount: z.number().int().min(0).describe('Discount applied (smallest currency unit). 0 if no coupon.'),
+  /**
+   * The currency this checkout charges, upper-case ISO 4217. A plan can be
+   * priced in more than one, so this is the one selected for this buyer.
+   */
+  currency: z.string().describe('The currency this checkout charges, upper-case ISO 4217. A plan can be priced in more than one, so this is the one selected for this buyer.'),
+  /** The plan price charged, before any discount, in the smallest unit of `currency`. */
+  unitAmount: z.number().int().min(0).describe('The plan price charged, before any discount, in the smallest unit of `currency`.'),
+  /** The price this checkout charges and why it was selected. Null for a plan with no flat price. */
+  price: ResolvedPriceDtoSchema.nullable().describe('The price this checkout charges and why it was selected. Null for a plan with no flat price.'),
+  /**
+   * Set when the price selected for this buyer could not be charged and the
+   * checkout charges the plan's default price instead. Tell the buyer before
+   * they pay. Null when the price selected is the price charged.
+   */
+  priceFallback: PriceFallbackDtoSchema.nullable().describe('Set when the price selected for this buyer could not be charged and the checkout charges the plan\'s default price instead. Tell the buyer before they pay. Null when the price selected is the price charged.'),
   /** Which provider issued this checkout. Stamped on Subscription.provider. */
-  provider: BillingProviderSchema,
+  provider: BillingProviderSchema.describe('Which provider issued this checkout. Stamped on Subscription.provider.'),
   /**
    * Problems that did not stop this checkout, or changed how it is presented.
-   * Empty when there are none. Optional only so an older API still parses.
+   * Empty when there are none.
    */
-  warnings: z.array(CheckoutWarningSchema).optional(),
+  warnings: z.array(CheckoutWarningSchema).describe('Problems that did not stop this checkout, or changed how it is presented. Empty when there are none.'),
   /**
    * `embedded` when `url` is the Rekey-hosted checkout page, `redirect` when it
-   * is the provider's own page. Optional only so an older API still parses.
+   * is the provider's own page.
    */
-  mode: z.enum(['redirect', 'embedded']).optional(),
+  mode: z.enum(['redirect', 'embedded']).describe('`embedded` when `url` is the Rekey-hosted checkout page, `redirect` when it is the provider\'s own page.'),
   /** Rekey's id for this checkout. Not a credential, so it is safe to log. */
-  checkoutSessionId: z.string().optional(),
+  checkoutSessionId: z.string().describe('Rekey\'s id for this checkout. Not a credential, so it is safe to log.'),
 });
 export type CheckoutResultDto = z.infer<typeof CheckoutResultDtoSchema>;
 
@@ -1856,6 +2166,12 @@ export const CheckoutPageOrderSchema = z.object({
   /** The hosted portal URL for this Application, when it has one, for the cancel sentence. */
   manageUrl: z.string().nullable(),
   expiresAt: z.string(),
+  /**
+   * Set when the price selected for this buyer could not be charged and the
+   * checkout charges the plan's default price instead, as recorded when the
+   * checkout was opened. Tell the buyer before they pay. Null otherwise.
+   */
+  priceFallback: PriceFallbackDtoSchema.nullable(),
   client: CheckoutPageClientSchema,
 });
 export type CheckoutPageOrder = z.infer<typeof CheckoutPageOrderSchema>;
@@ -1956,6 +2272,14 @@ export const TrialEligibilityItemSchema = z.object({
     .nullable(),
   redeemedAt: z.string().nullable(),
   endsAt: z.string().nullable(),
+  /**
+   * The processor this plan's own checkout would go to for this buyer, which
+   * the answer was resolved against. It can differ from the response's
+   * top-level `provider` when the plan is priced in a currency the country's
+   * default cannot charge. Present only where the answer depends on a
+   * provider: a recurring plan that offers a trial.
+   */
+  provider: BillingProviderSchema.optional(),
 });
 export type TrialEligibilityItemDto = z.infer<typeof TrialEligibilityItemSchema>;
 
@@ -1985,20 +2309,33 @@ export const TrialEligibilityDtoSchema = z.object({
 export type TrialEligibilityDto = z.infer<typeof TrialEligibilityDtoSchema>;
 
 export const BillingProviderInfoDtoSchema = z.object({
-  provider: BillingProviderSchema,
-  priority: z.number().int().min(0),
-  countries: z.array(z.string().length(2)),
-  // P4 discovery additions, optional so pre-P4 servers still parse. Prefer
+  provider: BillingProviderSchema.describe('The provider\'s name, such as `stripe`.'),
+  priority: z.number().int().min(0).describe('The router\'s preference rank. Lower is preferred.'),
+  countries: z.array(z.string().length(2)).describe('ISO 3166-1 alpha-2 codes whose buyers are routed to this provider first.'),
+  /** The currencies this provider account charges, upper-case ISO 4217. Empty means none. */
+  currencies: z.array(z.string()).describe('The currencies this provider account charges, upper-case ISO 4217. Empty means none.'),
+  // Left out for a configured provider this server has no module for. Prefer
   // `label` when present; fall back to a capitalized `provider` otherwise.
-  label: z.string().optional(),
-  docsUrl: z.string().optional(),
-  capabilities: BillingProviderCapabilitiesSchema.optional(),
+  label: z.string().optional().describe('Left out for a configured provider this server has no module for. Prefer `label` when present; fall back to a capitalized `provider` otherwise.'),
+  docsUrl: z.string().optional().describe('The provider\'s documentation.'),
+  capabilities: BillingProviderCapabilitiesSchema.optional().describe('What the provider module can do.'),
 });
 export type BillingProviderInfoDto = z.infer<typeof BillingProviderInfoDtoSchema>;
 
 export const ProvidersListDtoSchema = z.object({
-  country: z.string().length(2).nullable(),
-  providers: z.array(BillingProviderInfoDtoSchema),
+  country: z.string().length(2).nullable().describe('The buyer\'s country as resolved, ISO 3166-1 alpha-2, or null when none is known.'),
+  /**
+   * How far `country` can be believed: `declared` by a secret-key caller,
+   * `vouched` by a trusted proxy or the portal, or a `hint` from a browser
+   * caller or an unverified CDN header. Null when no country is known.
+   */
+  countrySource: z.enum(['declared', 'vouched', 'hint']).nullable().describe('How far `country` can be believed: `declared` by a secret-key caller, `vouched` by a trusted proxy or the portal, or a `hint` from a browser caller or an unverified CDN header. Null when no country is known.'),
+  /**
+   * The provider a checkout that names none is routed to: preselect it in a
+   * picker. Null when no provider is enabled.
+   */
+  routedProvider: z.string().nullable().describe('The provider a checkout that names none is routed to: preselect it in a picker. Null when no provider is enabled.'),
+  providers: z.array(BillingProviderInfoDtoSchema).describe('The enabled providers, in the order the router prefers them for this buyer.'),
 });
 export type ProvidersListDto = z.infer<typeof ProvidersListDtoSchema>;
 
@@ -2030,60 +2367,209 @@ export type OAuthProvidersListDto = z.infer<typeof OAuthProvidersListDtoSchema>;
 export const CouponDiscountTypeSchema = z.enum(['PERCENT', 'AMOUNT']);
 export type CouponDiscountTypeValue = z.infer<typeof CouponDiscountTypeSchema>;
 
+/** What a fixed-amount coupon takes off in one currency, in that currency's minor unit. */
+export const CouponAmountDtoSchema = z.object({
+  /** Upper-case ISO 4217. */
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  amountOff: z.number().int().min(1).describe('What the coupon takes off, an integer in the minor unit of `currency`.'),
+});
+export type CouponAmountDto = z.infer<typeof CouponAmountDtoSchema>;
+
+/**
+ * A coupon as an operator reads it.
+ *
+ * A PERCENT coupon carries `basisPoints` and works in every currency unless
+ * `currencies` limits it. An AMOUNT coupon carries one `amounts` row per
+ * currency and works only in those: an amount is never converted or reused
+ * in another currency.
+ *
+ * @example
+ * { discountType: 'AMOUNT', basisPoints: null, currencies: [], coveredCurrencies: ['INR', 'USD'],
+ *   amounts: [{ currency: 'INR', amountOff: 40000 }, { currency: 'USD', amountOff: 500 }] }
+ */
 export const CouponDtoSchema = z.object({
   id: z.string(),
-  applicationId: z.string(),
-  code: z.string(),
-  discountType: CouponDiscountTypeSchema,
-  /** PERCENT: basis points (1500 = 15.00%). AMOUNT: smallest currency unit. */
-  amountOff: z.number().int().min(0),
-  currency: z.string().nullable(),
-  planSlugs: z.array(z.string()),
-  active: z.boolean(),
-  startsAt: z.string().datetime().nullable(),
-  endsAt: z.string().datetime().nullable(),
-  maxRedemptions: z.number().int().nullable(),
-  maxRedemptionsPerUser: z.number().int().nullable(),
-  metadata: z.record(z.unknown()),
+  applicationId: z.string().describe('The Application the coupon belongs to.'),
+  code: z.string().describe('The code a buyer enters.'),
+  discountType: CouponDiscountTypeSchema.describe('PERCENT takes `basisPoints` off any covered price. AMOUNT takes a fixed amount per currency.'),
+  /** PERCENT: hundredths of a percent, 1500 is 15.00%. Null on an AMOUNT coupon. */
+  basisPoints: z.number().int().min(0).max(10000).nullable().describe('PERCENT: hundredths of a percent, 1500 is 15.00%. Null on an AMOUNT coupon.'),
+  /** AMOUNT: one row per currency, sorted by currency. Empty on a PERCENT coupon. */
+  amounts: z.array(CouponAmountDtoSchema).describe('AMOUNT: one row per currency, sorted by currency. Empty on a PERCENT coupon.'),
+  /** PERCENT: the currencies it is limited to, empty for any. Always empty on an AMOUNT coupon. */
+  currencies: z.array(z.string()).describe('PERCENT: the currencies it is limited to, empty for any. Always empty on an AMOUNT coupon.'),
+  /** Every currency a checkout may use this coupon in, sorted. Null means any currency. */
+  coveredCurrencies: z.array(z.string()).nullable().describe('Every currency a checkout may use this coupon in, sorted. Null means any currency.'),
+  planSlugs: z.array(z.string()).describe('The plans the coupon applies to. Empty means every plan.'),
+  active: z.boolean().describe('Whether the coupon can be redeemed.'),
+  startsAt: z.string().datetime().nullable().describe('When the coupon starts working, or null for immediately.'),
+  endsAt: z.string().datetime().nullable().describe('When the coupon stops working, or null for never.'),
+  maxRedemptions: z.number().int().nullable().describe('How many times the coupon may be redeemed in all, across every currency. Null for no limit.'),
+  maxRedemptionsPerUser: z.number().int().nullable().describe('How many times one buyer may redeem it. Null for no limit.'),
+  metadata: z.record(z.unknown()).describe('Operator data kept on the coupon.'),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
 export type CouponDto = z.infer<typeof CouponDtoSchema>;
 
+/**
+ * A coupon with what it has given away, as the operator's coupon list returns
+ * it. There is one row per currency and no total: money in two currencies is
+ * never added together.
+ */
+export const CouponWithStatsDtoSchema = CouponDtoSchema.extend({
+  /** Settled redemptions in every currency. Open checkouts holding the coupon are not counted. */
+  redemptionCount: z.number().int().min(0).describe('Settled redemptions in every currency. Open checkouts holding the coupon are not counted.'),
+  /**
+   * What the coupon took off, per currency charged: the Application's
+   * reporting currency first, then by redemptions. A redemption recorded
+   * before currencies were kept, which nothing can place, is in
+   * `redemptionCount` and in no row here.
+   */
+  discountIssuedByCurrency: z.array(
+    z.object({
+      currency: z.string().describe('Upper-case ISO 4217: the currency charged.'),
+      /** Minor units of `currency`. */
+      amount: z.number().int().min(0).describe('Minor units of `currency`.'),
+      redemptions: z.number().int().min(0).describe('Settled redemptions in this currency.'),
+    }),
+  ).describe('What the coupon took off, per currency charged: the Application\'s reporting currency first, then by redemptions. A redemption recorded before currencies were kept, which nothing can place, is in `redemptionCount` and in no row here.'),
+});
+export type CouponWithStatsDto = z.infer<typeof CouponWithStatsDtoSchema>;
+
+const CouponCurrencyInput = z.string().length(3);
+// Ranges are checked by the API, which answers them with a `fix`:
+// COUPON_AMOUNT_INVALID for an amount or a rate, COUPON_CURRENCY_INVALID for a code.
+const CouponAmountInputSchema = z.object({
+  currency: CouponCurrencyInput,
+  /** Above 0, in the smallest unit of `currency`. */
+  amountOff: z.number().int(),
+});
+/** Hundredths of a percent, 1 to 10000. */
+const CouponBasisPointsInput = z.number().int();
+
+/**
+ * `POST .../coupons`. Send `basisPoints` with PERCENT and `amounts` with
+ * AMOUNT. `amountOff` and `currency` at the top level are gone and are
+ * refused with `BILLING_FIELD_REMOVED`.
+ *
+ * @example
+ * { code: 'LAUNCH', discountType: 'PERCENT', basisPoints: 1500, currencies: ['USD'] }
+ * { code: 'FIVEOFF', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }, { currency: 'INR', amountOff: 40000 }] }
+ */
+export const CreateCouponRequestSchema = z.object({
+  code: z.string().min(1).max(40),
+  discountType: CouponDiscountTypeSchema,
+  basisPoints: CouponBasisPointsInput.optional(),
+  amounts: z.array(CouponAmountInputSchema).max(200).optional(),
+  currencies: z.array(CouponCurrencyInput).max(200).optional(),
+  planSlugs: z.array(z.string().min(1).max(40)).optional(),
+  startsAt: z.string().datetime().optional(),
+  endsAt: z.string().datetime().optional(),
+  maxRedemptions: z.number().int().min(1).max(2_147_483_647).optional(),
+  maxRedemptionsPerUser: z.number().int().min(1).max(2_147_483_647).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+export type CreateCouponRequest = z.infer<typeof CreateCouponRequestSchema>;
+
+const CouponCapInput = z.number().int().min(1).max(2_147_483_647);
+
+/**
+ * `PATCH .../coupons/:code`. Every field is optional and at least one is
+ * sent. `amounts` replaces the whole set, so send every currency the coupon
+ * should keep. A coupon's `discountType` cannot be changed.
+ *
+ * `endsAt`, `maxRedemptions` and `maxRedemptionsPerUser` each take a value or
+ * `null`: null removes the end date or the cap. A cap below what is already
+ * redeemed is refused with `COUPON_LIMIT_BELOW_REDEEMED`.
+ *
+ * @example
+ * { amounts: [{ currency: 'USD', amountOff: 500 }, { currency: 'EUR', amountOff: 450 }] }
+ * { endsAt: '2026-12-31T23:59:59.000Z', maxRedemptions: 500, maxRedemptionsPerUser: null }
+ */
+export const UpdateCouponRequestSchema = z
+  .object({
+    active: z.boolean().optional(),
+    basisPoints: CouponBasisPointsInput.optional(),
+    amounts: z.array(CouponAmountInputSchema).max(200).optional(),
+    currencies: z.array(CouponCurrencyInput).max(200).optional(),
+    planSlugs: z.array(z.string().min(1).max(40)).optional(),
+    /** When the coupon stops working. Null removes the end. */
+    endsAt: z.string().datetime().nullable().optional(),
+    /** Redemptions allowed in all, across every buyer and currency. Null removes the cap. */
+    maxRedemptions: CouponCapInput.nullable().optional(),
+    /** Redemptions allowed per buyer. Null removes the cap. */
+    maxRedemptionsPerUser: CouponCapInput.nullable().optional(),
+  })
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
+    message: 'Send at least one field to change.',
+  });
+export type UpdateCouponRequest = z.infer<typeof UpdateCouponRequestSchema>;
+
 export const ValidateCouponRequestSchema = z.object({
   code: z.string().min(1).max(40),
   planSlug: z.string().min(1).max(40),
+  /**
+   * The buyer's country, ISO 3166-1 alpha-2, under the checkout's rules: fact
+   * from a secret key, a hint from a publishable key. It selects the price the
+   * quote is made against. Two characters as the API takes them, so a CDN's
+   * country header can be forwarded as it is (`T1`, `XX`).
+   */
+  country: z.string().regex(COUNTRY_INPUT).optional(),
+  /**
+   * Secret key only, as at checkout: quote the plan's price in this ISO 4217
+   * currency. A publishable-key request that sends it is refused with
+   * `BILLING_CURRENCY_NOT_ALLOWED`.
+   */
+  currency: z.string().length(3).optional(),
+  /** As at checkout: `refuse` answers `BILLING_NO_PROVIDER_FOR_CURRENCY` where `fallback` would quote the default price. */
+  onUnavailableCurrency: z.enum(['fallback', 'refuse']).optional(),
+  /** The provider the checkout will name, if it names one: the quote is made at the price it can charge. */
+  provider: BillingProviderSchema.optional(),
+  /** The organization the checkout will bill, for an Application that bills per organization. */
+  organizationId: z.string().min(1).optional(),
 });
 export type ValidateCouponRequest = z.infer<typeof ValidateCouponRequestSchema>;
 
 /**
- * What a BUYER may see of a coupon, everything needed to render "15% off" and
- * nothing else.
- *
- * `CouponDto` above is the operator's view and stays that way. The public
- * validate endpoint used to return it verbatim, so any holder of the
- * publishable key could read `maxRedemptions`, `maxRedemptionsPerUser` and the
- * operator's private `metadata` off a pricing page.
+ * What a BUYER may see of a coupon: enough to render "15% off" and nothing
+ * else. Never the limits, the operator's `metadata`, or the other currencies
+ * a fixed-amount coupon has an amount in.
  */
 export const PublicCouponDtoSchema = z.object({
-  code: z.string(),
-  discountType: CouponDiscountTypeSchema,
-  /** PERCENT: basis points (1500 = 15.00%). AMOUNT: smallest currency unit. */
-  amountOff: z.number().int().min(0),
-  currency: z.string().nullable(),
+  code: z.string().describe('The code as stored.'),
+  discountType: CouponDiscountTypeSchema.describe('PERCENT or AMOUNT.'),
+  /** PERCENT: hundredths of a percent, 1500 is 15.00%. Null on an AMOUNT coupon, whose size is `discountAmount`. */
+  basisPoints: z.number().int().min(0).max(10000).nullable().describe('PERCENT: hundredths of a percent, 1500 is 15.00%. Null on an AMOUNT coupon, whose size is `discountAmount`.'),
 });
 export type PublicCouponDto = z.infer<typeof PublicCouponDtoSchema>;
 
+/**
+ * The quote for one coupon on one plan, at the price this caller's checkout
+ * would charge. Every amount is in `currency`.
+ */
 export const ValidateCouponResultDtoSchema = z.object({
-  coupon: PublicCouponDtoSchema,
-  plan: z.object({
-    slug: z.string(),
-    name: z.string(),
-    amount: z.number().int(),
-    currency: z.string(),
-  }),
-  discountAmount: z.number().int().min(0),
-  amountAfterDiscount: z.number().int().min(0),
+  coupon: PublicCouponDtoSchema.describe('What the buyer may see of the coupon.'),
+  plan: z
+    .object({ slug: z.string().describe('The plan slug.'), name: z.string().describe('Display name.') })
+    .describe('The plan the quote is for.'),
+  /** The price the checkout would charge, before the discount. Null for a plan with no flat price. */
+  price: ResolvedPriceDtoSchema.nullable().describe('The price the checkout would charge, before the discount. Null for a plan with no flat price.'),
+  /** Set when the price selected for this buyer cannot be charged and the default price is quoted instead. */
+  priceFallback: PriceFallbackDtoSchema.nullable().describe('Set when the price selected for this buyer cannot be charged and the default price is quoted instead.'),
+  /** Upper-case ISO 4217: the currency the checkout would charge. */
+  currency: z.string().describe('Upper-case ISO 4217: the currency the checkout would charge.'),
+  /** The price before the discount, minor units of `currency`. */
+  amount: z.number().int().min(0).describe('The price before the discount, minor units of `currency`.'),
+  discountAmount: z.number().int().min(0).describe('What the coupon takes off, minor units of `currency`.'),
+  amountAfterDiscount: z.number().int().min(0).describe('What the buyer pays, minor units of `currency`.'),
+  /** `discountAmount` and `amountAfterDiscount` written for a person, such as "$3.00" and "$16.99". */
+  formatted: z
+    .object({
+      discount: z.string().describe('`discountAmount` written for a person, such as "$3.00".'),
+      total: z.string().describe('`amountAfterDiscount` written for a person, such as "$16.99".'),
+    })
+    .describe('`discountAmount` and `amountAfterDiscount` written for a person.'),
 });
 export type ValidateCouponResultDto = z.infer<typeof ValidateCouponResultDtoSchema>;
 
@@ -2348,7 +2834,14 @@ export type DeviceLimitDetails = z.infer<typeof DeviceLimitDetailsSchema>;
  * a top-level property of the same name to the response; with none, the
  * response is exactly what it was before the parameter existed.
  */
-export const ME_INCLUDE_VALUES = ['entitlements', 'device', 'subscription', 'organization', 'licenses'] as const;
+export const ME_INCLUDE_VALUES = [
+  'entitlements',
+  'device',
+  'subscription',
+  'organization',
+  'licenses',
+  'support',
+] as const;
 export type MeInclude = (typeof ME_INCLUDE_VALUES)[number];
 
 /** One row of `GET /billing/entitlements` → `entitlements`. */
@@ -2372,6 +2865,93 @@ export interface ResolvedEntitlementsDto {
   entitlements: ResolvedEntitlementDto[];
   /** Live credit balance of the resolved subject. */
   creditBalance: number;
+}
+
+/**
+ * Support mode as the end-user's own session and the application's backend
+ * read it. Rekey reports the state; the application decides what each
+ * capability means, and must check anything valuable on its backend.
+ */
+export type SupportModeDto =
+  | {
+      active: true;
+      /** Capability names from the Application's catalogue, sorted. */
+      capabilities: string[];
+      /** `device` when the case is limited to named devices and this is one of them. */
+      scope: 'user' | 'device';
+      /** When the case was opened. */
+      since: string;
+      /** When its capabilities or devices last changed. Cache on this, not on `since`. */
+      updatedAt: string;
+    }
+  | { active: false; capabilities: [] };
+
+export const SUPPORT_CASE_CLOSED_CAUSES = ['operator', 'banned', 'erased', 'device_released'] as const;
+export type SupportCaseClosedCause = (typeof SUPPORT_CASE_CLOSED_CAUSES)[number];
+
+/** An operator's note on a support case. Operator-only, append-only. */
+export interface SupportCaseNoteDto {
+  id: string;
+  body: string;
+  /** Operator (TenantUser) id. */
+  authorId: string;
+  /** That operator's email, or null once they no longer exist. */
+  authorEmail: string | null;
+  createdAt: string;
+}
+
+/** A support case as operators see it. Never returned to an end-user. */
+export interface SupportCaseDto {
+  id: string;
+  applicationId: string;
+  endUserId: string;
+  /** Null once the end-user is erased or deleted. */
+  endUserEmail: string | null;
+  status: 'OPEN' | 'CLOSED';
+  capabilities: string[];
+  /** `USER` covers every device. `DEVICES` covers only `deviceIds`. */
+  scope: 'USER' | 'DEVICES';
+  deviceIds: string[];
+  /** Operator-only. Null after the end-user is erased or deleted. */
+  reason: string | null;
+  openedBy: string | null;
+  openedByEmail: string | null;
+  openedAt: string;
+  updatedAt: string;
+  closedBy: string | null;
+  closedByEmail: string | null;
+  closedAt: string | null;
+  closedCause: SupportCaseClosedCause | null;
+  /**
+   * Operator notes, oldest first. Only on `GET .../end-users/:euid/support`,
+   * where one response carries the newest 200 notes across its cases.
+   */
+  notes?: SupportCaseNoteDto[];
+  /** How many notes the case has. Can exceed `notes.length` on the per-user read. */
+  noteCount?: number;
+}
+
+/** One entry of an Application's support capability catalogue. */
+export interface SupportCapabilityDto {
+  id: string;
+  applicationId: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `data.support` of the `support.opened`, `support.updated` and `support.closed` webhooks. */
+export interface SupportWebhookState {
+  caseId: string;
+  active: boolean;
+  capabilities: string[];
+  scope: 'USER' | 'DEVICES';
+  deviceIds: string[];
+  since: string;
+  updatedAt: string;
+  /** Present on `support.closed` only. */
+  closedCause?: SupportCaseClosedCause;
 }
 
 /** What each `include` value adds to the current-user response, under its own name. */
@@ -2398,6 +2978,12 @@ export interface MeIncludedFields {
    * is true when there are more; page the route for the rest.
    */
   licenses: { items: EndUserLicenseDto[]; truncated: boolean };
+  /**
+   * Support mode for this session. A case limited to devices is active only
+   * on a session whose `dev` claim names one of them; a session that is not
+   * device-bound sees such a case as inactive.
+   */
+  support: SupportModeDto;
 }
 
 /**
@@ -2789,6 +3375,11 @@ export const WEBHOOK_EVENTS = [
     description:
       'A Payment row was recorded as FAILED. Payload: `data.payment`.',
   },
+  {
+    name: 'payment.refunded',
+    description:
+      'A refund was recorded against a payment, whoever started it: the provider, or an operator through Rekey. Payload: `data.payment` (its `refundedAmount` is the running total and `status` is PARTIALLY_REFUNDED or REFUNDED) and `data.refund` with this one refund\'s id, amount, currency, status and `providerRefundId`. One event per refund.',
+  },
   // Dunning lifecycle, a "case" tracks one subscription's trip through
   // PAST_DUE (reminder emails day 0/3/7; exhaustion at day 14). Payloads carry
   // `data.dunningCase` with ids, status, failedAttempts/remindersSent and the
@@ -2885,6 +3476,21 @@ export const WEBHOOK_EVENTS = [
     name: 'contact.submission.created',
     description:
       'A subscribe carried `fields` and they were stored, for example a contact form message. Payload: `data.contact` (id, email), `data.list` (id, key), `data.submission` (id, fields, createdAt). Erasing the contact scrubs stored deliveries of this event.',
+  },
+  {
+    name: 'support.opened',
+    description:
+      'An operator opened a support case on an end-user, putting the account in support mode. Payload: `data.user.id` and `data.support` (caseId, active, capabilities, scope, deviceIds, since, updatedAt). The reason and the operator are never sent.',
+  },
+  {
+    name: 'support.updated',
+    description:
+      'The capabilities or devices of an open support case changed: an operator edited it, or a device it named was released or blocked. Payload: `data.user.id` and `data.support`, the full state after the change.',
+  },
+  {
+    name: 'support.closed',
+    description:
+      'A support case closed and its capabilities stopped being reported. Payload: `data.user.id` and `data.support` with `active: false`, `capabilities: []` and `closedCause` (`operator` | `banned` | `erased` | `device_released`).',
   },
 ] as const;
 
@@ -2999,20 +3605,49 @@ export type KnownPaymentStatus = z.infer<typeof PaymentStatusSchema>;
 /** {@link Open}. */
 export type PaymentStatusType = Open<KnownPaymentStatus>;
 
-/** One row of GET /api/v1/tenant/applications/:id/payments (operator billing view). */
+/**
+ * A payment as its operator reads it: one row of
+ * `GET /api/v1/tenant/applications/:id/payments`, and the whole of
+ * `GET /api/v1/tenant/applications/:id/payments/:paymentId`.
+ *
+ * @example
+ * { id: 'pay_1', endUserId: 'eu_1', subscriptionId: 'sub_1', amount: 1900, currency: 'USD',
+ *   status: 'SUCCEEDED', refundedAmount: 0, verification: 'verified', provider: 'stripe',
+ *   refundable: true, refundBlockedReason: null, providerPaymentId: 'in_1', description: null,
+ *   createdAt: '2026-10-12T09:00:00.000Z', endUserEmail: 'buyer@example.com' }
+ */
 export const TenantPaymentDtoSchema = z.object({
   id: z.string(),
-  endUserId: z.string().nullable(),
-  subscriptionId: z.string().nullable(),
+  endUserId: z.string().nullable().describe('The paying end user, when the payment is attributable to one.'),
+  subscriptionId: z.string().nullable().describe('The subscription the payment was applied to. Null for a payment recorded and not applied.'),
   /** Smallest currency unit (cents/paise/sen). Always integer. */
-  amount: z.number().int(),
-  currency: z.string(),
-  status: PaymentStatusSchema,
-  providerPaymentId: z.string().nullable(),
-  description: z.string().nullable(),
+  amount: z.number().int().describe('Smallest currency unit (cents/paise/sen). Always integer.'),
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  status: PaymentStatusSchema.describe('PENDING, SUCCEEDED, FAILED, PARTIALLY_REFUNDED or REFUNDED.'),
+  /** The sum of this payment's refunds that have not failed, smallest unit of `currency`. 0 when nothing was refunded. */
+  refundedAmount: z.number().int().describe('The sum of this payment\'s refunds that have not failed, smallest unit of `currency`. 0 when nothing was refunded.'),
+  /** `unverified` for a charge recorded and not applied. It is in no revenue figure. */
+  verification: z
+    .enum(['verified', 'unverified'])
+    .describe('`unverified` for a charge that was recorded and not applied: it matched no subscription, or not the price it was for. It is in no revenue figure.'),
+  /** The provider that took the payment, as a refund would reach it. Null when Rekey has no record of one. */
+  provider: z
+    .string()
+    .nullable()
+    .describe('The provider that took the payment: the one recorded on the payment, else on its unapplied case, else on its subscription. Null when Rekey has no record of one.'),
+  /** Whether `POST .../payments/:paymentId/refunds` would ask the provider for money back. */
+  refundable: z
+    .boolean()
+    .describe('Whether a refund request for this payment would reach its provider. The provider can still refuse one.'),
+  /** Why not. Null exactly when `refundable` is true. */
+  refundBlockedReason: RefundBlockedReasonSchema.nullable().describe(
+    'Why the payment cannot be refunded through Rekey: `payment_not_succeeded`, `no_provider_charge_id`, `already_refunded`, `provider_unknown`, `provider_cannot_refund` or `provider_not_configured`. Null exactly when `refundable` is true.',
+  ),
+  providerPaymentId: z.string().nullable().describe('The provider\'s id for the charge.'),
+  description: z.string().nullable().describe('The provider\'s description of the charge, when it sent one.'),
   createdAt: z.string().datetime(),
   /** Joined from the paying end-user, when the payment is attributable to one. */
-  endUserEmail: z.string().nullable(),
+  endUserEmail: z.string().nullable().describe('Joined from the paying end-user, when the payment is attributable to one.'),
 });
 export type TenantPaymentDto = Omit<z.infer<typeof TenantPaymentDtoSchema>, 'status'> & {
   /** {@link Open}, always give your `switch` a default branch. */
@@ -3037,40 +3672,92 @@ export interface TenantPaymentsListQuery {
 
 /** One point of the 12-month revenue series. `month` is `YYYY-MM` (UTC). */
 export const MonthlyRevenuePointSchema = z.object({
-  month: z.string(),
-  amountCents: z.number().int(),
+  month: z.string().describe('`YYYY-MM`, UTC.'),
+  amountCents: z.number().int().describe('Verified payments of the month net of refunds, minor units of the row\'s currency.'),
 });
 export type MonthlyRevenuePoint = z.infer<typeof MonthlyRevenuePointSchema>;
 
+/** MRR in one currency. A yearly price counts as a twelfth, rounded down per subscription. */
+export const CurrencyMrrDtoSchema = z.object({
+  /** Upper-case ISO 4217. */
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  /** Smallest unit of `currency`. */
+  mrrCents: z.number().int().describe('Smallest unit of `currency`.'),
+  activeSubscriptions: z.number().int().describe('ACTIVE recurring subscriptions priced in this currency.'),
+});
+export type CurrencyMrrDto = z.infer<typeof CurrencyMrrDtoSchema>;
+
+/** Payments of one period in one currency. `netCents` is `grossCents` less `refundedCents`. */
+export const CurrencyRevenueDtoSchema = z.object({
+  /** Upper-case ISO 4217. */
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  /** What succeeded and partly refunded payments charged, smallest unit of `currency`. */
+  grossCents: z.number().int().describe('What succeeded and partly refunded payments charged, smallest unit of `currency`.'),
+  /** What has been refunded on those payments, counted against the payment's own date. */
+  refundedCents: z.number().int().describe('What has been refunded on those payments, counted against the payment\'s own date.'),
+  netCents: z.number().int().describe('`grossCents` less `refundedCents`.'),
+  payments: z.number().int().describe('How many payments the row counts.'),
+});
+export type CurrencyRevenueDto = z.infer<typeof CurrencyRevenueDtoSchema>;
+
+/**
+ * Money a provider charged that Rekey recorded and did not apply, in one
+ * currency: a charge that matched no subscription, or not the price it was
+ * for. It is never part of revenue or MRR. Net of what has been refunded.
+ */
+export const CurrencyUnverifiedDtoSchema = z.object({
+  /** Upper-case ISO 4217. */
+  currency: z.string().describe('Upper-case ISO 4217.'),
+  /** Smallest unit of `currency`. */
+  amountCents: z.number().int().describe('Smallest unit of `currency`.'),
+  payments: z.number().int().describe('How many unverified payments are still held in this currency.'),
+});
+export type CurrencyUnverifiedDto = z.infer<typeof CurrencyUnverifiedDtoSchema>;
+
 /**
  * GET /api/v1/tenant/applications/:id/billing/stats, the Billing Overview
- * tiles. All amounts are integers in the smallest currency unit. MRR counts
- * ACTIVE recurring SUBSCRIPTION plans only (YEAR plans normalized to monthly
- * via floor(amount/12)); amounts in different currencies are never summed,
- * `mrrCents` reports the dominant currency and `mixedCurrencies` flags when
- * other currencies were present (the figure is partial).
+ * tiles. Money is reported per currency and never added across currencies:
+ * every list has one entry per currency, the Application's reporting currency
+ * first (present even at zero) and the others by code. There is no converted
+ * total. MRR counts ACTIVE subscriptions on recurring SUBSCRIPTION plans, each
+ * at its own price. Revenue counts verified payments only.
  */
 export const BillingStatsDtoSchema = z.object({
-  activeSubscriptions: z.number().int(),
-  pastDueSubscriptions: z.number().int(),
+  activeSubscriptions: z.number().int().describe('Subscriptions that are ACTIVE now.'),
+  pastDueSubscriptions: z.number().int().describe('Subscriptions that are PAST_DUE now.'),
   /** Subscriptions whose cancellation landed in the last 30 days. */
-  canceledLast30d: z.number().int(),
+  canceledLast30d: z.number().int().describe('Subscriptions whose cancellation landed in the last 30 days.'),
   /** Subscriptions created in the last 30 days (any status). */
-  newSubscriptionsLast30d: z.number().int(),
-  /** Monthly recurring revenue in the smallest unit of `mrrCurrency`. */
-  mrrCents: z.number().int(),
-  /** Currency of `mrrCents` (dominant across active plans); null when no MRR. */
-  mrrCurrency: z.string().nullable(),
-  /** True when active SUBSCRIPTION plans span more than one currency. */
-  mixedCurrencies: z.boolean(),
-  /** SUM(amount) of SUCCEEDED payments in the last 30 days. */
-  revenueLast30dCents: z.number().int(),
+  newSubscriptionsLast30d: z.number().int().describe('Subscriptions created in the last 30 days (any status).'),
+  /** Live subscriptions (ACTIVE, TRIALING or PAST_DUE) with no price of their own, on a plan that has a flat price. Each reports `price: null` and is not counted in `mrr`. It should be zero: only a subscription to a plan with no flat price goes without one. */
+  unpricedLiveSubscriptions: z.number().int().describe('Live subscriptions (ACTIVE, TRIALING or PAST_DUE) with no price of their own, on a plan that has a flat price. Each reports `price: null` and is not counted in `mrr`. It should be zero: only a subscription to a plan with no flat price goes without one.'),
+  /** `billingConfig.reportingCurrency`: the first entry of every list below. */
+  reportingCurrency: z.string().describe('`billingConfig.reportingCurrency`: the first entry of every list below.'),
+  mrr: z.array(CurrencyMrrDtoSchema).describe('Monthly recurring revenue, one entry per currency, the reporting currency first. Counts ACTIVE subscriptions at their own price; one with no price of its own is not counted (see `unpricedLiveSubscriptions`).'),
+  /** Verified payments, net of refunds. A refund counts against the day of the payment it refunds. */
+  revenueLast30d: z.array(CurrencyRevenueDtoSchema).describe('Verified payments, net of refunds. A refund counts against the day of the payment it refunds.'),
+  /**
+   * Unverified payments still held, of any age: only the currencies that have
+   * some, the reporting currency first. Empty when every charge was applied.
+   */
+  unverified: z.array(CurrencyUnverifiedDtoSchema).describe('Unverified payments still held, of any age: only the currencies that have some, the reporting currency first. Empty when every charge was applied.'),
+  /**
+   * Counts of every payment recorded in the last 30 days, across every
+   * currency, verified or not. A fully refunded payment is in neither.
+   */
   paymentsLast30d: z.object({
-    succeeded: z.number().int(),
-    failed: z.number().int(),
-  }),
-  /** Last 12 UTC calendar months (oldest first), gap-filled with zeroes. */
-  monthlyRevenue: z.array(MonthlyRevenuePointSchema),
+    succeeded: z.number().int().describe('Payments recorded as succeeded, partly refunded ones included, whether verified or not.'),
+    failed: z.number().int().describe('Payments recorded as failed.'),
+  }).describe('Counts of every payment recorded in the last 30 days, across every currency, verified or not: `succeeded` counts succeeded and partly refunded payments, including unverified ones that are not in `revenueLast30d`; `failed` counts every failed charge. A fully refunded payment is in neither.'),
+  /** Per currency, the last 12 UTC calendar months (oldest first), gap-filled with zeroes: verified payments, net of refunds. */
+  monthlyRevenue: z
+    .array(
+      z.object({
+        currency: z.string().describe('Upper-case ISO 4217.'),
+        months: z.array(MonthlyRevenuePointSchema).describe('Twelve points, oldest first.'),
+      }),
+    )
+    .describe('Per currency, the last 12 UTC calendar months (oldest first), gap-filled with zeroes: verified payments, net of refunds.'),
 });
 export type BillingStatsDto = z.infer<typeof BillingStatsDtoSchema>;
 
@@ -3211,13 +3898,16 @@ export interface EndUserExportSubscription {
     slug: string;
     name: string;
     kind: PlanKindType;
-    amount: number;
-    currency: string;
     interval: PlanIntervalType;
   };
+  /**
+   * What this subscription costs: the price its checkout, grant or import
+   * fixed. Null when the subscription has no price of its own.
+   */
+  price: { amount: number; currency: string } | null;
 }
 
-/** The full DSAR document. `exportVersion` is 1 today; bumps on shape changes. */
+/** The full DSAR document. `exportVersion` is 2 today; bumps on shape changes. */
 export interface EndUserExportDocument {
   exportVersion: number;
   exportedAt: string;
@@ -3319,6 +4009,44 @@ export interface EndUserExportDocument {
     ip: string | null;
   }>;
   /**
+   * Every support case opened on this user, open or closed. The operator's
+   * reason is left out, as a ban's is. Absent from an older API.
+   */
+  supportCases?: Array<{
+    id: string;
+    status: 'OPEN' | 'CLOSED';
+    capabilities: string[];
+    scope: 'USER' | 'DEVICES';
+    deviceIds: string[];
+    openedAt: string;
+    updatedAt: string;
+    closedAt: string | null;
+    closedCause: SupportCaseClosedCause | null;
+  }>;
+  /**
+   * The billing log's events about this user: checkouts opened, refused and
+   * completed, payments, refunds and what their subscriptions did. `data` is
+   * shaped per `type` by `BillingEventSchema`. The id of whoever acted is
+   * left out.
+   */
+  billingEvents: Array<{
+    id: string;
+    type: string;
+    occurredAt: string;
+    actorType: string;
+    subscriptionId: string | null;
+    checkoutSessionId: string | null;
+    paymentId: string | null;
+    refundId: string | null;
+    planId: string | null;
+    planPriceId: string | null;
+    couponId: string | null;
+    provider: string | null;
+    currency: string | null;
+    amount: number | null;
+    data: unknown;
+  }>;
+  /**
    * The contact at this user's address, with every list they joined and what
    * they submitted. Empty when the address is on no list. Absent from a
    * server older than lists.
@@ -3348,3 +4076,164 @@ export interface EndUserExportContact {
   }>;
   submissions: Array<{ listKey: string; fields: Record<string, unknown>; createdAt: string }>;
 }
+
+// ============================================================================
+// Billing log readers, reporting currency and the routing preview.
+// ============================================================================
+
+export {
+  BILLING_LOG_DEFAULT_LIMIT,
+  BILLING_LOG_ENTRY_TYPES_COMPLETE,
+  BILLING_LOG_INCLUDES,
+  BILLING_LOG_MAX_LIMIT,
+  BillingLogActorsSchema,
+  BillingLogEndUserSchema,
+  BillingLogOperatorSchema,
+  BillingLogEntrySchema,
+  BillingLogPageSchema,
+  BillingLogQuerySchema,
+  BillingOutboxStatusSchema,
+  BillingOutboxStuckRowSchema,
+  PriceFallbackGroupSchema,
+  PriceFallbackSummarySchema,
+  RECONCILIATION_MAX_FINDINGS,
+  ReconciliationFindingSchema,
+  ReconciliationReportSchema,
+  type BillingLogEntry,
+  type BillingLogActors,
+  type BillingLogEndUser,
+  type BillingLogInclude,
+  type BillingLogOperator,
+  type BillingLogPage,
+  type BillingLogQuery,
+  type BillingOutboxStatus,
+  type PriceFallbackSummary,
+  type ReconciliationFinding,
+  type ReconciliationReport,
+} from './billing-log.js';
+
+/** `GET` and `PUT /tenant/applications/:id/billing/reporting-currency`. */
+export const ReportingCurrencyDtoSchema = z.object({
+  /** Upper-case ISO 4217. */
+  reportingCurrency: z.string().describe('Upper-case ISO 4217.'),
+  /** The currency's English name, such as "US Dollar". */
+  name: z.string().describe('The currency\'s English name, such as "US Dollar".'),
+});
+export type ReportingCurrencyDto = z.infer<typeof ReportingCurrencyDtoSchema>;
+
+export const SetReportingCurrencyRequestSchema = z
+  .object({ reportingCurrency: z.string().regex(/^[A-Za-z]{3}$/) })
+  .strict();
+export type SetReportingCurrencyRequest = z.infer<typeof SetReportingCurrencyRequestSchema>;
+
+export const ROUTING_PROVIDER_REASONS = ['bound', 'named', 'country', 'only_capable', 'priority'] as const;
+
+/**
+ * `POST /tenant/applications/:id/billing/checkout/preview`: which price and
+ * provider a buyer in `country` would get, without opening a checkout.
+ *
+ * @example
+ * RoutingPreviewRequestSchema.parse({ country: 'IN', plan: 'pro' });
+ */
+export const RoutingPreviewRequestSchema = z
+  .object({
+    country: z.string().regex(/^[A-Za-z]{2}$/),
+    /** A plan's id or slug. Left out, every active plan is previewed. */
+    plan: z.string().min(1).max(200).optional(),
+    /**
+     * How the checkout would learn the country, which also says who opens it.
+     * `vouched`: a browser, with the country taken from a trusted proxy.
+     * `hint`: a browser that states its own country, which selects a local
+     * price only when local prices are open to any buyer. `declared`: the
+     * operator's server, with the secret key.
+     */
+    countrySource: z.enum(['declared', 'vouched', 'hint']).default('vouched'),
+    /** An end user, to preview what they would get given what they already pay for. */
+    endUserId: z.string().min(1).max(64).optional(),
+    /** A currency the server would name. Only a `declared` preview may name one, as at checkout. */
+    currency: z.string().regex(/^[A-Za-z]{3}$/).optional(),
+    /** What the previewed checkout would send. Left out, the Application's `billingConfig.onUnavailableCurrency` applies, as at checkout. */
+    onUnavailableCurrency: z.enum(['fallback', 'refuse']).optional(),
+    /** A provider the checkout would name. */
+    provider: z.string().min(1).max(40).optional(),
+    /** A coupon code the checkout would carry. Each item then says what it takes off, or why it is refused. */
+    couponCode: z.string().min(1).max(64).optional(),
+  })
+  .strict();
+export type RoutingPreviewRequest = z.infer<typeof RoutingPreviewRequestSchema>;
+
+const RoutingPreviewRefusalSchema = z.object({
+  code: z.string().describe('The error code checkout would answer with.'),
+  message: z.string().describe('What is wrong, for a person.'),
+  fix: z.string().nullable().describe('How to repair it, when there is a repair.'),
+});
+
+/**
+ * What the previewed coupon does to one plan's price. Exactly one of
+ * `discount` and `refusal` is set. A checkout carrying a refused coupon is
+ * itself refused, with this error.
+ */
+export const RoutingPreviewCouponSchema = z.object({
+  /** The code as stored when the coupon exists, as sent otherwise. */
+  code: z.string().describe('The code as stored when the coupon exists, as sent otherwise.'),
+  discount: z
+    .object({
+      /** Upper-case ISO 4217: the currency charged. */
+      currency: z.string().describe('Upper-case ISO 4217: the currency charged.'),
+      /** Smallest unit of `currency`. */
+      discountAmount: z.number().int().describe('Smallest unit of `currency`.'),
+      amountAfterDiscount: z.number().int().describe('What the buyer would pay, smallest unit of `currency`.'),
+      formatted: z
+        .object({
+          discount: z.string().describe('`discountAmount` written for a person.'),
+          total: z.string().describe('`amountAfterDiscount` written for a person.'),
+        })
+        .describe('`discountAmount` and `amountAfterDiscount` written for a person.'),
+    })
+    .nullable().describe('What the coupon takes off the price charged. Null when the coupon is refused.'),
+  refusal: RoutingPreviewRefusalSchema.nullable().describe('The error a checkout carrying this coupon would answer with. Null when the coupon applies.'),
+});
+export type RoutingPreviewCoupon = z.infer<typeof RoutingPreviewCouponSchema>;
+
+export const RoutingPreviewItemSchema = z.object({
+  plan: z
+    .object({
+      id: z.string(),
+      slug: z.string().describe('The plan slug.'),
+      name: z.string().describe('Display name.'),
+      kind: z.string().describe('SUBSCRIPTION, LICENSE, USAGE or CREDIT.'),
+    })
+    .describe('The plan previewed.'),
+  /** The price checkout would charge. Null for a plan with no flat price, and when checkout would refuse. */
+  price: ResolvedPriceDtoSchema.nullable().describe('The price checkout would charge. Null for a plan with no flat price, and when checkout would refuse.'),
+  /** Set when the price selected first cannot be charged and the default price is charged instead. */
+  priceFallback: PriceFallbackDtoSchema.nullable().describe('Set when the price selected first cannot be charged and the default price is charged instead.'),
+  /** The provider that would charge. Null when checkout would refuse. */
+  provider: z.string().nullable().describe('The provider that would charge. Null when checkout would refuse.'),
+  /**
+   * Why that provider: the buyer is already `bound` to it, the caller `named`
+   * it, it lists the buyer's `country`, it is the `only_capable` one for the
+   * currency, or it has the best `priority` among those that can charge.
+   */
+  providerReason: z.enum(ROUTING_PROVIDER_REASONS).nullable().describe('Why that provider: the buyer is already `bound` to it, the caller `named` it, it lists the buyer\'s `country`, it is the `only_capable` one for the currency, or it has the best `priority` among those that can charge.'),
+  /** The refusal checkout would answer with, when it would refuse whatever the coupon. */
+  refusal: RoutingPreviewRefusalSchema.nullable().describe('The refusal checkout would answer with, when it would refuse whatever the coupon.'),
+  /** Null when the request named no coupon, and when `refusal` is set. */
+  coupon: RoutingPreviewCouponSchema.nullable().describe('Null when the request named no coupon, and when `refusal` is set.'),
+  /** One sentence for a person: who pays what, through whom, and why. */
+  summary: z.string().describe('One sentence for a person: who pays what, through whom, and why.'),
+});
+export type RoutingPreviewItem = z.infer<typeof RoutingPreviewItemSchema>;
+
+export const RoutingPreviewDtoSchema = z.object({
+  country: z.string().describe('The country previewed, upper-case ISO 3166-1 alpha-2.'),
+  countrySource: z.enum(['declared', 'vouched', 'hint']).describe('How the previewed checkout would learn the country.'),
+  /** The Application's rule for local prices, which decides what a `hint` can select. */
+  localPrices: z.enum(['trusted', 'any']).describe('The Application\'s rule for local prices, which decides what a `hint` can select.'),
+  /** The rule this preview applied to a named `currency` nobody can charge: the request's own, else the Application's default. */
+  onUnavailableCurrency: z
+    .enum(['fallback', 'refuse'])
+    .describe('The rule this preview applied to a named `currency` nobody can charge: the request\'s own, else the Application\'s default.'),
+  items: z.array(RoutingPreviewItemSchema).describe('One entry per plan previewed.'),
+});
+export type RoutingPreviewDto = z.infer<typeof RoutingPreviewDtoSchema>;

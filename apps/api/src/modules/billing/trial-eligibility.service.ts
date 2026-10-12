@@ -456,6 +456,15 @@ export interface TrialEligibilityItem {
   redeemedAt: string | null;
   /** When the in-progress trial ends, for `TRIAL_IN_PROGRESS`. */
   endsAt: string | null;
+  /** The provider the answer was resolved against, on a recurring plan that offers a trial. */
+  provider?: string;
+}
+
+/** The provider one plan's checkout would go to, and whether it runs trials. */
+export interface TrialProvider {
+  provider: string;
+  /** `capabilities.trials` for `provider`; fail-closed when undeclared. */
+  runsTrials: boolean;
 }
 
 /**
@@ -470,7 +479,17 @@ export interface TrialEligibilityItem {
  *
  * Provider-dependent, and the caller is told which provider was resolved: a
  * plan can be unbuyable on one processor and fine on another, so a provider
- * picker should re-read this when the buyer changes it.
+ * picker should re-read this when the buyer changes it. Each plan is judged
+ * against its own provider where `providerByPlan` names one: with a provider
+ * per currency, the catalogue's default can be one that cannot run trials
+ * while this plan's checkout goes to one that can.
+ *
+ * @example
+ * const items = await resolveTrialEligibility({
+ *   applicationId, plans, subjectKey, policy: 'once_per_application',
+ *   provider: 'paypal', providerRunsTrials: false,
+ *   providerByPlan: new Map([['pro-inr', { provider: 'razorpay', runsTrials: true }]]),
+ * });
  */
 export async function resolveTrialEligibility(args: {
   applicationId: string;
@@ -480,6 +499,8 @@ export async function resolveTrialEligibility(args: {
   provider: string;
   /** `capabilities.trials` for `provider`; fail-closed when undeclared. */
   providerRunsTrials: boolean;
+  /** By plan slug: the provider that plan's own checkout would go to. A plan not in it uses `provider`. */
+  providerByPlan?: ReadonlyMap<string, TrialProvider>;
   now?: Date;
 }): Promise<TrialEligibilityItem[]> {
   const now = args.now ?? new Date();
@@ -508,21 +529,26 @@ export async function resolveTrialEligibility(args: {
   }
 
   return args.plans.map((plan) => {
-    const base = { planSlug: plan.slug, trialDays: plan.trialDays ?? null };
+    const own = args.providerByPlan?.get(plan.slug);
+    const runsTrials = own?.runsTrials ?? args.providerRunsTrials;
+    const identity = { planSlug: plan.slug, trialDays: plan.trialDays ?? null };
 
     // 1. No trial to offer. Checked first because `resolveCheckoutTrial`
     //    returns null on `trialDays <= 0` before it can refuse anything else,
     //    so nothing below is reachable for such a plan.
     if (plan.trialDays == null || plan.trialDays <= 0) {
-      return { ...base, eligible: false, reason: 'PLAN_HAS_NO_TRIAL' as const, redeemedAt: null, endsAt: null };
+      return { ...identity, eligible: false, reason: 'PLAN_HAS_NO_TRIAL' as const, redeemedAt: null, endsAt: null };
     }
+    // A one-off purchase cannot carry a trial at any provider, so only a
+    // recurring plan's answer names the provider it depended on.
+    const base = isOneTimePlan(plan) ? identity : { ...identity, provider: own?.provider ?? args.provider };
 
     // 2. The plan carries a trial this checkout could never honour, so it is
     //    currently UNBUYABLE, checkout answers 400, not a price. Reported
     //    separately from "no trial for you" so a frontend hides the plan
     //    instead of offering a price that leads to a 400, and so the operator
     //    surface can say what is misconfigured.
-    if (isOneTimePlan(plan) || !args.providerRunsTrials) {
+    if (isOneTimePlan(plan) || !runsTrials) {
       return {
         ...base,
         eligible: false,

@@ -76,17 +76,17 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
           // deterministic failure body the description promises.
           200: ok(ref('LicenseVerifyResult'), 'Verification outcome, check `ok` before `license`.'),
           ...errs({
-            400: 'VALIDATION_ERROR — the body failed schema validation.',
+            400: 'VALIDATION_ERROR: the body failed schema validation.',
             401:
-              'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, malformed, or ' +
-              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID — the publishable key is ' +
+              'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, malformed, or ' +
+              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID: the publishable key is ' +
               'unknown or has rotated out.',
             403:
-              "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or " +
-              "ORIGIN_NOT_ALLOWED — the Origin is outside the publishable key's CORS allowlist; " +
-              'or BILLING_DISABLED — billing is not enabled for this application; or ' +
-              'API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `billing:write` scope.',
-            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+              "IP_NOT_ALLOWED: caller IP outside the secret key's allowlist; or " +
+              "ORIGIN_NOT_ALLOWED: the Origin is outside the publishable key's CORS allowlist; " +
+              'or BILLING_DISABLED: billing is not enabled for this application; or ' +
+              'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks the `billing:write` scope.',
+            429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
           }),
         },
       },
@@ -128,17 +128,17 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
         response: {
           200: ok(ref('LicenseDeactivateResult'), 'Outcome, check `ok` before `released`.'),
           ...errs({
-            400: 'VALIDATION_ERROR — the body failed schema validation.',
+            400: 'VALIDATION_ERROR: the body failed schema validation.',
             401:
-              'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, malformed, or ' +
-              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID — the publishable key is ' +
+              'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, malformed, or ' +
+              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID: the publishable key is ' +
               'unknown or has rotated out.',
             403:
-              "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or " +
-              "ORIGIN_NOT_ALLOWED — the Origin is outside the publishable key's CORS allowlist; " +
-              'or BILLING_DISABLED — billing is not enabled for this application; or ' +
-              'API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `billing:write` scope.',
-            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+              "IP_NOT_ALLOWED: caller IP outside the secret key's allowlist; or " +
+              "ORIGIN_NOT_ALLOWED: the Origin is outside the publishable key's CORS allowlist; " +
+              'or BILLING_DISABLED: billing is not enabled for this application; or ' +
+              'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks the `billing:write` scope.',
+            429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
           }),
         },
       },

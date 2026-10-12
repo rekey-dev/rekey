@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   registerGracefulShutdown(app);
   try {
     await app.listen({ host: env.HOST, port: env.PORT });
-    app.log.info(`rekey-api listening on http://${env.HOST}:${env.PORT} — docs at /docs`);
+    app.log.info(`rekey-api listening on http://${env.HOST}:${env.PORT}, docs at /docs`);
   } catch (err) {
     app.log.error({ err }, 'failed to start');
     process.exit(1);

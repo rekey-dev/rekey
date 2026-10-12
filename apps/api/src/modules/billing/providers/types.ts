@@ -15,7 +15,28 @@
  * from `test/fakes/billing-providers.ts`.
  */
 
-import type { Plan, EndUser, Subscription } from '@prisma/client';
+import type { Plan, EndUser, Prisma, Subscription } from '@prisma/client';
+
+/**
+ * A plan as one checkout charges it: `amount` and `currency` are the price
+ * selected, taken from the `PlanPrice` row `planPriceId` names. The plan's own
+ * price columns are not part of this type.
+ *
+ * `registration` is the metadata object holding THAT price's provider ids
+ * (`stripe.priceId`, `paypal.planId`, `razorpay.planId`). Adapters read
+ * provider ids from it and never from `metadata`. Build one with `pricedPlan`
+ * in `billing/priced-plan.ts`.
+ */
+export type PricedPlan = Omit<Plan, 'amount' | 'currency' | 'pricePerUnitCents'> & {
+  /** Minor units of `currency`. 0 for a plan with no flat price. */
+  amount: number;
+  currency: string;
+  /** The price row charged. Null only for a plan with no flat price. */
+  planPriceId: string | null;
+  /** Whether that row is the plan's default price. */
+  isDefaultPrice: boolean;
+  registration: Prisma.JsonValue;
+};
 
 /** A provider-side identifier (Stripe `price_*`, PayPal plan id, etc.). */
 export interface ProviderPlanRef {
@@ -55,7 +76,7 @@ export interface CheckoutDiscount {
 export interface CheckoutSessionInput {
   application: { id: string; slug: string };
   endUser: EndUser;
-  plan: Plan;
+  plan: PricedPlan;
   /** Where the customer's site wants the user sent on success / cancellation. */
   successUrl: string;
   cancelUrl: string;
@@ -346,6 +367,22 @@ export interface ExternalSubscription {
 }
 
 /**
+ * What a provider holds for our webhook.
+ *
+ * - `registered`: it exists at our URL, is active, and has every event we consume.
+ * - `missing`: nothing by the stored id, or at our URL, on this account.
+ * - `wrong_url`: the stored id points somewhere else.
+ * - `disabled`: it exists and the provider has switched it off.
+ * - `missing_events`: it exists and lacks events whose handlers complete purchases.
+ */
+export type WebhookInspection =
+  | { state: 'registered' }
+  | { state: 'missing' }
+  | { state: 'wrong_url'; url: string }
+  | { state: 'disabled' }
+  | { state: 'missing_events'; events: string[] };
+
+/**
  * The methods every BillingProvider must implement. Synchronous failures
  * should throw `RekeyError` with a `BILLING_*` code; asynchronous state
  * changes (subscription activated, payment succeeded) flow through the
@@ -359,9 +396,10 @@ export interface BillingProvider {
    * Bootstrap a provider-side Plan record from our local Plan row. Called
    * by the admin "create plan" flow. Stripe creates a `Product` + `Price`;
    * PayPal creates a `Plan`; Razorpay creates a `Plan`. Returns the
-   * provider id we store back into `Plan.metadata`.
+   * provider id we store back into `Plan.metadata`, or into
+   * `PlanPrice.metadata` for an additional price.
    */
-  ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef>;
+  ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef>;
 
   /**
    * Mint a hosted-checkout session for a RECURRING subscription. Returns a
@@ -449,6 +487,14 @@ export interface BillingProvider {
    * Optional, providers without a create-webhook API (Razorpay) omit it.
    */
   registerWebhook?(publicUrl: string): Promise<{ secret?: string; webhookId?: string }>;
+
+  /**
+   * Ask the provider what it holds for the webhook at `publicUrl`, using the
+   * stored credentials. This is how readiness proves a webhook exists without
+   * waiting for a paid event. Optional: Razorpay has no API to read one.
+   * Throws when the provider cannot be asked (refused credentials, outage).
+   */
+  inspectWebhook?(publicUrl: string): Promise<WebhookInspection>;
 
   /** Cancel a subscription. Default = at period end. */
   cancelSubscription(input: CancelSubscriptionInput): Promise<void>;

@@ -20,7 +20,8 @@ import { getApplication } from '@/lib/api';
 import { hasScope } from '@/lib/operator-scopes';
 import { actorLabel, humanizeEventType } from '@/lib/security-events';
 import { formatDate, formatDateTime } from '@/lib/date';
-import { formatMoney, plural } from '@/lib/format';
+import { plural } from '@/lib/format';
+import { subscriptionPriceLabel } from '@/lib/subscription-price';
 import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
@@ -114,9 +115,7 @@ export default async function EndUserOverviewPage({
   const planFooter = !canReadBilling
     ? NOT_VISIBLE
     : live
-      ? `${formatMoney(live.plan.amount, live.plan.currency)}${
-          live.plan.interval ? ` / ${live.plan.interval.toLowerCase()}` : ''
-        } · ${live.status.toLowerCase()}`
+      ? `${subscriptionPriceLabel(live)} · ${live.status.toLowerCase()}`
       : billing === null
         ? 'billing could not be read'
         : defaultPlanSlug

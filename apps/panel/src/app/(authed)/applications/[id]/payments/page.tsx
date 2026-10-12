@@ -8,11 +8,11 @@ import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
-import { StatusPill } from '@/components/StatusPill';
+import { StatusPill, statusLabel } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 
-const STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] as const;
+const STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED', 'PARTIALLY_REFUNDED', 'REFUNDED'] as const;
 type PaymentStatus = (typeof STATUSES)[number];
 
 const inputCls =
@@ -97,7 +97,7 @@ export default async function PaymentsPage({
       <SectionHeader
         title="Payments"
         count={`(${payments.length === 0 ? 0 : `${offset + 1}–${offset + payments.length}`})`}
-        description="Every payment recorded for this application: subscription invoices and one-time charges, newest first. Amounts are what the provider settled, after any coupon discount."
+        description="Every payment recorded for this application: subscription invoices and one-time charges, newest first. Amounts are what the provider settled, after any coupon discount, each in its own currency. Open a payment for whether it was verified, its refunds, its history, and to refund it."
       />
 
       <form className="flex flex-wrap items-end gap-2">
@@ -107,7 +107,7 @@ export default async function PaymentsPage({
             <option value="">All statuses</option>
             {STATUSES.map((s) => (
               <option key={s} value={s}>
-                {s}
+                {statusLabel(s)}
               </option>
             ))}
           </select>
@@ -146,12 +146,13 @@ export default async function PaymentsPage({
           }
         />
       ) : (
-        <Table minWidth="min-w-[56rem]">
+        <Table minWidth="min-w-[62rem]">
           <THead>
             <TR>
               <TH sort={sortTH('createdAt')}>When</TH>
               <TH>End-user</TH>
               <TH align="right" sort={sortTH('amount')}>Amount</TH>
+              <TH align="right">Refunded</TH>
               <TH sort={sortTH('status')}>Status</TH>
               <TH>Description</TH>
               <TH>Provider payment id</TH>
@@ -161,7 +162,12 @@ export default async function PaymentsPage({
             {payments.map((p) => (
               <TR key={p.id} hover>
                 <TD muted className="whitespace-nowrap text-xs">
-                  {formatDateTime(p.createdAt)}
+                  <Link
+                    href={`/applications/${id}/payments/${encodeURIComponent(p.id)}`}
+                    className="underline decoration-[var(--color-border)] underline-offset-2 hover:text-[var(--color-fg)]"
+                  >
+                    {formatDateTime(p.createdAt)}
+                  </Link>
                 </TD>
                 <TD>
                   {p.endUserId && p.endUserEmail ? (
@@ -177,6 +183,9 @@ export default async function PaymentsPage({
                 </TD>
                 <TD align="right" mono>
                   {formatMoney(p.amount, p.currency)}
+                </TD>
+                <TD align="right" mono className="text-xs">
+                  {p.refundedAmount > 0 ? formatMoney(p.refundedAmount, p.currency) : ''}
                 </TD>
                 <TD>
                   <StatusPill status={p.status} />

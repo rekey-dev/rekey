@@ -11,10 +11,12 @@
  * max 200). The overview rolls up counts in parallel with `Promise.all`.
  */
 
-import type { AppEnvironment } from '@rekey.dev/shared-types';
+import type { AdminPaymentRowDto, AdminSubscriptionRowDto, AppEnvironment } from '@rekey.dev/shared-types';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { cachedDashboard } from '../../lib/dashboard-cache.js';
+import { mrrByApplicationAndCurrency, platformMrrByCurrency, tenantsRankedByMrr, type CurrencyMrr } from '../billing/mrr.js';
+import { configuredCurrency, rankCurrencies } from './currency-totals.js';
 import { paged, type Paged } from '../../lib/pagination.js';
 import { getRedis } from '../../lib/redis.js';
 import {
@@ -107,20 +109,30 @@ export interface OverviewMetrics {
     expired: number;
     total: number;
   };
-  /** Succeeded and partly refunded payments; volume is net of refunds. */
+  /**
+   * Verified succeeded and partly refunded payments. The counts cover every
+   * currency. Volume is per currency only, net of refunds, in `byCurrency`:
+   * there is no total across currencies. The 24-hour counts are of what the
+   * providers reported, verified or not.
+   */
   payments: {
-    lifetime: { count: number; volumeCents: number };
-    last30d: { count: number; volumeCents: number };
+    lifetime: { count: number };
+    last30d: { count: number };
+    /** One entry per currency, most payments first, then by code. */
+    byCurrency: PaymentCurrencyTotals[];
+    /**
+     * Charges recorded and not applied, still held, of any age: per currency,
+     * net of refunds, by code. Never inside `byCurrency` or MRR.
+     */
+    unverified: Array<{ currency: string; amountCents: number; payments: number }>;
     succeededLast24h: number;
     failedLast24h: number;
   };
-  mrrCents: number;
   /**
-   * `true` when `computeMrrCents()` saturated its `take:` cap and the value is
-   * therefore a lower bound, not the truth. UI surfaces a warning when set so
-   * the operator doesn't trust a silently-undercounted MRR.
+   * MRR per currency, most active subscriptions first, then by code. See
+   * `modules/billing/mrr.ts` for the definition. Never added across currencies.
    */
-  mrrCapped: boolean;
+  mrrByCurrency: MrrCurrencyTotals[];
   webhooks: { eventsLast24h: number; deliveriesLast24h: number; deliveriesFailedLast24h: number };
   apiRequests: { last24h: number; errors4xxLast24h: number; errors5xxLast24h: number; avgDurationMs: number };
   tenantUsers: { total: number; activeLast30d: number };
@@ -137,26 +149,29 @@ export interface OverviewMetrics {
   emailLast24h: { sent: number; error: number; noTransport: number; total: number };
 }
 
-/** Max active subs we read for MRR computation in a single call. */
-const MRR_READ_CAP = 10_000;
+/** MRR in one currency, smallest currency unit. */
+export interface MrrCurrencyTotals {
+  /** Upper-case ISO 4217. */
+  currency: string;
+  mrrCents: number;
+  /** ACTIVE subscriptions on recurring plans priced in this currency. */
+  activeSubscriptions: number;
+}
 
-async function computeMrrCents(): Promise<{ totalCents: number; capped: boolean }> {
-  // ACTIVE subscriptions, joined to their plan. Convert YEAR pricing to monthly.
-  // Cap the read at a sane page size, a deployment with MRR_READ_CAP+ active
-  // subs would want a materialised total, but we're not there. We return
-  // `capped: true` so the caller can surface a "this is a lower bound" warning
-  // instead of silently undercounting forever once we cross the threshold.
-  const rows = await prisma.subscription.findMany({
-    where: { status: 'ACTIVE' },
-    select: { plan: { select: { amount: true, interval: true } } },
-    take: MRR_READ_CAP,
-  });
-  let total = 0;
-  for (const r of rows) {
-    if (!r.plan) continue;
-    total += r.plan.interval === 'YEAR' ? Math.floor(r.plan.amount / 12) : r.plan.amount;
-  }
-  return { totalCents: total, capped: rows.length === MRR_READ_CAP };
+/** Net payment volume in one currency, smallest currency unit. */
+export interface PaymentCurrencyTotals {
+  /** Upper-case ISO 4217. */
+  currency: string;
+  lifetime: { count: number; volumeCents: number };
+  last30d: { count: number; volumeCents: number };
+}
+
+
+/** Volume is verified money: a charge recorded and not applied is reported apart, as unverified. */
+const COUNTED_AS_VOLUME = Prisma.sql`"status" <> 'FAILED' AND "verification" = 'VERIFIED'`;
+
+function asMrrTotals(m: CurrencyMrr): MrrCurrencyTotals {
+  return { currency: m.currency, mrrCents: m.mrrMinor, activeSubscriptions: m.activeSubscriptions };
 }
 
 /**
@@ -177,28 +192,54 @@ async function countByApplication(
   return new Map(rows.map((r) => [r.application_id, Number(r.n)]));
 }
 
-/**
- * ACTIVE subscriptions per application, with their monthly recurring value
- * (YEAR plans at a twelfth, floored per subscription as before), in one query.
- */
-async function activeSubscriptionsByApplication(
-  ids: string[],
-): Promise<Map<string, { count: number; mrrCents: number }>> {
+/** ACTIVE subscriptions per application on any plan kind, one grouped query. */
+async function activeSubscriptionsByApplication(ids: string[]): Promise<Map<string, number>> {
   if (ids.length === 0) return new Map();
-  const rows = await prisma.$queryRaw<
-    Array<{ application_id: string; n: bigint; mrr: bigint | null }>
-  >(Prisma.sql`
-    SELECT s."application_id",
-           count(*) AS n,
-           sum(CASE WHEN p."interval" = 'YEAR' THEN p."amount" / 12 ELSE p."amount" END) AS mrr
-    FROM "subscriptions" s
-    JOIN "plans" p ON p."id" = s."plan_id"
-    WHERE s."status" = 'ACTIVE' AND s."application_id" = ANY(${ids}::text[])
-    GROUP BY s."application_id"
+  const rows = await prisma.$queryRaw<Array<{ application_id: string; n: bigint }>>(Prisma.sql`
+    SELECT "application_id", count(*) AS n
+    FROM "subscriptions"
+    WHERE "status" = 'ACTIVE' AND "application_id" = ANY(${ids}::text[])
+    GROUP BY "application_id"
   `);
-  return new Map(
-    rows.map((r) => [r.application_id, { count: Number(r.n), mrrCents: Number(r.mrr ?? 0) }]),
-  );
+  return new Map(rows.map((r) => [r.application_id, Number(r.n)]));
+}
+
+/** MRR per currency for each application, from the one MRR definition. */
+async function mrrCurrenciesByApplication(ids: string[]): Promise<Map<string, MrrCurrencyTotals[]>> {
+  const byApplication = new Map<string, MrrCurrencyTotals[]>();
+  for (const r of await mrrByApplicationAndCurrency(ids)) {
+    const entries = byApplication.get(r.applicationId) ?? [];
+    entries.push({ currency: r.currency, mrrCents: r.mrrMinor, activeSubscriptions: r.activeSubscriptions });
+    byApplication.set(r.applicationId, entries);
+  }
+  return byApplication;
+}
+
+/** Add per-currency MRR entries together, currency by currency. */
+function mergeMrrCurrencies(lists: ReadonlyArray<readonly MrrCurrencyTotals[]>): MrrCurrencyTotals[] {
+  const merged = new Map<string, MrrCurrencyTotals>();
+  for (const e of lists.flat()) {
+    const seen = merged.get(e.currency);
+    merged.set(e.currency, {
+      currency: e.currency,
+      mrrCents: (seen?.mrrCents ?? 0) + e.mrrCents,
+      activeSubscriptions: (seen?.activeSubscriptions ?? 0) + e.activeSubscriptions,
+    });
+  }
+  return [...merged.values()];
+}
+
+/** One currency's row of the overview payment rollup, as Postgres returns it in JSON. */
+interface PaymentCurrencyRow {
+  currency: string;
+  lifetime_count: number;
+  lifetime_sum: number;
+  last30_count: number;
+  last30_sum: number;
+  unverified_count: number;
+  unverified_sum: number;
+  succeeded_24h: number;
+  failed_24h: number;
 }
 
 /** API requests per application since `since`, one grouped query. */
@@ -235,7 +276,7 @@ async function lastRequestByApplication(ids: string[]): Promise<Map<string, Date
 
 export const adminMetricsService = {
   /**
-   * The deployment rollup. Cached in Redis for 60s under `rk:admin:overview`
+   * The deployment rollup. Cached in Redis for 60s under `rk:admin:overview:v2`
    * (lib/dashboard-cache.ts): it counts the largest tables whole, the console
    * reloads it on every visit, and a minute of lag on a rollup is harmless.
    * `computeOverview` is the uncached read.
@@ -253,18 +294,29 @@ export const adminMetricsService = {
     // The plain counts are one statement: each table scanned once, its
     // numbers taken with `count(*) FILTER (...)`. This used to be 22 separate
     // count queries fired at once, which alone could hold most of the pool.
-    const [countsRows, subsGrouped, mrrCents, tenantUsersActive30d, lockedAccountsCount, emailGrouped24h] =
+    const [countsRows, subsGrouped, platformMrr, tenantUsersActive30d, lockedAccountsCount, emailGrouped24h] =
       await Promise.all([
-        prisma.$queryRaw<Array<Record<string, bigint | number | null>>>(Prisma.sql`
+        prisma.$queryRaw<
+          Array<Record<string, bigint | number | null> & { pay_by_currency: PaymentCurrencyRow[] | null }>
+        >(Prisma.sql`
           SELECT
             t.total AS tenants_total, t.new_30d AS tenants_new_30d,
             a.total AS apps_total, a.new_30d AS apps_new_30d,
             eu.total AS eu_total, eu.verified AS eu_verified,
             eu.new_24h AS eu_new_24h, eu.new_7d AS eu_new_7d, eu.new_30d AS eu_new_30d,
             o.total AS orgs_total, o.new_30d AS orgs_new_30d,
-            p.lifetime_count AS pay_lifetime_count, p.lifetime_sum AS pay_lifetime_sum,
-            p.last30_count AS pay_last30_count, p.last30_sum AS pay_last30_sum,
-            p.succeeded_24h AS pay_succeeded_24h, p.failed_24h AS pay_failed_24h,
+            (SELECT json_agg(p) FROM
+              (SELECT upper("currency") AS currency,
+                      count(*) FILTER (WHERE ${COUNTED_AS_VOLUME}) AS lifetime_count,
+                      coalesce(sum("amount" - "refunded_amount") FILTER (WHERE ${COUNTED_AS_VOLUME}), 0) AS lifetime_sum,
+                      count(*) FILTER (WHERE ${COUNTED_AS_VOLUME} AND "created_at" >= ${since30d}) AS last30_count,
+                      coalesce(sum("amount" - "refunded_amount") FILTER (WHERE ${COUNTED_AS_VOLUME} AND "created_at" >= ${since30d}), 0) AS last30_sum,
+                      count(*) FILTER (WHERE "status" <> 'FAILED' AND "verification" = 'UNVERIFIED') AS unverified_count,
+                      coalesce(sum("amount" - "refunded_amount") FILTER (WHERE "status" <> 'FAILED' AND "verification" = 'UNVERIFIED'), 0) AS unverified_sum,
+                      count(*) FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since24h}) AS succeeded_24h,
+                      count(*) FILTER (WHERE "status" = 'FAILED' AND "created_at" >= ${since24h}) AS failed_24h
+                 FROM "payments" WHERE "status" IN ('SUCCEEDED', 'PARTIALLY_REFUNDED', 'FAILED')
+                GROUP BY 1) p) AS pay_by_currency,
             (SELECT count(*) FROM "webhook_events" WHERE "received_at" >= ${since24h}) AS wh_events_24h,
             wd.total AS wh_deliveries_24h, wd.failed AS wh_deliveries_failed_24h,
             r.total AS req_24h, r.e4 AS req_4xx_24h, r.e5 AS req_5xx_24h, r.avg_ms AS req_avg_ms,
@@ -283,13 +335,6 @@ export const adminMetricsService = {
                FROM "end_users") eu,
             (SELECT count(*) AS total, count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
                FROM "organizations") o,
-            (SELECT count(*) FILTER (WHERE "status" <> 'FAILED') AS lifetime_count,
-                    sum("amount" - "refunded_amount") FILTER (WHERE "status" <> 'FAILED') AS lifetime_sum,
-                    count(*) FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since30d}) AS last30_count,
-                    sum("amount" - "refunded_amount") FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since30d}) AS last30_sum,
-                    count(*) FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since24h}) AS succeeded_24h,
-                    count(*) FILTER (WHERE "status" = 'FAILED' AND "created_at" >= ${since24h}) AS failed_24h
-               FROM "payments" WHERE "status" IN ('SUCCEEDED', 'PARTIALLY_REFUNDED', 'FAILED')) p,
             (SELECT count(*) AS total, count(*) FILTER (WHERE "status" = 'FAILED') AS failed
                FROM "webhook_deliveries" WHERE "created_at" >= ${since24h}) wd,
             (SELECT count(*) AS total,
@@ -299,7 +344,7 @@ export const adminMetricsService = {
                FROM "api_request_logs" WHERE "created_at" >= ${since24h}) r
         `),
         prisma.subscription.groupBy({ by: ['status'], _count: { _all: true } }),
-        computeMrrCents(),
+        platformMrrByCurrency(),
         // "Active" operator = had a refresh token created in the last 30 days.
         // Equivalent of a sign-in event since refresh rotation also writes here.
         prisma.tenantUser.count({
@@ -315,8 +360,26 @@ export const adminMetricsService = {
           _count: { _all: true },
         }),
       ]);
-    const c = countsRows[0] ?? {};
+    const { pay_by_currency: paymentRows, ...c } = countsRows[0] ?? { pay_by_currency: null };
     const num = (k: string): number => Number(c[k] ?? 0);
+
+    // Counts are of payments in any currency. Volumes stay per currency:
+    // adding rupees to dollars produces a number in neither.
+    const paymentCurrencies = paymentRows ?? [];
+    const paymentCount = (k: 'lifetime_count' | 'last30_count' | 'succeeded_24h' | 'failed_24h'): number =>
+      paymentCurrencies.reduce((n, r) => n + Number(r[k]), 0);
+    const paymentsByCurrency = rankCurrencies(
+      paymentCurrencies
+        .filter((r) => Number(r.lifetime_count) > 0)
+        .map(
+          (r): PaymentCurrencyTotals => ({
+            currency: r.currency,
+            lifetime: { count: Number(r.lifetime_count), volumeCents: Number(r.lifetime_sum) },
+            last30d: { count: Number(r.last30_count), volumeCents: Number(r.last30_sum) },
+          }),
+        ),
+      (e) => e.lifetime.count,
+    );
 
     // Roll the email grouping into the overview's tiny rollup shape. Full
     // detail lives behind `/api/v1/admin/metrics/email-deliverability`.
@@ -363,13 +426,17 @@ export const adminMetricsService = {
         total: Object.values(subsByStatus).reduce((a, b) => a + b, 0),
       },
       payments: {
-        lifetime: { count: num('pay_lifetime_count'), volumeCents: num('pay_lifetime_sum') },
-        last30d: { count: num('pay_last30_count'), volumeCents: num('pay_last30_sum') },
-        succeededLast24h: num('pay_succeeded_24h'),
-        failedLast24h: num('pay_failed_24h'),
+        lifetime: { count: paymentCount('lifetime_count') },
+        last30d: { count: paymentCount('last30_count') },
+        byCurrency: paymentsByCurrency,
+        unverified: paymentCurrencies
+          .filter((r) => Number(r.unverified_count) > 0)
+          .map((r) => ({ currency: r.currency, amountCents: Number(r.unverified_sum), payments: Number(r.unverified_count) }))
+          .sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0)),
+        succeededLast24h: paymentCount('succeeded_24h'),
+        failedLast24h: paymentCount('failed_24h'),
       },
-      mrrCents: mrrCents.totalCents,
-      mrrCapped: mrrCents.capped,
+      mrrByCurrency: rankCurrencies(platformMrr.map(asMrrTotals), (e) => e.activeSubscriptions),
       webhooks: {
         eventsLast24h: num('wh_events_24h'),
         deliveriesLast24h: num('wh_deliveries_24h'),
@@ -514,8 +581,19 @@ export const adminMetricsService = {
     };
   },
 
+  /**
+   * `sort: 'mrr'` orders the whole set in SQL by MRR in ONE currency
+   * (`currency`, or the platform's headline currency when none is named),
+   * ties broken by id, and only then cuts the page: amounts in different
+   * currencies cannot be ranked against each other, and a page cut before the
+   * sort would rank only the newest tenants. A tenant with no MRR in that
+   * currency sorts as zero. `sortedByMrrIn` names the currency used.
+   */
   async tenants(
-    query: ListQuery<'createdAt' | 'name' | 'mrrCents' | 'endUserCount' | 'applicationCount' | 'lastActivityAt'> = {},
+    query: ListQuery<'createdAt' | 'name' | 'mrr' | 'endUserCount' | 'applicationCount' | 'lastActivityAt'> & {
+      /** The currency `sort: 'mrr'` ranks in. ISO 4217, any case. */
+      currency?: string | undefined;
+    } = {},
   ): Promise<
     Page<{
       id: string;
@@ -525,12 +603,15 @@ export const adminMetricsService = {
       endUserCount: number;
       organizationCount: number;
       activeSubscriptions: number;
-      mrrCents: number;
-      /** Always false since the per-tenant MRR is summed in SQL; kept for clients that read it. */
-      mrrCapped: boolean;
+      /**
+       * The tenant's MRR per currency, never added together. First the
+       * currency one of its applications reports in when it has MRR there,
+       * else the one with the most active subscriptions.
+       */
+      mrrByCurrency: MrrCurrencyTotals[];
       createdAt: string;
       lastActivityAt: string | null;
-    }>
+    }> & { sortedByMrrIn: string | null }
   > {
     const limit = clampLimit(query.limit);
     const offset = clampOffset(query.offset);
@@ -546,47 +627,59 @@ export const adminMetricsService = {
           ],
         }
       : {};
-    // When sorting on a computed field (MRR / endUserCount / applicationCount /
-    // lastActivityAt) we need to enrich more than `limit` rows before sorting,
-    // otherwise top-N by MRR could be wrong if the top earners are older.
+    const order = query.order ?? 'desc';
+    const sortByMrr = query.sort === 'mrr';
+    const ranking = sortByMrr
+      ? await tenantsRankedByMrr({
+          currency: query.currency?.trim().toUpperCase(),
+          order,
+          limit,
+          offset,
+          search: q === '' ? undefined : q,
+        })
+      : null;
+    const rankedIds = ranking?.ids ?? null;
+    // The other computed sorts (endUserCount / applicationCount /
+    // lastActivityAt) still enrich a window from the top and sort it in JS.
     const isComputedSort =
-      query.sort === 'mrrCents' ||
-      query.sort === 'endUserCount' ||
-      query.sort === 'applicationCount' ||
-      query.sort === 'lastActivityAt';
-    // DB-column sort → real skip/take (one page). Computed sort → scan a
-    // window from the top, enrich, JS-sort, then slice the page out of it.
+      query.sort === 'endUserCount' || query.sort === 'applicationCount' || query.sort === 'lastActivityAt';
     const fetchSkip = isComputedSort ? 0 : offset;
     const fetchTake = isComputedSort
       ? Math.min(Math.max(offset + limit, limit), COMPUTED_SCAN_CAP)
       : limit;
-    const [total, tenants] = await Promise.all([
+    const [total, fetched] = await Promise.all([
       prisma.tenant.count({ where }),
       prisma.tenant.findMany({
-        where,
+        where: rankedIds === null ? where : { id: { in: rankedIds } },
         // `id` breaks ties so offset paging never skips or repeats a row.
         orderBy: [
           query.sort === 'name' ? { name: query.order ?? 'asc' } : { createdAt: query.order ?? 'desc' },
           { id: query.order ?? (query.sort === 'name' ? 'asc' : 'desc') },
         ],
-        skip: fetchSkip,
-        take: fetchTake,
+        ...(rankedIds === null && { skip: fetchSkip, take: fetchTake }),
         include: {
           applications: {
-            select: { id: true },
+            select: { id: true, billingConfig: true },
           },
         },
       }),
     ]);
+    const tenants =
+      rankedIds === null
+        ? fetched
+        : rankedIds.flatMap((id) => {
+            const tenant = fetched.find((t) => t.id === id);
+            return tenant === undefined ? [] : [tenant];
+          });
 
     // One grouped query per metric over every listed tenant's applications,
-    // not five queries per tenant: a computed sort scans up to
-    // COMPUTED_SCAN_CAP tenants, which was up to 2,500 queries at once.
+    // not five queries per tenant.
     const appIds = tenants.flatMap((t) => t.applications.map((a) => a.id));
-    const [endUsers, orgs, subs, lastSeen] = await Promise.all([
+    const [endUsers, orgs, subs, mrr, lastSeen] = await Promise.all([
       countByApplication('end_users', appIds),
       countByApplication('organizations', appIds),
       activeSubscriptionsByApplication(appIds),
+      mrrCurrenciesByApplication(appIds),
       lastRequestByApplication(appIds),
     ]);
     const enriched = tenants.map((t) => {
@@ -594,13 +687,11 @@ export const adminMetricsService = {
       let endUserCount = 0;
       let organizationCount = 0;
       let activeSubscriptions = 0;
-      let mrrCents = 0;
       let last: Date | null = null;
       for (const id of ids) {
         endUserCount += endUsers.get(id) ?? 0;
         organizationCount += orgs.get(id) ?? 0;
-        activeSubscriptions += subs.get(id)?.count ?? 0;
-        mrrCents += subs.get(id)?.mrrCents ?? 0;
+        activeSubscriptions += subs.get(id) ?? 0;
         const seen = lastSeen.get(id);
         if (seen && (last === null || seen > last)) last = seen;
       }
@@ -612,25 +703,27 @@ export const adminMetricsService = {
         endUserCount,
         organizationCount,
         activeSubscriptions,
-        mrrCents,
-        // Summed in SQL over every active subscription, so no longer capped.
-        // Kept in the shape for clients that read it.
-        mrrCapped: false,
+        mrrByCurrency: rankCurrencies(
+          mergeMrrCurrencies(ids.map((id) => mrr.get(id) ?? [])),
+          (e) => e.activeSubscriptions,
+          // An application's reporting currency counts only where that
+          // application has MRR in it.
+          t.applications.flatMap((a) => {
+            const own = configuredCurrency(a.billingConfig);
+            return own !== undefined && mrr.get(a.id)?.some((e) => e.currency === own) ? [own] : [];
+          }),
+        ),
         createdAt: t.createdAt.toISOString(),
         lastActivityAt: last?.toISOString() ?? null,
       };
     });
 
-    // Post-aggregate sort for computed fields, then slice out the requested
-    // page window. DB-column sort already returned exactly the page.
+    // DB-column sorts and the MRR sort already returned exactly the page.
     const items =
       isComputedSort && query.sort
-        ? sortByField(enriched, query.sort as keyof (typeof enriched)[number], query.order ?? 'desc').slice(
-            offset,
-            offset + limit,
-          )
+        ? sortByField(enriched, query.sort as keyof (typeof enriched)[number], order).slice(offset, offset + limit)
         : enriched;
-    return paged(items, total, limit, offset);
+    return { ...paged(items, total, limit, offset), sortedByMrrIn: ranking?.currency ?? null };
   },
 
   async applications(
@@ -709,7 +802,7 @@ export const adminMetricsService = {
       // with data modes gone this is the only marker of which ones are real.
       environment: a.environment,
       endUserCount: endUsers.get(a.id) ?? 0,
-      activeSubscriptions: subs.get(a.id)?.count ?? 0,
+      activeSubscriptions: subs.get(a.id) ?? 0,
       apiRequestsLast24h: requests.get(a.id) ?? 0,
       createdAt: a.createdAt.toISOString(),
     }));
@@ -1035,21 +1128,10 @@ export const adminMetricsService = {
 
   async payments(
     query: ListQuery<'createdAt' | 'amount'> & {
-      status?: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | undefined;
+      status?: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED' | undefined;
       applicationId?: string | undefined;
     } = {},
-  ): Promise<
-    Page<{
-      id: string;
-      applicationId: string;
-      applicationSlug: string;
-      endUserId: string | null;
-      amount: number;
-      currency: string;
-      status: string;
-      createdAt: string;
-    }>
-  > {
+  ): Promise<Page<AdminPaymentRowDto>> {
     const limit = clampLimit(query.limit);
     const offset = clampOffset(query.offset);
     const q = query.q?.trim();
@@ -1088,6 +1170,8 @@ export const adminMetricsService = {
       amount: r.amount,
       currency: r.currency,
       status: r.status,
+      refundedAmount: r.refundedAmount,
+      verification: r.verification === 'VERIFIED' ? ('verified' as const) : ('unverified' as const),
       createdAt: r.createdAt.toISOString(),
     }));
     return paged(items, total, limit, offset);
@@ -1098,22 +1182,7 @@ export const adminMetricsService = {
       status?: 'PENDING' | 'ACTIVE' | 'TRIALING' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' | undefined;
       applicationId?: string | undefined;
     } = {},
-  ): Promise<
-    Page<{
-      id: string;
-      applicationId: string;
-      applicationSlug: string;
-      endUserId: string;
-      planSlug: string;
-      planName: string;
-      status: string;
-      currency: string;
-      amount: number;
-      interval: string;
-      createdAt: string;
-      currentPeriodEnd: string | null;
-    }>
-  > {
+  ): Promise<Page<AdminSubscriptionRowDto>> {
     const limit = clampLimit(query.limit);
     const offset = clampOffset(query.offset);
     const q = query.q?.trim();
@@ -1131,7 +1200,7 @@ export const adminMetricsService = {
         take: limit,
         include: {
           application: { select: { slug: true } },
-          plan: { select: { slug: true, name: true, amount: true, currency: true, interval: true } },
+          plan: { select: { slug: true, name: true, interval: true } },
         },
       }),
     ]);
@@ -1143,8 +1212,9 @@ export const adminMetricsService = {
       planSlug: r.plan.slug,
       planName: r.plan.name,
       status: r.status,
-      currency: r.plan.currency,
-      amount: r.plan.amount,
+      // The subscription's own price only. One with none reports null, never its plan's.
+      currency: r.unitAmount === null ? null : (r.currency?.toUpperCase() ?? null),
+      amount: r.currency === null ? null : r.unitAmount,
       interval: r.plan.interval,
       createdAt: r.createdAt.toISOString(),
       currentPeriodEnd: r.currentPeriodEnd?.toISOString() ?? null,
@@ -1583,7 +1653,8 @@ export const adminMetricsService = {
       pending: number;
       refunded: number;
       successRate: number | null;
-      volumeCents: number;
+      /** Net 30-day volume of verified payments per currency, the application's reporting currency first. Never added together. */
+      volumeByCurrency: Array<{ currency: string; volumeCents: number; payments: number }>;
     }>
   > {
     const since30d = new Date(Date.now() - 30 * DAY_MS);
@@ -1594,14 +1665,26 @@ export const adminMetricsService = {
         _count: { _all: true },
       }),
       prisma.payment.groupBy({
-        by: ['applicationId'],
-        where: { createdAt: { gte: since30d }, status: { in: ['SUCCEEDED', 'PARTIALLY_REFUNDED'] } },
+        by: ['applicationId', 'currency'],
+        where: { createdAt: { gte: since30d }, status: { in: ['SUCCEEDED', 'PARTIALLY_REFUNDED'] }, verification: 'VERIFIED' },
         _sum: { amount: true, refundedAmount: true },
+        _count: { _all: true },
       }),
     ]);
-    const volumeByApp = new Map(
-      groupedVolume.map((g) => [g.applicationId, (g._sum.amount ?? 0) - (g._sum.refundedAmount ?? 0)]),
-    );
+    // `usd` and `USD` are grouped apart by the database and merged here.
+    type CurrencyVolume = { currency: string; volumeCents: number; payments: number };
+    const volumeByApp = new Map<string, Map<string, CurrencyVolume>>();
+    for (const g of groupedVolume) {
+      const currency = g.currency.toUpperCase();
+      const currencies = volumeByApp.get(g.applicationId) ?? new Map<string, CurrencyVolume>();
+      const seen = currencies.get(currency);
+      currencies.set(currency, {
+        currency,
+        volumeCents: (seen?.volumeCents ?? 0) + (g._sum.amount ?? 0) - (g._sum.refundedAmount ?? 0),
+        payments: (seen?.payments ?? 0) + g._count._all,
+      });
+      volumeByApp.set(g.applicationId, currencies);
+    }
     const byApp = new Map<
       string,
       { succeeded: number; failed: number; pending: number; refunded: number }
@@ -1618,12 +1701,18 @@ export const adminMetricsService = {
     if (appIds.length === 0) return [];
     const apps = await prisma.application.findMany({
       where: { id: { in: appIds } },
-      select: { id: true, slug: true, name: true },
+      select: { id: true, slug: true, name: true, billingConfig: true },
     });
     const appById = new Map(apps.map((a) => [a.id, a]));
     const out = appIds.map((appId) => {
       const a = byApp.get(appId)!;
       const denom = a.succeeded + a.failed;
+      const own = configuredCurrency(appById.get(appId)?.billingConfig ?? null);
+      const volumeByCurrency = rankCurrencies(
+        [...(volumeByApp.get(appId)?.values() ?? [])],
+        (e) => e.payments,
+        own === undefined ? [] : [own],
+      );
       return {
         applicationId: appId,
         applicationSlug: appById.get(appId)?.slug ?? '?',
@@ -1633,7 +1722,7 @@ export const adminMetricsService = {
         pending: a.pending,
         refunded: a.refunded,
         successRate: denom === 0 ? null : a.succeeded / denom,
-        volumeCents: volumeByApp.get(appId) ?? 0,
+        volumeByCurrency,
       };
     });
     return sortByField(out, 'failed', 'desc').slice(0, 20);

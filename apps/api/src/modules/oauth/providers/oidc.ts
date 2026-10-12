@@ -217,7 +217,7 @@ export class OidcProvider implements OAuthProvider {
       throw new Error('OIDC provider requires `issuerUrl` in the config.');
     }
     throw new Error(
-      'OidcProvider.buildAuthUrl is async — use buildAuthUrlAsync instead. ' +
+      'OidcProvider.buildAuthUrl is async. Use buildAuthUrlAsync instead. ' +
       'The registry caller in oauth.service.ts is the chokepoint.',
     );
   }

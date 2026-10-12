@@ -23,7 +23,7 @@
 import { prisma } from '../../../lib/prisma.js';
 import { getProviderForApplication } from '../providers/index.js';
 import { confirmApproval, type ApprovalVerifier, type ConfirmationSession, type Refusal } from './confirm-approval.js';
-import { expectedChargeOf } from './order-match.js';
+import { expectedChargeOfSession } from './order-match.js';
 
 async function stripeRefusal(session: ConfirmationSession, checkoutSessionId: string, counted: boolean): Promise<Refusal | null> {
   if (checkoutSessionId !== session.providerSessionId) return { reason: 'session_id_mismatch', counted };
@@ -41,7 +41,7 @@ async function stripeRefusal(session: ConfirmationSession, checkoutSessionId: st
   ) {
     return { reason: 'metadata_mismatch', counted };
   }
-  const expected = expectedChargeOf(session.metadata);
+  const expected = expectedChargeOfSession(session);
   if (expected !== null && (snapshot.amountTotal !== expected.amount || snapshot.currency !== expected.currency.toUpperCase())) {
     return { reason: 'amount_mismatch', counted };
   }

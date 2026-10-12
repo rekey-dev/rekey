@@ -7,9 +7,11 @@
  * provider fakes return deterministic values so this is verifiable offline.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
+import { fakePaypal } from './fakes/billing-providers.js';
 
 describe('billing webhook auto-config', () => {
   let app: FastifyInstance;
@@ -100,5 +102,75 @@ describe('billing webhook auto-config', () => {
     const reg = await register('razorpay');
     expect(reg.statusCode).toBe(400);
     expect(reg.json().error.code).toBe('BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED');
+  });
+
+  describe('after a credential edit', () => {
+    const OLD_ACCOUNT = { clientId: 'pp_client', clientSecret: 'pp_secret', webhookId: 'WH-old-account' };
+    const storedWebhookId = async () =>
+      (await billingCredentialsService.loadDecrypted(applicationId, 'paypal'))?.webhookId;
+    const webhookOf = (res: { json: () => { data: { webhook: string } } }) => res.json().data.webhook;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('registers the webhook again when the keys change, since the saved id belongs to the old account', async () => {
+      expect(webhookOf(await putCreds('paypal', OLD_ACCOUNT))).toBe('unchanged');
+
+      const rotated = await putCreds('paypal', { clientSecret: 'pp_secret_of_another_account' });
+      expect(rotated.statusCode).toBe(200);
+      expect(webhookOf(rotated)).toBe('reconfigured');
+      expect(await storedWebhookId()).toMatch(/^WH-stub-/);
+    });
+
+    it('registers it again when only the mode changes', async () => {
+      await putCreds('paypal', OLD_ACCOUNT);
+      const relabelled = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/tenant/applications/${applicationId}/billing-credentials/paypal`,
+        headers: { authorization: `Bearer ${tenantAccess}` },
+        payload: { mode: 'live' },
+      });
+      expect(relabelled.statusCode, relabelled.body).toBe(200);
+      expect(webhookOf(relabelled)).toBe('reconfigured');
+      expect(await storedWebhookId()).toMatch(/^WH-stub-/);
+    });
+
+    it('leaves the webhook alone when nothing secret changed, or the edit names the webhook itself', async () => {
+      await putCreds('paypal', OLD_ACCOUNT);
+      const register = vi.spyOn(fakePaypal, 'registerWebhook');
+
+      expect(webhookOf(await putCreds('paypal', { clientSecret: OLD_ACCOUNT.clientSecret }))).toBe('unchanged');
+      const routing = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/tenant/applications/${applicationId}/billing-credentials/paypal`,
+        headers: { authorization: `Bearer ${tenantAccess}` },
+        payload: { priority: 5, countries: ['US'] },
+      });
+      expect(webhookOf(routing)).toBe('unchanged');
+      const pasted = await putCreds('paypal', { clientSecret: 'pp_new_secret', webhookId: 'WH-pasted-by-hand' });
+      expect(webhookOf(pasted)).toBe('unchanged');
+
+      expect(register).not.toHaveBeenCalled();
+      expect(await storedWebhookId()).toBe('WH-pasted-by-hand');
+    });
+
+    it('does not register a webhook that was never set up', async () => {
+      const register = vi.spyOn(fakePaypal, 'registerWebhook');
+      await putCreds('paypal', { clientId: 'pp_client', clientSecret: 'pp_secret' });
+      expect(webhookOf(await putCreds('paypal', { clientSecret: 'pp_other' }))).toBe('unchanged');
+      expect(register).not.toHaveBeenCalled();
+    });
+
+    it('saves the keys and reports `failed` when the provider refuses the registration', async () => {
+      await putCreds('paypal', OLD_ACCOUNT);
+      vi.spyOn(fakePaypal, 'registerWebhook').mockRejectedValue(new Error('invalid_client'));
+
+      const rotated = await putCreds('paypal', { clientSecret: 'pp_wrong_secret' });
+      expect(rotated.statusCode).toBe(200);
+      expect(webhookOf(rotated)).toBe('failed');
+      expect(await storedWebhookId()).toBe('WH-old-account');
+      expect((await billingCredentialsService.loadDecrypted(applicationId, 'paypal'))?.clientSecret).toBe('pp_wrong_secret');
+    });
   });
 });

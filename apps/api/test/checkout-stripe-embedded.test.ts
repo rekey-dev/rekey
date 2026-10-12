@@ -84,7 +84,7 @@ describe('Stripe on the checkout page', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { slug: 'standard', name: 'Standard', amount: 9900 },
+      payload: { slug: 'standard', name: 'Standard', price: { currency: 'USD', amount: 9900 } },
     });
     expect(plan.statusCode, plan.body).toBe(201);
     const current = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
@@ -145,11 +145,7 @@ describe('Stripe on the checkout page', () => {
   }
 
   async function stampExpectedCharge(rowId: string, amount: number, currency: string): Promise<void> {
-    const current = await row(rowId);
-    await prisma.checkoutSession.update({
-      where: { id: rowId },
-      data: { metadata: { ...(current.metadata as Prisma.JsonObject), expectedCharge: { amount, currency } } },
-    });
+    await prisma.checkoutSession.update({ where: { id: rowId }, data: { kind: 'ONE_TIME', chargeAmount: amount, currency } });
   }
 
   function markPaid(id: string, patch: Partial<{ status: string; paymentStatus: string; clientReferenceId: string | null }> = {}) {
@@ -194,6 +190,47 @@ describe('Stripe on the checkout page', () => {
         expect(text).not.toContain(SECRET_KEY);
         expect(text).not.toContain(WEBHOOK_SECRET);
       }
+    });
+  });
+
+  describe('the price fallback on the page', () => {
+    async function addRupeePrice(): Promise<void> {
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/tenant/applications/${applicationId}/plans/standard/prices/INR`,
+        headers: { authorization: `Bearer ${operatorAccess}` },
+        payload: { amount: 799900, countries: ['IN'] },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+    }
+
+    it('tells the page when the default price is charged because the one selected cannot be', async () => {
+      await addRupeePrice();
+      await prisma.billingCredentials.updateMany({ where: { applicationId, provider: 'stripe' }, data: { currencies: ['USD'] } });
+      const { token, body } = await startCheckout(undefined, { country: 'IN' });
+      expect(JSON.parse(body).data.priceFallback).toMatchObject({ requested: { currency: 'INR' }, charged: { currency: 'USD' } });
+
+      const view = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${token}` });
+      expect(view.statusCode, view.body).toBe(200);
+      expect(view.json().data.order.priceFallback).toEqual({
+        requested: { id: expect.any(String), currency: 'INR', amount: 799900, formatted: '₹7,999.00' },
+        charged: { id: expect.any(String), currency: 'USD', amount: 9900, formatted: '$99.00' },
+        reason: 'no_provider_for_currency',
+      });
+      expect(view.json().data.order.priceFallback).toEqual(JSON.parse(body).data.priceFallback);
+      expect(view.json().data.order.plan).toMatchObject({ amount: 9900, currency: 'USD' });
+    });
+
+    it('sends null when the price selected is the price charged', async () => {
+      const plain = await startCheckout();
+      const first = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${plain.token}` });
+      expect(first.json().data.order).toHaveProperty('priceFallback', null);
+
+      await addRupeePrice();
+      const local = await startCheckout(undefined, { country: 'IN' });
+      const second = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${local.token}` });
+      expect(second.json().data.order.plan).toMatchObject({ amount: 799900, currency: 'INR' });
+      expect(second.json().data.order).toHaveProperty('priceFallback', null);
     });
   });
 
@@ -599,7 +636,7 @@ describe('Stripe on the checkout page', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${applicationId}/coupons`,
         headers: { authorization: `Bearer ${operatorAccess}` },
-        payload: { code: 'tenoff', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000, maxRedemptions: 5 },
+        payload: { code: 'tenoff', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }], maxRedemptions: 5 },
       });
       expect(created.statusCode, created.body).toBe(201);
       const { token, providerSessionId, rowId } = await startCheckout(undefined, { couponCode: 'tenoff' });

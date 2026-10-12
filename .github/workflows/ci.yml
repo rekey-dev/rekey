@@ -426,6 +426,9 @@ jobs:
           REDIS_URL: redis://localhost:6379
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
           JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
+          # A shard is one process for all its files, with coverage and the
+          # type-checked source scans in it; Node's default heap ran out.
+          NODE_OPTIONS: --max-old-space-size=6144
         run: >-
           pnpm run test:prepare &&
           pnpm exec vitest run

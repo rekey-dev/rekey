@@ -239,7 +239,7 @@ describe('end-user data export (GDPR/DSAR)', () => {
       impersonations: Array<Record<string, unknown>>;
     };
 
-    expect(doc.exportVersion).toBe(1);
+    expect(doc.exportVersion).toBe(2);
     expect(doc.applicationId).toBe(b.applicationId);
     expect(doc.notes.length).toBeGreaterThan(0);
     expect(doc.endUser).toMatchObject({ id: euid, email: 'subject@example.com' });

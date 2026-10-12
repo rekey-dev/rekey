@@ -1,101 +1,88 @@
 /**
- * Pins every plan shape the portal can render a price for.
- *
- * `lib/format.ts` is a deliberate copy of `formatPrice` in `@rekey.dev/react`
- * (that module is client-only and this app renders plans on the server). A copy
- * only stays honest if something fails when it drifts, these assertions are
- * that something. Each expectation below is what the SDK produces for the same
- * plan, except where the file's docblock records a known, deliberate difference.
+ * What the portal writes for a plan's price, a subscription's price and a
+ * refund. A plan's amount is the API's resolved `price.formatted`; only
+ * payments are formatted here, through the currency registry.
  */
 
 import { describe, expect, it } from 'vitest';
-import { formatMoney, formatPlanPrice, minorUnitDivisor } from '@/lib/format';
+import { formatMoney, formatPlanPrice, refundLine, subscriptionPriceLabel } from '@/lib/format';
+import { PLANS, subscription } from './fixtures/billing';
 
-describe('formatPlanPrice — the six plan shapes', () => {
-  it('renders a free tier as "Free", not as a price', () => {
-    // Was: "$0.00/month". A free plan has no cadence and no amount.
-    expect(formatPlanPrice({ amount: 0, currency: 'USD', kind: 'SUBSCRIPTION', interval: 'MONTH' }))
-      .toBe('Free');
+const priced = (formatted: string) => ({ isFree: false, price: { formatted } });
+
+describe('formatPlanPrice', () => {
+  it('shows the price resolved for this buyer, not the plan default', () => {
+    expect(formatPlanPrice(PLANS.proDefault)).toBe('$19.00 /month');
+    expect(formatPlanPrice(PLANS.proInIndia)).toBe('₹1,499.00 /month');
+    expect(PLANS.proInIndia).not.toHaveProperty('amount');
   });
 
-  it('renders a monthly subscription with its cadence', () => {
-    expect(formatPlanPrice({ amount: 900, currency: 'USD', kind: 'SUBSCRIPTION', interval: 'MONTH' }))
-      .toBe('$9 /month');
+  it('renders a free plan as "Free", not as a price', () => {
+    expect(formatPlanPrice(PLANS.free)).toBe('Free');
   });
 
-  it('keeps cents when the amount is not a whole unit', () => {
-    expect(formatPlanPrice({ amount: 999, currency: 'USD', kind: 'SUBSCRIPTION', interval: 'MONTH' }))
-      .toBe('$9.99 /month');
+  it('does not call a metered plan with no base fee free', () => {
+    expect(formatPlanPrice(PLANS.metered)).toBe('Billed by usage');
   });
 
-  it('renders a one-time licence with no cadence and no "one-time" suffix', () => {
-    // `interval` defaults to MONTH server-side for EVERY kind, which is how a
-    // perpetual licence came to be advertised as "$499.00/month".
-    expect(formatPlanPrice({ amount: 49900, currency: 'USD', kind: 'LICENSE', interval: 'MONTH' }))
-      .toBe('$499');
+  it('renders a one-time licence with no cadence', () => {
+    // `interval` defaults to MONTH server-side for every kind.
+    expect(formatPlanPrice({ ...priced('$499.00'), kind: 'LICENSE', interval: 'MONTH' })).toBe('$499.00');
   });
 
   it('renders a credit pack with the credits it grants', () => {
-    // Was: "$9.00 one-time", which drops the only fact that distinguishes one
-    // credit pack from another.
-    expect(formatPlanPrice({ amount: 900, currency: 'USD', kind: 'CREDIT', creditsAmount: 500 }))
-      .toBe('$9 · 500 credits');
-  });
-
-  it('renders a usage plan as a bare amount', () => {
-    expect(formatPlanPrice({ amount: 5, currency: 'USD', kind: 'USAGE', interval: 'MONTH' }))
-      .toBe('$0.05');
+    expect(formatPlanPrice({ ...priced('$9.00'), kind: 'CREDIT', creditsAmount: 500 })).toBe('$9.00 · 500 credits');
+    expect(formatPlanPrice({ ...priced('$9.00'), kind: 'CREDIT', creditsAmount: null })).toBe('$9.00');
   });
 
   it('does not append a cadence when interval is null', () => {
-    expect(formatPlanPrice({ amount: 900, currency: 'USD', kind: 'SUBSCRIPTION', interval: null }))
-      .toBe('$9');
-  });
-
-  it('falls back to a CREDIT plan with no creditsAmount rendering the bare amount', () => {
-    expect(formatPlanPrice({ amount: 900, currency: 'USD', kind: 'CREDIT', creditsAmount: null }))
-      .toBe('$9');
+    expect(formatPlanPrice({ ...priced('$9.00'), kind: 'SUBSCRIPTION', interval: null })).toBe('$9.00');
   });
 });
 
-describe('minor units', () => {
-  it('treats most currencies as hundredths', () => {
-    expect(minorUnitDivisor('USD')).toBe(100);
-    expect(minorUnitDivisor('eur')).toBe(100);
-    expect(minorUnitDivisor('INR')).toBe(100);
+describe('subscriptionPriceLabel', () => {
+  it("shows the subscription's own price and currency, whatever the plan's default is", () => {
+    const sub = subscription();
+    expect(subscriptionPriceLabel(sub.price, PLANS.proDefault)).toBe('₹1,499.00 /month');
   });
 
-  it('treats zero-decimal currencies as whole units', () => {
-    expect(minorUnitDivisor('JPY')).toBe(1);
-    expect(minorUnitDivisor('KRW')).toBe(1);
-  });
-
-  it('treats three-decimal currencies as thousandths', () => {
-    expect(minorUnitDivisor('KWD')).toBe(1000);
-  });
-
-  // The 100x bug: a ¥1000 plan is ¥1000, not ¥10. Dividing every currency by
-  // 100 understates a JPY price by two orders of magnitude, to a paying
-  // customer. This is the one case where this module deliberately diverges from
-  // the SDK, which still divides unconditionally.
-  it('does not divide a JPY amount', () => {
-    expect(formatPlanPrice({ amount: 1000, currency: 'JPY', kind: 'SUBSCRIPTION', interval: 'MONTH' }))
-      .toBe('¥1,000 /month');
+  it('says nothing for a subscription with no price, and keeps the price when the plan is gone', () => {
+    expect(subscriptionPriceLabel(null, PLANS.proDefault)).toBeNull();
+    expect(subscriptionPriceLabel({ formatted: '$19.00' }, undefined)).toBe('$19.00');
   });
 });
 
-describe('formatMoney — billing history uses the same renderer as the plan list', () => {
-  it('drops .00 on whole amounts and keeps cents otherwise', () => {
-    expect(formatMoney(900, 'USD')).toBe('$9');
-    expect(formatMoney(999, 'USD')).toBe('$9.99');
+describe('refundLine', () => {
+  it('is silent when nothing was refunded', () => {
+    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 0 })).toBeNull();
   });
 
-  it('uses the SDK symbol table, including its unknown-code fallback', () => {
-    expect(formatMoney(1000, 'GBP')).toBe('£10');
-    expect(formatMoney(1000, 'AUD')).toBe('AUD 10');
+  it("names the part refunded and the charge, in the payment's own currency", () => {
+    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 500 })).toBe('Refunded $5.00 of $19.00');
+    expect(refundLine({ amount: 1500, currency: 'JPY', refundedAmount: 500 })).toBe('Refunded ¥500 of ¥1,500');
   });
 
-  it('renders zero as an amount, not as "Free" (that rule is plan-level only)', () => {
-    expect(formatMoney(0, 'USD')).toBe('$0');
+  it('names only the amount for a full refund', () => {
+    expect(refundLine({ amount: 149900, currency: 'INR', refundedAmount: 149900 })).toBe('Refunded ₹1,499.00');
+  });
+});
+
+describe('formatMoney, the registry formatter', () => {
+  // The API stores every amount at the ISO 4217 exponent, whatever number of
+  // decimals a locale shows for the currency.
+  it.each([
+    ['USD', 1999, '$19.99'],
+    ['JPY', 1500, '¥1,500'],
+    ['HUF', 500000, 'HUF\u00a05,000'],
+    ['INR', 149900, '₹1,499.00'],
+    ['EUR', 1999, '€19.99'],
+    ['UGX', 500000, 'UGX\u00a0500,000'],
+  ])('%s %i reads %s', (currency, minor, shown) => {
+    expect(formatMoney(minor, currency)).toBe(shown);
+  });
+
+  it('renders zero as an amount, and refuses a fraction of a minor unit', () => {
+    expect(formatMoney(0, 'USD')).toBe('$0.00');
+    expect(() => formatMoney(9.5, 'USD')).toThrow(RangeError);
   });
 });

@@ -97,8 +97,28 @@ describe('status pill', () => {
 
 describe('formatMoney', () => {
   it('renders minor units as a price', () => {
-    expect(formatMoney(999, 'USD')).toMatch(/9\.99/);
-    expect(formatMoney(0, 'USD')).toMatch(/0\.00/);
+    expect(formatMoney(999, 'USD')).toBe('$9.99');
+    expect(formatMoney(0, 'USD')).toBe('$0.00');
+  });
+
+  it('writes money one way, whatever locale the runtime is in', () => {
+    // The add-price preview runs in the browser and the price list on the
+    // server. Both come through here, so they have to agree.
+    expect(formatMoney(149900, 'INR')).toBe('₹1,499.00');
+    expect(formatMoney(1500, 'JPY')).toBe('¥1,500');
+    expect(formatMoney(123456, 'EUR')).toBe('€1,234.56');
+  });
+
+  it('groups rupees in lakhs, and other currencies in thousands', () => {
+    expect(formatMoney(10000000, 'INR')).toBe('₹1,00,000.00');
+    expect(formatMoney(10000000, 'inr')).toBe('₹1,00,000.00');
+    expect(formatMoney(10000000, 'USD')).toBe('$100,000.00');
+  });
+
+  // Intl writes these with no decimals. The stored amount still has two.
+  it('divides by the currency exponent, not by the decimals Intl shows', () => {
+    expect(formatMoney(500000, 'HUF')).toBe('HUF\u00a05,000');
+    expect(formatMoney(500000, 'COP')).toBe('COP\u00a05,000');
   });
 
   it('falls back to a readable string for an unknown currency code', () => {

@@ -24,7 +24,14 @@ const ID_ARG = { type: 'string', minLength: 1, maxLength: ID_MAX } as const;
 const ListArgs = z.object({ applicationId: z.string().min(1).max(ID_MAX) }).strict();
 const StatsArgs = z.object({ applicationId: z.string().min(1).max(ID_MAX), key: z.string().min(1).max(64) }).strict();
 
-function parseArgs<T extends z.ZodTypeAny>(schema: T, tool: string, args: Record<string, unknown>): z.infer<T> {
+/**
+ * Checked here because this server does not validate tool arguments against
+ * their schema.
+ *
+ * @example
+ *   const { applicationId } = parseArgs(ListArgs, 'list_contact_lists', raw);
+ */
+export function parseArgs<T extends z.ZodTypeAny>(schema: T, tool: string, args: Record<string, unknown>): z.infer<T> {
   const parsed = schema.safeParse(args);
   if (parsed.success) return parsed.data;
   throw new RekeyError({

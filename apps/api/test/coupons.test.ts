@@ -60,7 +60,7 @@ describe('coupons', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'pro_monthly', name: 'Pro', amount: 999 },
+      payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } },
     });
 
     const su = await app.inject({
@@ -74,7 +74,7 @@ describe('coupons', () => {
     userId = suData.endUser.id;
   }
 
-  async function createCoupon(body: Record<string, unknown>): Promise<{ id: string; code: string; discountType: string; amountOff: number }> {
+  async function createCoupon(body: Record<string, unknown>): Promise<{ id: string; code: string; discountType: string; basisPoints: number | null }> {
     const res = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
@@ -82,7 +82,7 @@ describe('coupons', () => {
       payload: body,
     });
     expect(res.statusCode).toBe(201);
-    return res.json().data as { id: string; code: string; discountType: string; amountOff: number };
+    return res.json().data as { id: string; code: string; discountType: string; basisPoints: number | null };
   }
 
   beforeEach(async () => {
@@ -92,10 +92,12 @@ describe('coupons', () => {
   // ---------- admin CRUD ----------
 
   it('creates a PERCENT coupon (lowercased code, validated amount)', async () => {
-    const c = await createCoupon({ code: 'LAUNCH50', discountType: 'PERCENT', amountOff: 5000 });
+    const c = await createCoupon({ code: 'LAUNCH50', discountType: 'PERCENT', basisPoints: 5000 });
     expect(c.code).toBe('launch50');
     expect(c.discountType).toBe('PERCENT');
-    expect(c.amountOff).toBe(5000);
+    expect(c.basisPoints).toBe(5000);
+    expect(c).not.toHaveProperty('amountOff');
+    expect(c).not.toHaveProperty('currency');
   });
 
   it('rejects PERCENT coupon over 100%', async () => {
@@ -103,7 +105,7 @@ describe('coupons', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'tooMuch', discountType: 'PERCENT', amountOff: 15000 },
+      payload: { code: 'tooMuch', discountType: 'PERCENT', basisPoints: 15000 },
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('COUPON_AMOUNT_INVALID');
@@ -114,17 +116,17 @@ describe('coupons', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'bad code', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
+      payload: { code: 'bad code', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] },
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe('COUPON_CODE_INVALID');
 
-    await createCoupon({ code: 'dup', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 });
+    await createCoupon({ code: 'dup', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] });
     const dup = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'DUP', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
+      payload: { code: 'DUP', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 100 }] },
     });
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('COUPON_CODE_TAKEN');
@@ -133,7 +135,7 @@ describe('coupons', () => {
   // ---------- validate ----------
 
   it('validates a PERCENT coupon and computes the right discount', async () => {
-    await createCoupon({ code: 'fifteen', discountType: 'PERCENT', amountOff: 1500 });
+    await createCoupon({ code: 'fifteen', discountType: 'PERCENT', basisPoints: 1500 });
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
@@ -142,13 +144,13 @@ describe('coupons', () => {
     });
     expect(res.statusCode).toBe(200);
     const data = res.json().data as { discountAmount: number; amountAfterDiscount: number };
-    // 15% of 999 = 149.85 → floored to 149.
-    expect(data.discountAmount).toBe(149);
-    expect(data.amountAfterDiscount).toBe(850);
+    // 15% of 999 is 149.85, rounded up toward the buyer.
+    expect(data.discountAmount).toBe(150);
+    expect(data.amountAfterDiscount).toBe(849);
   });
 
   it('validates an AMOUNT coupon, clamps if discount > price', async () => {
-    await createCoupon({ code: 'huge', discountType: 'AMOUNT', currency: 'USD', amountOff: 5000 });
+    await createCoupon({ code: 'huge', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 5000 }] });
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
@@ -164,7 +166,7 @@ describe('coupons', () => {
     await createCoupon({
       code: 'team-only',
       discountType: 'PERCENT',
-      amountOff: 1000,
+      basisPoints: 1000,
       planSlugs: ['team_annual'],
     });
     const res = await app.inject({
@@ -175,13 +177,15 @@ describe('coupons', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('COUPON_NOT_APPLICABLE');
+    // A buyer is not told which plans the coupon does apply to.
+    expect(JSON.stringify(res.json().error)).not.toContain('team_annual');
   });
 
   it('rejects an expired coupon with COUPON_EXPIRED', async () => {
     await createCoupon({
       code: 'expired',
       discountType: 'PERCENT',
-      amountOff: 1000,
+      basisPoints: 1000,
       endsAt: new Date(Date.now() - 1000).toISOString(),
     });
     const res = await app.inject({
@@ -203,7 +207,7 @@ describe('coupons', () => {
     // the discount reaches the processor the moment the session is created and
     // a limit checked against rows the payment webhook has not written yet
     // bounds nothing.
-    await createCoupon({ code: 'half', discountType: 'PERCENT', amountOff: 5000 });
+    await createCoupon({ code: 'half', discountType: 'PERCENT', basisPoints: 5000 });
 
     const res = await app.inject({
       method: 'POST',
@@ -224,7 +228,7 @@ describe('coupons', () => {
         metadata: { couponId?: string; discountAmount?: number; checkoutSessionId: string };
       };
     };
-    expect(data.discountAmount).toBe(499); // 50% of 999 floor
+    expect(data.discountAmount).toBe(500); // 50% of 999 is 499.5, rounded up
     // The couponId rides on the stored subscription's metadata so the webhook
     // can find it at payment-success time. It is internal bookkeeping, so it is
     // read off the row: the buyer's response carries the discount as
@@ -241,7 +245,7 @@ describe('coupons', () => {
     expect(redemptions[0]!).toMatchObject({
       status: 'RESERVED',
       checkoutSessionId: data.subscription.metadata.checkoutSessionId,
-      discountAmount: 499,
+      discountAmount: 500,
     });
     expect(redemptions[0]!.expiresAt!.getTime()).toBeGreaterThan(Date.now());
     // Nothing is SETTLED, no money has moved, and the operator's redemption
@@ -278,7 +282,7 @@ describe('coupons', () => {
     const coupon = await createCoupon({
       code: 'once',
       discountType: 'PERCENT',
-      amountOff: 1000,
+      basisPoints: 1000,
       maxRedemptionsPerUser: 1,
     });
 
@@ -337,8 +341,7 @@ describe('coupons', () => {
     const coupon = await createCoupon({
       code: 'twice',
       discountType: 'AMOUNT',
-      currency: 'USD',
-      amountOff: 500,
+      amounts: [{ currency: 'USD', amountOff: 500 }],
       maxRedemptions: 1,
     });
     const { couponsService } = await import('../src/modules/coupons/coupons.service.js');

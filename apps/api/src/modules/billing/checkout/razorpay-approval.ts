@@ -22,7 +22,7 @@ import type { RazorpayPaymentResponse } from '@rekey.dev/shared-types/checkout';
 import { billingCredentialsService } from '../credentials.service.js';
 import { getProviderForApplication } from '../providers/index.js';
 import { confirmApproval, type ConfirmationSession, type Refusal } from './confirm-approval.js';
-import type { EmbeddedSessionMetadata } from './sessions.service.js';
+import { expectedChargeOfSession } from './order-match.js';
 
 type Outcome = { status: 'confirming' | 'complete' };
 
@@ -57,9 +57,9 @@ function signatureMatches(secret: string, response: RazorpayPaymentResponse): bo
 
 /** Razorpay's own record of an order payment must be for this order, in full. */
 async function verifyOrderPayment(session: ConfirmationSession, paymentId: string): Promise<Refusal | null> {
-  const expected = (session.metadata as unknown as Partial<EmbeddedSessionMetadata>).expectedCharge;
+  const expected = expectedChargeOfSession(session);
   const provider = await getProviderForApplication(session.application, 'razorpay');
-  if (expected === undefined || !provider.getPayment || !provider.capturePayment) return CANNOT_VERIFY;
+  if (expected === null || !provider.getPayment || !provider.capturePayment) return CANNOT_VERIFY;
   const payment = await provider.getPayment(paymentId);
   if (payment === null || payment.id !== paymentId) return { reason: 'unknown_at_razorpay', counted: true };
   if (payment.orderId !== session.providerSessionId) return { reason: 'payment_order_mismatch', counted: true };

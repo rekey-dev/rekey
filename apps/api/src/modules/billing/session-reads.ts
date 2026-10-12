@@ -9,6 +9,7 @@
 import type { Application, Subscription } from '@prisma/client';
 import {
   BillingConfigSchema,
+  formatMoney,
   type BillingProviderCapabilities,
   type SelfSubscriptionMetadata,
 } from '@rekey.dev/shared-types';
@@ -84,6 +85,7 @@ export function toSelfSubscription(sub: Subscription): {
   providerCapabilities: BillingProviderCapabilities | null;
   providerSubId: string | null;
   metadata: SelfSubscriptionMetadata;
+  price: { id: string; currency: string; amount: number; formatted: string } | null;
   createdAt: Date;
   updatedAt: Date;
 } {
@@ -106,6 +108,17 @@ export function toSelfSubscription(sub: Subscription): {
       ...(typeof meta.checkoutSessionId === 'string' && { checkoutSessionId: meta.checkoutSessionId }),
       ...(meta.oneTime === true && { oneTime: true }),
     },
+    // The subscription's own price, never the plan's default: a buyer on a
+    // local price must see what they are charged.
+    price:
+      sub.planPriceId !== null && sub.currency !== null && sub.unitAmount !== null
+        ? {
+            id: sub.planPriceId,
+            currency: sub.currency.toUpperCase(),
+            amount: sub.unitAmount,
+            formatted: formatMoney(sub.unitAmount, sub.currency),
+          }
+        : null,
     createdAt: sub.createdAt,
     updatedAt: sub.updatedAt,
   };

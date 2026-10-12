@@ -25,7 +25,10 @@ export function discountUnsupported(provider: string, flow: CheckoutFlow): Rekey
   return new RekeyError({
     statusCode: 400,
     code: 'BILLING_DISCOUNT_UNSUPPORTED',
-    message: `Billing provider "${provider}" cannot apply a coupon discount to ${surface}.`,
+    // A buyer reads this on a pricing page, so it names no payment provider.
+    // The provider is in `details` for the integrator.
+    message: `A coupon code cannot be used on ${surface} here.`,
+    details: { provider, flow },
     fix:
       'Retry the checkout without `couponCode`, or pass `provider` naming one that supports ' +
       'discounts on this flow (see `discounts` in GET /api/v1/billing/providers). The coupon ' +

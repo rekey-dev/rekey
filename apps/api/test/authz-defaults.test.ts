@@ -531,7 +531,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appA}/plans`,
         headers: auth(ownerToken),
-        payload: { slug: 'pro', name: 'Pro', amount: 1200, interval: 'MONTH' },
+        payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1200 }, interval: 'MONTH' },
       });
 
       expect(res.statusCode).toBe(502);
@@ -557,7 +557,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
             method: 'POST',
             url: `/api/v1/tenant/applications/${appA}/plans`,
             headers: auth(ownerToken),
-            payload: { slug: 'basic', name: 'Basic', amount: 500, interval: 'MONTH' },
+            payload: { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 500 }, interval: 'MONTH' },
           })
         ).statusCode,
       ).toBe(201);
@@ -619,7 +619,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
             method: 'POST',
             url: `/api/v1/tenant/applications/${appA}/plans`,
             headers: auth(ownerToken),
-            payload: { slug: 'cancelme', name: 'Cancel Me', amount: 700, interval: 'MONTH' },
+            payload: { slug: 'cancelme', name: 'Cancel Me', price: { currency: 'USD', amount: 700 }, interval: 'MONTH' },
           })
         ).statusCode,
       ).toBe(201);
@@ -702,7 +702,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appA}/plans`,
         headers: auth(ownerToken),
-        payload: { slug: 'edge', name: 'Edge', amount: 900, interval: 'MONTH' },
+        payload: { slug: 'edge', name: 'Edge', price: { currency: 'USD', amount: 900 }, interval: 'MONTH' },
       });
 
       expect(res.statusCode).toBe(502);

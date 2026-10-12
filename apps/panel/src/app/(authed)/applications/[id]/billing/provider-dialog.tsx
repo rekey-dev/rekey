@@ -8,6 +8,8 @@ import { Modal } from '@/components/Modal';
 import { BillingModeAutodetect } from '@/components/BillingModeAutodetect';
 import { ExternalIngressSetup } from '@/components/ExternalIngressSetup';
 import { Badge } from '@/components/Badge';
+import { CurrencyMultiSelect } from '@/components/CurrencyMultiSelect';
+import { offeredCurrencies, tickedCurrencies } from '@/lib/provider-currencies';
 import { savedStateKey } from '@/lib/saved-state-key';
 import { saveProviderCredentials } from './actions';
 import { BILLING_ERR as ERR } from './shared';
@@ -197,7 +199,8 @@ function WebhookSetup({
             <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
               Save your API keys below, then hit <span className="font-medium">Auto-configure</span>{' '}
               in the providers table. Rekey creates the webhook and stores its secret for you. No
-              dashboard steps, so leave the secret field blank.
+              dashboard steps, so leave the secret field blank. Saving new keys registers it again,
+              and <span className="font-medium">Reconfigure</span> does the same on demand.
             </p>
           </div>
           <details className="group">
@@ -257,6 +260,8 @@ export function ProviderEditModal({
   const { name: provider, label, credentialFields } = descriptor;
   const inbound = descriptor.capabilities.checkout === false;
   const existing = descriptor.status;
+  const offered = offeredCurrencies(descriptor.supportedCurrencies);
+  const unsupported = existing?.unsupportedCurrencies ?? [];
   const action = saveProviderCredentials.bind(
     null,
     applicationId,
@@ -287,6 +292,7 @@ export function ProviderEditModal({
         key={savedStateKey({
           mode: existing?.mode,
           countries: existing?.countries,
+          currencies: existing?.currencies,
           priority: existing?.priority,
         })}
         action={action}
@@ -331,9 +337,11 @@ export function ProviderEditModal({
           />
         )}
 
-        {/* Routing (countries, priority) only means something for a provider
-            buyers can be sent to; an inbound-only one keeps just the mode. */}
-        <div className={`grid ${inbound ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-3'} gap-3 pt-2 border-t border-[var(--color-border)]`}>
+        {/* Routing (priority, countries, currencies) only means something for
+            a provider buyers can be sent to; an inbound-only one keeps just
+            the mode. Two short fields share a row, and each list gets a row
+            of its own so a long one can be read. */}
+        <div className={`grid ${inbound ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'} gap-3 pt-2 border-t border-[var(--color-border)]`}>
           <Field
             label="Mode"
             hint={
@@ -350,14 +358,45 @@ export function ProviderEditModal({
           {!inbound && (
             <>
               <BillingModeAutodetect names={credentialFields.map((f) => f.key)} />
-              <Field label="Countries" hint="Empty = global">
-                <input type="text" name="countries" defaultValue={existing?.countries.join(', ') ?? ''}
-                  placeholder="US, CA" className={`${inputCls} font-mono`} />
-              </Field>
-              <Field label="Priority" hint="Lower = first">
+              <Field label="Priority" hint="Lower = first.">
                 <input type="number" name="priority" min={0} max={1000} step={1}
                   defaultValue={existing?.priority ?? 100} className={`${inputCls} font-mono`} />
               </Field>
+              <div className="sm:col-span-2">
+              <Field
+                label="Preferred in countries"
+                hint={
+                  !existing && descriptor.defaultCountries.length > 0
+                    ? `Buyers here get ${descriptor.label} first. Pre-filled with where ${descriptor.label} works best; clear it to offer it everywhere.`
+                    : 'Buyers in these countries get this provider first. Empty = no preference, offered everywhere.'
+                }
+              >
+                <input type="text" name="countries"
+                  defaultValue={(existing?.countries ?? descriptor.defaultCountries).join(', ')}
+                  placeholder="US, CA" className={`${inputCls} font-mono`} />
+              </Field>
+              </div>
+              <div className="sm:col-span-2 space-y-1">
+                <span className="block text-xs font-medium text-[var(--color-fg)]">Currencies this account can charge</span>
+                {unsupported.length > 0 && (
+                  <p role="alert" className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+                    {unsupported.join(', ')} {unsupported.length === 1 ? 'is' : 'are'} saved here, and {descriptor.label} cannot
+                    charge {unsupported.length === 1 ? 'it' : 'them'}. No checkout is sent to {descriptor.label} in{' '}
+                    {unsupported.length === 1 ? 'that currency' : 'those currencies'}. Saving this form removes{' '}
+                    {unsupported.length === 1 ? 'it' : 'them'}.
+                  </p>
+                )}
+                <CurrencyMultiSelect
+                  options={offered}
+                  initial={tickedCurrencies(existing?.currencies, descriptor.preselectedCurrencies, offered)}
+                  inputClassName={inputCls}
+                />
+                <span className="block text-xs text-[var(--color-muted-fg)]">
+                  {!existing && descriptor.preselectedCurrencies.length > 0
+                    ? `A price in any other currency is never sent to ${descriptor.label}: the buyer goes to another provider that can charge it, or is charged the plan's default price. Ticked to start with: what a ${descriptor.label} account usually takes. Tick what yours can.`
+                    : `A price in any other currency is never sent to this provider: the buyer goes to another provider that can charge it, or is charged the plan's default price. The list is every currency ${descriptor.label} can charge.`}
+                </span>
+              </div>
             </>
           )}
         </div>

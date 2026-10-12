@@ -326,7 +326,7 @@ export const usageService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'USAGE_METER_INACTIVE',
-        message: `Meter "${args.meterSlug}" is currently inactive — records are not accepted.`,
+        message: `Meter "${args.meterSlug}" is currently inactive, so records are not accepted.`,
         fix: 'Reactivate the meter, or report against a different one.',
       });
     }

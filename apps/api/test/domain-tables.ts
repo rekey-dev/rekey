@@ -56,6 +56,9 @@ export const DOMAIN_TABLES = [
   'webauthn_credentials',
   'magic_link_tokens',
   'impersonation_audits',
+  'support_cases',
+  'support_case_notes',
+  'support_capabilities',
   'organization_invitations',
   'organization_memberships',
   'organizations',
@@ -117,6 +120,7 @@ const RESET_MODULES = [
   '../src/modules/billing/checkout/creation-limit.js',
   '../src/modules/billing/checkout/portal-probe.js',
   '../src/modules/billing/checkout/readiness.js',
+  '../src/modules/billing-log/diagnostic-bound.js',
 ] as const;
 
 let resetFns: Array<() => void> | null = null;

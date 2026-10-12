@@ -21,11 +21,12 @@ const FONT_STACK = "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
  * stripeAppearance({ primaryColor: '#4f46e5', surfaceColor: null }).variables.colorPrimary; // '#4f46e5'
  */
 export function stripeAppearance(merchant: Pick<CheckoutPageOrder['merchant'], 'primaryColor' | 'surfaceColor'>): StripeAppearance {
+  const surface = readableSurface(safeCssColor(merchant.surfaceColor ?? undefined) ?? null);
   return {
     theme: 'stripe',
     variables: {
-      colorPrimary: readableAccent(safeCssColor(merchant.primaryColor ?? undefined) ?? null),
-      colorBackground: readableSurface(safeCssColor(merchant.surfaceColor ?? undefined) ?? null) ?? '#ffffff',
+      colorPrimary: readableAccent(safeCssColor(merchant.primaryColor ?? undefined) ?? null, [surface]),
+      colorBackground: surface ?? '#ffffff',
       colorText: '#171717',
       colorDanger: '#b91c1c',
       fontFamily: FONT_STACK,

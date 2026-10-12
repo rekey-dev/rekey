@@ -121,7 +121,7 @@ export function createS3LogArchiver(
         const detail = (await res.text().catch(() => '')).slice(0, 300);
         throw new Error(
           `Log archive upload to ${config.bucket}/${objectKey} failed: HTTP ${res.status}` +
-            (detail ? ` — ${detail}` : ''),
+            (detail ? `: ${detail}` : ''),
         );
       }
     },

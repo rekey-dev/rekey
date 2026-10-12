@@ -93,6 +93,7 @@ Every refresh rotates the token: the one presented is dead the moment the new pa
 - **Without the middleware**, `getSession` reads the access token only. When it has expired, it returns `null` and leaves the refresh token alone, and logs one warning per process saying why.
 - **In an API endpoint** (or the top-level frontmatter of a page, never a layout or an imported component) without the middleware, pass `{ refresh: true }` to refresh there:
 
+<!-- snippet: no-check imports the `astro` package, which the package running the check does not install -->
 ```ts
 // src/pages/api/me.ts
 import type { APIRoute } from 'astro';
@@ -195,6 +196,7 @@ On Astro versions without `allowedDomains`, either configure the proxy to preser
 
 ## Signing out
 
+<!-- snippet: no-check imports the `astro` package, which the package running the check does not install -->
 ```ts
 // src/pages/sign-out.ts
 import type { APIRoute } from 'astro';
@@ -212,6 +214,78 @@ export const POST: APIRoute = async ({ cookies, redirect }) => {
 
 `signOut` revokes the refresh token server-side, then clears the cookies. Clearing alone signs the *browser* out; a thirty-day token that is still valid after someone clicks "Sign out" is a credential anyone holding a copy can keep using. It returns `{ revoked }` rather than swallowing failures, because "the token was already dead" and "the API did not answer" are different facts and only one of them means the user is actually signed out. Make it a POST — a GET sign-out can be fired by any `<img>` tag on any site.
 
+## Checkout by the buyer's country
+
+A checkout is created from your server, so Rekey cannot see where the buyer is, and per-country provider routing (Razorpay for India, say) has nothing to go on. `visitorClient(context)` fixes that: the client it returns sends the country your platform reports for the visitor (Cloudflare's `cf-ipcountry`, else Vercel's `x-vercel-ip-country`) with every call. Make the checkout through it:
+
+<!-- snippet: no-check imports the `astro` package, which the package running the check does not install; the next sample checks the same calls -->
+```ts
+// src/pages/api/checkout.ts
+import type { APIRoute } from 'astro';
+import { getSession, visitorClient } from '@rekey.dev/astro';
+
+export const POST: APIRoute = async (context) => {
+  const session = await getSession(context.cookies, context.request);
+  if (!session) return context.redirect('/sign-in');
+
+  const form = await context.request.formData();
+  const { url } = await visitorClient(context).billing.createCheckout(session.accessToken, {
+    planSlug: String(form.get('planSlug')),
+    successUrl: new URL('/billing?status=ok', context.url).href,
+    cancelUrl: new URL('/billing?status=cancel', context.url).href,
+  });
+  return context.redirect(url);
+};
+```
+
+The result's `price` is always the price charged. When no provider can charge the price selected for the buyer, the checkout charges the plan's default price and `priceFallback` says so. Tell the buyer before you redirect them. A pricing page reads its plans through the same client, so each plan's `price` is the one this visitor's checkout would charge: render `price.formatted`.
+
+```ts
+import { priceFallbackMessage } from '@rekey.dev/node';
+import { visitorClient } from '@rekey.dev/astro';
+
+// `context` is Astro's request context (`Astro` in a page, `context` in an endpoint).
+export async function plansFor(context: { request: Request }, accessToken?: string) {
+  const { items } = await visitorClient(context).billing.getPlans(undefined, accessToken ? { accessToken } : {});
+  return items.map((plan) => ({
+    slug: plan.slug,
+    name: plan.name,
+    price: plan.price?.formatted ?? (plan.isFree ? 'Free' : 'Usage based'),
+    // The price for their country cannot be charged, and the default one is shown: say so.
+    isFallback: plan.price?.reason === 'fallback',
+  }));
+}
+
+export async function startCheckout(context: { request: Request }, accessToken: string, planSlug: string, origin: string) {
+  const checkout = await visitorClient(context).billing.createCheckout(accessToken, {
+    planSlug,
+    successUrl: `${origin}/billing?status=ok`,
+    cancelUrl: `${origin}/billing?status=cancel`,
+  });
+  return {
+    url: checkout.url,
+    // 'Prices in INR are not available yet. You will pay $19.00.'
+    notice: checkout.priceFallback ? priceFallbackMessage(checkout.priceFallback) : null,
+  };
+}
+```
+
+This needs `rekeyMiddleware` installed (see [Middleware](#middleware)), which is what resolves the session `getSession` returns here. `rekey()`, the plain client, does not send the country. If you build your own `@rekey.dev/node` client, set the hint yourself:
+
+```ts
+import { Rekey } from '@rekey.dev/node';
+import { visitorCountryHintFrom } from '@rekey.dev/astro';
+
+const rekey = new Rekey({ apiUrl: process.env.REKEY_URL!, secretKey: process.env.REKEY_SECRET! });
+
+// Inside an endpoint or page, where `context` is Astro's request context:
+export function scopedTo(context: { request: Request }) {
+  return rekey.with({ visitorCountryHint: visitorCountryHintFrom(context.request.headers) });
+}
+```
+
+It is a hint: a visitor who reaches your origin directly can write that header. It routes the buyer to a provider. It selects a plan's local price only when the Application's **Local prices** setting is **Any country** (`billingConfig.localPrices: 'any'`). Under the default, the buyer is charged the default price unless you pass `country` to `createCheckout` yourself, from something the buyer cannot write, such as a billing address.
+
 ## API
 
 | Export | Purpose |
@@ -223,6 +297,8 @@ export const POST: APIRoute = async ({ cookies, redirect }) => {
 | `signOut(cookies, config?)` | Revoke the refresh token, then clear. Returns `{ revoked }`. |
 | `safePath(next, fallback)` | Reduce a caller-supplied `next` to a path on this site. |
 | `rekey(config?)` | The `@rekey.dev/node` client, built on first use. |
+| `visitorClient(context, config?)` | That client, carrying the visitor's address, User-Agent and country hint. Use it for sign-in, sign-up, MFA and checkout. |
+| `visitorCountryHintFrom(headers)` | The visitor's country from the platform's geo header, or `undefined`. |
 | `cookieSecureFor(request, override?)` | The per-request `Secure` decision, for cookies of your own. |
 | `ACCESS_COOKIE` / `REFRESH_COOKIE` | Cookie names, shared with `@rekey.dev/nextjs`. |
 | `RekeyAstroConfigError` | Thrown for a misconfigured deploy; the middleware lets it through. |
@@ -233,12 +309,14 @@ export const POST: APIRoute = async ({ cookies, redirect }) => {
 
 If your Application sets `authConfig.deviceBinding: 'required'`, every primary sign-in must name its machine or the API answers `400 DEVICE_FINGERPRINT_REQUIRED` and issues no token. The sign-in call is `@rekey.dev/node`'s, so pass it there:
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 await rekey().auth.signIn({ email, password, device: { fingerprint, label: 'Work laptop' } });
 ```
 
 Then keep sending it on refresh, which is this package's job. A chain bound at sign-in is re-checked on every rotation, and a bound chain refreshed from a different fingerprint is `REFRESH_TOKEN_DEVICE_MISMATCH`: Rekey treats that as a stolen token and revokes every session the user has. Put the device in the config `getSession` and the middleware already take:
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 export const onRequest = rekeyMiddleware({ device: { fingerprint } });
 ```
@@ -254,6 +332,7 @@ The sign-in example above catches `INVALID_CREDENTIALS` and rethrows everything 
 | `DEVICE_LIMIT_REACHED` (403) | The credentials were right; the account is at its `max_devices` entitlement. `err.details` carries `{ limit, devices: [{ id, label, firstSeenAt, lastSeenAt }] }`. | The device list, so the user can pick one to release. No token was issued, so the release runs through your own backend (`rekey().devices.release(...)`) or an operator. |
 | `PASSWORD_VERIFY_BUSY` (503) | The bcrypt pool was saturated and the password was **not checked**. Nothing was counted toward lockout. | "Server busy, try again in `err.retryAfterSeconds` seconds." Telling the user their password is wrong is false, and it sends them to password reset. |
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 if (err instanceof RekeyError && err.code === 'DEVICE_LIMIT_REACHED') {
   devices = (err.details?.devices ?? []) as { id: string; label: string | null }[];
@@ -266,6 +345,7 @@ if (err instanceof RekeyError && err.code === 'DEVICE_LIMIT_REACHED') {
 
 ### `safePath`
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 safePath('/dashboard?tab=usage', '/');  // → '/dashboard?tab=usage'
 safePath('/docs/setup#install', '/');   // → '/docs/setup#install'
@@ -277,6 +357,7 @@ safePath('/%09/evil.com', '/');         // → '/'
 
 Use its return value as the redirect target, and never the raw `next`:
 
+<!-- snippet: no-check a fragment from inside a function body, shown without the function -->
 ```ts
 return Astro.redirect(safePath(Astro.url.searchParams.get('next'), '/dashboard'));
 ```

@@ -49,7 +49,7 @@ describe('admin read of a plan entitlement bundle', () => {
         method: 'POST',
         url: `/api/v1/admin/applications/${applicationId}/plans`,
         headers: admin,
-        payload: { slug: 'free', name: 'Free', amount: 0 },
+        payload: { slug: 'free', name: 'Free', },
       })
       .then((r) => r.json().data as { id: string });
     await prisma.planEntitlement.createMany({

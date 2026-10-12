@@ -1,35 +1,60 @@
 /**
- * `rekey doctor`, diagnose connectivity + config.
+ * `rekey doctor`, diagnose configuration, connectivity and money.
  *
- * Designed for AI agents to read structured output and self-heal. Each check
- * has a `name`, a `status` (`ok` / `warn` / `fail`), a human `message`, and
- * (when not OK) a concrete `fix`. Exit code is non-zero if any `fail` check
- * triggered.
+ *   rekey doctor [--app <id>]
+ *
+ * Each check has a `name`, a `status` (`ok`, `warn`, `fail` or `skipped`), a
+ * `message`, a concrete `fix` when it is not `ok`, and the `applicationId` it
+ * is about when it is about one. The exit code is non-zero when any check is
+ * `fail`. A `skipped` check did not run, usually for want of a credential: it
+ * is not a pass, and it does not fail the run.
+ *
+ * The money checks read with the operator token (`billing:read`), one
+ * Application at a time, and the billing outbox with the super-admin key.
+ * See `doctor/money-checks.ts` for what each one looks for.
  */
 
 import type { Command } from 'commander';
 import { ok, readGlobalOpts, type OutputContext } from '../lib/output.js';
-
-interface Check {
-  name: string;
-  status: 'ok' | 'warn' | 'fail';
-  message: string;
-  fix?: string;
-}
+import type { Check, CheckStatus } from './doctor/check.js';
+import { runMoneyChecks, skippedMoneyChecks } from './doctor/money.js';
 
 export function registerDoctorCommand(program: Command): void {
   program
     .command('doctor')
-    .description('Diagnose CLI configuration + reach the Rekey API')
-    .action(async function (this: Command) {
+    .description(
+      'Diagnose CLI configuration, reach the Rekey API, and check the money setup of every Application the operator token can see',
+    )
+    .option('--app <id>', 'Run the money checks on this Application only')
+    .action(async function (this: Command, opts: { app?: string }) {
       const ctx = readGlobalOpts(this);
-      const checks = await runDoctorChecks(ctx);
+      const checks = await runDoctorChecks(ctx, opts.app);
       ok(ctx, { checks }, renderChecks);
       if (checks.some((c) => c.status === 'fail')) process.exit(1);
     });
 }
 
-async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
+async function healthCheck(apiUrl: string): Promise<Check> {
+  try {
+    const res = await fetch(`${apiUrl.replace(/\/$/, '')}/health`);
+    if (res.ok) return { name: 'health', status: 'ok', message: 'API responded 200 to /health' };
+    return {
+      name: 'health',
+      status: 'fail',
+      message: `API returned HTTP ${res.status} to /health.`,
+      fix: 'Check that the Rekey API is running at the configured URL.',
+    };
+  } catch (err) {
+    return {
+      name: 'health',
+      status: 'fail',
+      message: `Could not reach ${apiUrl}/health: ${(err as Error).message}`,
+      fix: 'Check network reachability and that Rekey is running.',
+    };
+  }
+}
+
+async function runDoctorChecks(ctx: OutputContext, applicationId: string | undefined): Promise<Check[]> {
   const checks: Check[] = [];
 
   if (!ctx.apiUrl) {
@@ -54,36 +79,33 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
     checks.push({ name: 'admin-key', status: 'ok', message: 'admin key present' });
   }
 
-  if (ctx.apiUrl) {
-    try {
-      const res = await fetch(`${ctx.apiUrl.replace(/\/$/, '')}/health`);
-      if (res.ok) {
-        checks.push({ name: 'health', status: 'ok', message: 'API responded 200 to /health' });
-      } else {
-        checks.push({
-          name: 'health',
-          status: 'fail',
-          message: `API returned HTTP ${res.status} to /health.`,
-          fix: 'Check that the Rekey API is running at the configured URL.',
-        });
-      }
-    } catch (err) {
-      checks.push({
-        name: 'health',
-        status: 'fail',
-        message: `Could not reach ${ctx.apiUrl}/health: ${(err as Error).message}`,
-        fix: 'Check network reachability + that Rekey is running.',
-      });
-    }
+  if (!ctx.apiUrl) {
+    return [...checks, ...skippedMoneyChecks('not checked: no API URL', 'Set REKEY_URL, then run `rekey doctor` again.')];
   }
-
-  return checks;
+  const health = await healthCheck(ctx.apiUrl);
+  checks.push(health);
+  if (health.status !== 'ok') {
+    return [
+      ...checks,
+      ...skippedMoneyChecks('not checked: the API did not answer /health', 'Fix the health check, then run `rekey doctor` again.'),
+    ];
+  }
+  const money = await runMoneyChecks({
+    apiUrl: ctx.apiUrl,
+    operatorToken: ctx.operatorToken,
+    adminKey: ctx.adminKey,
+    applicationId,
+    now: new Date(),
+  });
+  return [...checks, ...money];
 }
+
+const SYMBOL: Record<CheckStatus, string> = { ok: '✓', warn: '!', fail: '✗', skipped: '-' };
 
 function renderChecks(d: { checks: Check[] }): void {
   for (const c of d.checks) {
-    const symbol = c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '✗';
-    process.stdout.write(`${symbol} ${c.name.padEnd(12)} ${c.message}\n`);
+    const subject = c.applicationId === undefined ? c.name : `${c.name} [${c.applicationId}]`;
+    process.stdout.write(`${SYMBOL[c.status]} ${subject.padEnd(12)} ${c.message}\n`);
     if (c.fix) process.stdout.write(`  fix: ${c.fix}\n`);
   }
 }

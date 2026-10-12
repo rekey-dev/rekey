@@ -56,7 +56,7 @@ export async function jwksRoutes(app: FastifyInstance): Promise<void> {
             },
             required: ['keys'],
           },
-          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.' }),
+          ...errs({ 429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.' }),
         },
       },
     },

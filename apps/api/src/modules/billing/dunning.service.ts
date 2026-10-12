@@ -32,6 +32,7 @@
  * webhook.service's delivery claim), two pollers can never double-process.
  */
 
+import { formatMoney } from '@rekey.dev/shared-types';
 import type { FastifyBaseLogger } from 'fastify';
 import type { DunningCase, Subscription } from '@prisma/client';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
@@ -39,6 +40,7 @@ import { prisma } from '../../lib/prisma.js';
 import { emailService } from '../email/email.service.js';
 import { hostedPortalUrl } from '../../lib/portal-origins.js';
 import { enqueueDunningEvent, enqueueSubscriptionEvent } from './webhooks/billing-events.js';
+import { logSubscriptionCanceled } from './money-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 
 /** Reminder schedule, in days after `openedAt`. Reminder #1 is sent at open. */
@@ -51,11 +53,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // nextActionAt = claim time, so the next poll (10 min cadence) re-attempts.
 const CLAIM_WINDOW_MS = 5 * 60 * 1000;
 
-/** "999 USD-minor" → "9.99 USD" for the reminder template. Display-only. */
-function formatAmount(amountMinor: number, currency: string): string {
-  return `${(amountMinor / 100).toFixed(2)} ${currency.toUpperCase()}`;
-}
-
 /** nextActionAt for a case that has sent `remindersSent` reminders so far. */
 function nextActionAfter(openedAt: Date, remindersSent: number): Date {
   const nextOffsetDays =
@@ -63,6 +60,23 @@ function nextActionAfter(openedAt: Date, remindersSent: number): Date {
       ? DUNNING_REMINDER_OFFSETS_DAYS[remindersSent]!
       : DUNNING_EXHAUST_AFTER_DAYS;
   return new Date(openedAt.getTime() + nextOffsetDays * DAY_MS);
+}
+
+/**
+ * The charge a subscription's reminder is about: its most recent payment,
+ * when that payment failed. The amount and currency are the failed charge's
+ * own, which a proration, a discount or a price in another currency make
+ * different from the subscription's unit price. Null when the last payment on
+ * record did not fail: the case was opened by a status change alone, and no
+ * amount is quoted rather than one the buyer may not owe.
+ */
+async function failedCharge(subscriptionId: string): Promise<{ amount: number; currency: string } | null> {
+  const latest = await prisma.payment.findFirst({
+    where: { subscriptionId },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { status: true, amount: true, currency: true },
+  });
+  return latest?.status === 'FAILED' ? { amount: latest.amount, currency: latest.currency.toUpperCase() } : null;
 }
 
 /**
@@ -77,7 +91,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
     where: { id: dunningCaseId },
     include: {
       application: true,
-      subscription: { include: { plan: { select: { name: true, amount: true, currency: true } } } },
+      subscription: { include: { plan: { select: { name: true } } } },
     },
   });
   if (!dunningCase) return;
@@ -89,6 +103,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
       })
     : null;
 
+  const due = await failedCharge(dunningCase.subscriptionId);
   let outcomeKind = 'skipped_no_recipient';
   if (endUser?.email) {
     const outcome = await emailService.dispatch({
@@ -98,10 +113,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
       variables: {
         userEmail: endUser.email,
         planName: dunningCase.subscription.plan.name,
-        amountDue: formatAmount(
-          dunningCase.subscription.plan.amount,
-          dunningCase.subscription.plan.currency,
-        ),
+        amountDue: due === null ? '' : formatMoney(due.amount, due.currency),
         attempt: String(attempt),
         graceEndsAtIso: new Date(
           dunningCase.openedAt.getTime() + DUNNING_EXHAUST_AFTER_DAYS * DAY_MS,
@@ -177,7 +189,7 @@ async function openForPastDue(args: {
   if (!billingConfig.success || !billingConfig.data.dunningEnabled) {
     args.log?.info(
       { subscriptionId: sub.id, applicationId: sub.applicationId },
-      'dunning disabled for application — no case opened (subscription PAST_DUE)',
+      'dunning disabled for application: no case opened (subscription PAST_DUE)',
     );
     return null;
   }
@@ -302,6 +314,7 @@ async function exhaustCase(dunningCaseId: string, log?: FastifyBaseLogger): Prom
         where: { id: sub.id },
         data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
       });
+      await logSubscriptionCanceled(tx, sub.id, { atPeriodEnd: false, cause: 'dunning' }, { actor: { type: 'system' } });
       ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.canceled', sub.id)));
     }
     const updated = await tx.dunningCase.updateMany({
@@ -317,7 +330,7 @@ async function exhaustCase(dunningCaseId: string, log?: FastifyBaseLogger): Prom
   if (closed) {
     log?.info(
       { dunningCaseId, subscriptionId: sub.id },
-      'dunning case exhausted — subscription canceled',
+      'dunning case exhausted: subscription canceled',
     );
   }
 }
@@ -389,7 +402,7 @@ export async function processDueDunningCases(
     if (dunningApp?.disabledAt != null) {
       log?.info(
         { dunningCaseId: dunningCase.id, applicationId: dunningCase.applicationId },
-        'application disabled — dunning case paused, not processed',
+        'application disabled: dunning case paused, not processed',
       );
       continue;
     }

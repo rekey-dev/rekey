@@ -23,6 +23,7 @@ import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-
 import { randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { pricedAt } from './subscription-price-fixture.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { applicationsService } from '../src/modules/applications/applications.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
@@ -341,6 +342,41 @@ describe('Dunning', () => {
     expect(emails).toHaveLength(1);
     expect(emails[0]!.toAddress).toBe(b.endUserEmail);
     expect(emails[0]!.status).toBe('no_transport');
+  });
+
+  it('the reminder quotes the failed charge, in its own amount and currency, not the price of the subscription', async () => {
+    const dispatch = vi.spyOn(emailService, 'dispatch');
+    try {
+      const slug = 'dun-amount';
+      const b = await bootstrap(slug, 'stripe');
+      await prisma.subscription.create({
+        data: {
+          applicationId: b.applicationId,
+          endUserId: b.endUserId,
+          planId: b.planId,
+          status: 'ACTIVE',
+          provider: 'stripe',
+          providerSubId: `sub_${slug}`,
+          ...(await pricedAt(b.planId, 'USD', 999)),
+        },
+      });
+      // A prorated invoice: less than the 9.99 the subscription costs.
+      await fireStripe(slug, {
+        id: `evt_${slug}`,
+        object: 'event',
+        type: 'invoice.payment_failed',
+        data: {
+          object: { id: `in_${slug}`, subscription: `sub_${slug}`, amount_due: 450, currency: 'usd', metadata: { applicationId: b.applicationId } },
+        },
+      });
+      await waitForEmailLogs(b.applicationId, 'billing_payment_failed_reminder', 1);
+      const call = dispatch.mock.calls.find(
+        ([input]) => input.application.id === b.applicationId && input.eventKey === 'billing_payment_failed_reminder',
+      );
+      expect(call?.[0].variables.amountDue).toBe('$4.50');
+    } finally {
+      dispatch.mockRestore();
+    }
   });
 
   it('the reminder links the hosted billing portal when the Application has one, and nothing when it does not', async () => {

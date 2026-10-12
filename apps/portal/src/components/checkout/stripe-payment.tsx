@@ -236,7 +236,7 @@ export function StripePayment({
           type="button"
           onClick={() => void pay()}
           disabled={!payable}
-          className="mt-4 inline-flex min-h-[44px] w-full items-center justify-center rounded-lg bg-[var(--ck-accent)] px-4 text-sm font-semibold text-white disabled:opacity-60"
+          className="ck-button mt-4"
         >
           {phase === 'processing' ? 'Processing…' : label}
         </button>
@@ -244,7 +244,6 @@ export function StripePayment({
       <p
         id="payment-status"
         role={phase === 'failed' ? 'alert' : 'status'}
-        aria-live="polite"
         className={`mt-3 min-h-[1.25rem] text-sm ${phase === 'failed' ? 'text-[#b91c1c]' : 'text-[var(--ck-fg)]'}`}
       >
         {message ?? ''}

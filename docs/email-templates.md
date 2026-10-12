@@ -113,6 +113,7 @@ Mint a secret key with the elevated **`email:send`** scope: in **Panel → Appli
 
 With [`@rekey.dev/node`](../packages/sdk-node/README.md):
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 import { Rekey } from '@rekey.dev/node';
 

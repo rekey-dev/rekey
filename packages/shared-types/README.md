@@ -20,20 +20,21 @@ Reach for `@rekey.dev/shared-types` when you want the **runtime Zod schemas** (n
 No keys, no client, no env vars. Pure types + schemas — import and use.
 
 ```ts
-import {
-  RekeyError,
-  PlanDtoSchema,
-  type PlanDto,
-  type AuthResultDto,
-} from '@rekey.dev/shared-types';
+import { PublicPlanDtoSchema, formatMoney, type PublicPlanDto } from '@rekey.dev/shared-types';
 
-// Static type:
-function priceLabel(plan: PlanDto): string {
-  return `${(plan.amount / 100).toFixed(2)} ${plan.currency}`; // amount is integer cents
+// Static type. `price` is the price the API resolved for the buyer, text included.
+function priceLabel(plan: PublicPlanDto): string {
+  return plan.price ? plan.price.formatted : plan.isFree ? 'Free' : 'Usage based';
 }
 
 // Runtime validation (the schema, not just the type):
-const plan = PlanDtoSchema.parse(await res.json());
+export async function readPlan(res: Response): Promise<string> {
+  const plan = PublicPlanDtoSchema.parse(await res.json()) as PublicPlanDto;
+  return priceLabel(plan);
+}
+
+// An amount you hold yourself: an integer in the minor unit of its currency.
+formatMoney(149900, 'INR'); // '₹1,499.00'
 ```
 
 ## What's inside
@@ -45,26 +46,30 @@ Each DTO ships as both a Zod schema (`…Schema`) and an inferred type. Highligh
 | Errors | `RekeyError` (class), `RekeyErrorShape`, `ApiResponseSchema` (the `{ success, data }` \| `{ success, error }` envelope) |
 | Application config | `ApplicationDto`, `AuthConfig`, `BillingConfig`, `BillingProvider`, `AccessConfig` |
 | Auth | `SignUpRequest`, `SignInRequest`, `AuthResultDto`, `SignInOutcomeDto`, `MfaChallengeResultDto`, `MfaVerifyRequest`, `ForgotPasswordRequest`, `ResetPasswordRequest`, `EndUserDto`, `ApiKeyDto` |
-| Billing | `PlanDto`, `PlanKindType` (`SUBSCRIPTION` / `LICENSE` / `USAGE` / `CREDIT`), `SubscriptionDto`, `CreateCheckoutRequest`, `CheckoutResultDto`, `ProvidersListDto` |
-| Coupons | `CouponDto`, `ValidateCouponRequest`, `ValidateCouponResultDto` |
+| Billing | `PlanDto` (operator), `PublicPlanDto` (pricing page), `PlanPriceDto`, `ResolvedPriceDto`, `PriceFallbackDto`, `PlanKindType` (`SUBSCRIPTION` / `LICENSE` / `USAGE` / `CREDIT`), `SubscriptionDto`, `CreateCheckoutRequest`, `CheckoutResultDto`, `ProvidersListDto` |
+| Currencies | `formatMoney`, `minorUnitExponent`, `validatePriceAmount`, `sellableCurrencies`, `isSellableCurrency`, `currencySellability`, `chargeableStep`, `percentageDiscount`, `localCurrencyOf`, `priceFallbackMessage`, `CURRENCY_TABLE`. Also at the dependency-free `@rekey.dev/shared-types/currency` entry. |
+| Money errors | `BILLING_MONEY_ERROR_CODES`, `BillingMoneyErrorCode`, `isBillingMoneyError` |
+| Refunds | `RefundDto`, `CreateRefundRequest`, `RefundResultDto`, `PaymentWebhookData`, `SubscriptionWebhookData` |
+| Billing log | `BillingLogEntry`, `BillingLogPage`, `BillingLogQuery`, `BillingEventType`, `BILLING_EVENT_DATA`, `BILLING_EVENT_TIER`, `ReconciliationReport`, `PriceFallbackSummary` |
+| Coupons | `CouponDto`, `CouponWithStatsDto`, `CreateCouponRequest`, `UpdateCouponRequest`, `ValidateCouponRequest`, `ValidateCouponResultDto` |
 | Credits | `CreditBalanceDto`, `CreditLedgerEntryDto`, `ConsumeCreditsRequest`, `ConsumeCreditsResultDto`, `GrantCreditsRequest` |
 | Organizations | `OrganizationDto`, `OrganizationWithRoleDto`, `OrganizationMemberDto`, `OrganizationInvitationDto`, `OrganizationRole` |
 | Licenses | `LicenseDto`, `LicenseKindType`, `LicenseVerifyResultDto` |
 | Usage | `UsageRecordDto`, `UsageAggregateDto` |
 | MCP / OAuth | `OAuthIntrospectionResponse`, `OAuthAuthServerMetadata`, `SecurityEventDto` |
 | Outbound webhooks | `WEBHOOK_EVENTS` (the full `{ name, description }` registry), `KNOWN_WEBHOOK_EVENTS`, `WebhookEventType`, `isKnownWebhookEvent`, `WebhookEventEnvelope`(+`Schema`), `WebhookEndpointDto`, `WebhookDeliveryDto`, `RetryWebhookDeliveryResultDto` |
-| Tenant / operator | `TenantPaymentDto` + `PaymentStatusType`, `BillingStatsDto` (incl. `mrrCurrency` / `mixedCurrencies`), `TenantEndUserDto`, `SecurityEventActorType`, query-param interfaces (`TenantPaymentsListQuery`, `TenantEndUsersListQuery`, `SecurityEventsListQuery`), `EndUserExportDocument` (GDPR/DSAR export) |
+| Tenant / operator | `TenantPaymentDto` + `PaymentStatusType`, `BillingStatsDto` (one entry per currency in `mrr`, `revenueLast30d`, `monthlyRevenue` and `unverified`; no total across currencies), `ReportingCurrencyDto`, `RoutingPreviewDto`, `TenantEndUserDto`, `SecurityEventActorType`, query-param interfaces (`TenantPaymentsListQuery`, `TenantEndUsersListQuery`, `SecurityEventsListQuery`), `EndUserExportDocument` (GDPR/DSAR export) |
 
 ## Gotchas
 
 - **`RekeyError` is the canonical class.** `@rekey.dev/node` and `@rekey.dev/react` re-export *this same* class, so `instanceof RekeyError` is consistent across packages. It lives in the dependency-free `@rekey.dev/shared-types/error` entry — import it from there in browser code and you get the class without zod (346 B vs 77 KB in a measured esbuild bundle). The barrel re-exports the identical class object, so either path is safe for `instanceof`.
 - **Server-authored enums are open unions.** `WebhookEventType`, `SubscriptionStatusType`, `PlanKindType`, `CreditReasonType` and `PaymentStatusType` are `… | (string & {})`, because a deployment one minor version ahead sends values this package predates. The known literals still autocomplete; your `switch` needs a `default`. The closed set is exported alongside as `KnownWebhookEventType`, `KnownSubscriptionStatus`, `KnownPlanKind`, `KnownCreditReason`, `KnownPaymentStatus` — use those for registries and label maps you own, and `isKnownWebhookEvent` to narrow at runtime. Filter/query types you *send* stay closed.
 - **`ApplicationDto.environment` is optional.** `GET /api/v1/me` does not return it. Narrow before use.
-- **Money is integer-only**, in the smallest currency unit (cents/paise/sen). `PlanDto.amount`, `CheckoutResultDto.discountAmount`, etc. are never floats.
-- **Coupon `amountOff`**: PERCENT is basis points (`1500` = 15%); AMOUNT is the smallest currency unit.
+- **Money is integer-only**, in the minor unit of its currency. `PlanPriceDto.amount`, `CheckoutResultDto.unitAmount`, `CheckoutResultDto.discountAmount` and the rest are never floats. Write one with `formatMoney(amount, currency)`: currencies have 0, 2 or 3 decimal places, so no fixed divisor is right. Where a DTO carries `formatted`, render that.
+- **Coupon discounts**: a PERCENT coupon carries `basisPoints` (`1500` = 15%). An AMOUNT coupon carries `amounts`, one `{ currency, amountOff }` per currency in that currency's smallest unit, and is refused in a currency it has no amount for.
 - **Discriminated unions**: branch on the discriminator before reading fields — `SignInOutcomeDto` on `mfaRequired`, `LicenseVerifyResultDto` on `ok`.
 - **`WEBHOOK_EVENTS` mirrors the API registry exactly** (names + order). Use it to render event pickers or autocomplete the `events` array when registering webhook endpoints; dedupe inbound deliveries on the envelope's `eventId`.
-- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT (or a scoped `rp_op_…` PAT on the small `/tenant/operator/*` surface) — not an Application secret key — so `@rekey.dev/node` deliberately has no methods for them. The types are here for panel-like consumers and agents.
+- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT or a scoped `rp_op_…` operator token, not an Application secret key. `RekeyOperator` in `@rekey.dev/node` wraps the billing ones (prices, coupons, refunds, the billing log, stats, the routing preview). The types are here for the rest, and for panel-like consumers and agents.
 
 ## Links
 

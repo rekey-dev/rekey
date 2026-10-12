@@ -228,7 +228,7 @@ export const tenantOAuthService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'OAUTH_NO_EMAIL',
-        message: `${provider} did not return an email — cannot sign in an operator.`,
+        message: `${provider} did not return an email, so Rekey cannot sign in an operator.`,
         fix: 'Grant the email scope to the OAuth client, or use password sign-in.',
       });
     }
@@ -236,7 +236,7 @@ export const tenantOAuthService = {
       throw new RekeyError({
         statusCode: 401,
         code: 'OAUTH_EMAIL_NOT_VERIFIED',
-        message: `${provider} did not verify the email — operator sign-in is refused.`,
+        message: `${provider} did not verify the email, so operator sign-in is refused.`,
         fix: 'Verify the email at the provider, then retry, or use password sign-in.',
       });
     }

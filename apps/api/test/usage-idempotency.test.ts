@@ -108,7 +108,7 @@ describe('Usage — record idempotency', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: 'capped', name: 'capped', amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug: 'capped', name: 'capped', kind: 'SUBSCRIPTION' },
     });
     await app.inject({
       method: 'PUT',
@@ -226,7 +226,7 @@ describe('Usage — record idempotency', () => {
           method: 'POST',
           url: `/api/v1/tenant/applications/${appId}/plans`,
           headers: auth(),
-          payload: { slug: 'racecap', name: 'racecap', amount: 0, kind: 'SUBSCRIPTION' },
+          payload: { slug: 'racecap', name: 'racecap', kind: 'SUBSCRIPTION' },
         });
         await app.inject({
           method: 'PUT',

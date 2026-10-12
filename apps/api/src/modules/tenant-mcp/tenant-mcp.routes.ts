@@ -60,11 +60,11 @@ import { errs, type JsonSchema } from '../../lib/openapi.js';
 
 const AUTH_ERRS = {
   401:
-    'OPERATOR_MCP_UNAUTHORIZED — no `Authorization: Bearer` header, or the presented PAT / ' +
+    'OPERATOR_MCP_UNAUTHORIZED: no `Authorization: Bearer` header, or the presented PAT / ' +
     'OAuth access token is unknown, revoked, expired, wrong-audience, or belongs to an ' +
     'operator no longer a member of the token\'s workspace.',
   403:
-    'OPERATOR_MCP_DISABLED — the credential is valid but its workspace has switched the ' +
+    'OPERATOR_MCP_DISABLED: the credential is valid but its workspace has switched the ' +
     'operator MCP server off. The one case that is not a generic 401: the caller is a ' +
     'confirmed member, and the fix names who can turn it back on.',
 };
@@ -218,7 +218,7 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['MCP · Operator'],
         security: [{ mcpAccessToken: [] }],
-        summary: 'Operator MCP endpoint — use POST (JSON-RPC)',
+        summary: 'Operator MCP endpoint. Use POST (JSON-RPC)',
         description:
           'Always 405 with `Allow: POST`. Still authenticated: the plugin-level Bearer hook ' +
           'runs first, so an unauthenticated GET gets 401 rather than this 405.',

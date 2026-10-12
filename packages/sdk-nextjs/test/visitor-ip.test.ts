@@ -34,6 +34,8 @@ const getCurrentUser = vi.fn();
 const scopedWith: Array<string | undefined> = [];
 /** The `clientUserAgent` each scoped client was made with, in order. */
 const scopedUa: Array<string | undefined> = [];
+/** The `visitorCountryHint` each scoped client was made with, in order. */
+const scopedCountry: Array<string | undefined> = [];
 
 vi.mock('next/headers', () => ({
   cookies: async () => cookieJar,
@@ -43,9 +45,10 @@ vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 vi.mock('@rekey.dev/node', () => ({
   Rekey: class {
     auth = { signIn, signUp, mfaVerify, refresh, getCurrentUser };
-    with(opts: { clientIp?: string; clientUserAgent?: string }) {
+    with(opts: { clientIp?: string; clientUserAgent?: string; visitorCountryHint?: string }) {
       if (opts.clientIp !== undefined) scopedWith.push(opts.clientIp);
       if (opts.clientUserAgent !== undefined) scopedUa.push(opts.clientUserAgent);
+      if ('visitorCountryHint' in opts) scopedCountry.push(opts.visitorCountryHint);
       return this;
     }
   },
@@ -60,6 +63,7 @@ beforeEach(() => {
   jar.clear();
   scopedWith.length = 0;
   scopedUa.length = 0;
+  scopedCountry.length = 0;
   for (const f of [signIn, signUp, mfaVerify, refresh, getCurrentUser]) f.mockReset();
   signIn.mockResolvedValue({ ...session, mfaRequired: false });
   signUp.mockResolvedValue(session);
@@ -126,6 +130,43 @@ describe('signIn, signUp and mfaVerify forward the visitor', () => {
     await call();
     expect(scopedUa).toEqual(['Mozilla/5.0 (iPhone) Safari/604.1']);
     expect(scopedWith).toEqual([]);
+  });
+});
+
+describe('the visitor country hint', () => {
+  it('reads Cloudflare first, then Vercel, upper-cased', () => {
+    expect(server.visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'in', 'x-vercel-ip-country': 'US' }))).toBe('IN');
+    expect(server.visitorCountryHintFrom(new Headers({ 'x-vercel-ip-country': 'de' }))).toBe('DE');
+    expect(server.visitorCountryHintFrom(new Headers({ 'cf-ipcountry': 'XX', 'x-vercel-ip-country': 'FR' }))).toBe('FR');
+  });
+
+  it.each(['XX', 'xx', 'T1', 'IND', 'I', '', '1N'])('ignores %j, which is not a country', (bad) => {
+    expect(server.visitorCountryHintFrom(new Headers({ 'cf-ipcountry': bad }))).toBeUndefined();
+    expect(server.visitorCountryHintFrom(new Headers({ 'x-vercel-ip-country': bad }))).toBeUndefined();
+  });
+
+  it('never reads a header the page or the visitor chooses', () => {
+    expect(server.visitorCountryHintFrom(new Headers({ 'x-country': 'IN', 'x-rekey-visitor-country-hint': 'IN' }))).toBeUndefined();
+  });
+
+  it('visitorCountryHint() answers for the current request', async () => {
+    requestHeaders = new Headers({ 'x-vercel-ip-country': 'IN' });
+    expect(await server.visitorCountryHint()).toBe('IN');
+    requestHeaders = new Headers({ 'cf-ipcountry': 'T1' });
+    expect(await server.visitorCountryHint()).toBeUndefined();
+  });
+
+  it('rides along on a visitor call when the platform names a country', async () => {
+    requestHeaders = new Headers({ 'cf-ipcountry': 'IN' });
+    await server.signIn({ email: 'a@b.co', password: 'pw' });
+    expect(scopedCountry).toEqual(['IN']);
+  });
+
+  it.each(['XX', 'T1', 'nowhere'])('is not sent when the platform header is %j', async (bad) => {
+    requestHeaders = new Headers({ 'cf-ipcountry': bad, 'user-agent': 'Mozilla/5.0' });
+    await server.signIn({ email: 'a@b.co', password: 'pw' });
+    expect(scopedUa).toEqual(['Mozilla/5.0']);
+    expect(scopedCountry).toEqual([]);
   });
 });
 

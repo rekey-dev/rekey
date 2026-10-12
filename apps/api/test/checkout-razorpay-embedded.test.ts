@@ -76,8 +76,8 @@ describe('Razorpay on the checkout page', () => {
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
     await configureSandboxRazorpay(applicationId, WEBHOOK_SECRET);
     for (const payload of [
-      { slug: 'standard', name: 'Standard', amount: SUB_PRICE, currency: 'INR' },
-      { slug: 'pack', name: '100 credits', amount: PACK_PRICE, currency: 'INR', kind: 'CREDIT', creditsAmount: PACK_CREDITS },
+      { slug: 'standard', name: 'Standard', price: { currency: 'INR', amount: SUB_PRICE } },
+      { slug: 'pack', name: '100 credits', price: { currency: 'INR', amount: PACK_PRICE }, kind: 'CREDIT', creditsAmount: PACK_CREDITS },
     ]) {
       const res = await app.inject({ method: 'POST', url: `/api/v1/tenant/applications/${applicationId}/plans`, headers: auth, payload });
       expect(res.statusCode, res.body).toBeLessThan(300);
@@ -302,9 +302,7 @@ describe('Razorpay on the checkout page', () => {
 
     it('does not count a checkout Rekey cannot verify against the buyer, and says why', async () => {
       const { token, providerId, sessionId } = await startCheckout('pack');
-      const row = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: sessionId } });
-      const { expectedCharge: _dropped, ...meta } = row.metadata as Record<string, unknown>;
-      await prisma.checkoutSession.update({ where: { id: sessionId }, data: { metadata: meta as Prisma.InputJsonObject } });
+      await prisma.checkoutSession.update({ where: { id: sessionId }, data: { chargeAmount: null } });
       const body = orderApproval(providerId);
       paidAtRazorpay(body.paymentId, providerId);
       for (let i = 0; i < MAX_REFUSED_CONFIRMATIONS + 1; i++) {
@@ -467,10 +465,12 @@ describe('Razorpay on the checkout page', () => {
       expect((await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe('ACTIVE');
     });
 
-    it('changes nothing for an embedded order no local row names', async () => {
+    it('records the charge of an embedded order no local row names as unverified, and activates nothing', async () => {
       const pay = paymentId();
       expect((await webhook(orderPaid('order_nobodys', pay))).statusCode).toBe(200);
-      expect(await prisma.payment.count({ where: { applicationId, providerPaymentId: pay } })).toBe(0);
+      const recorded = await prisma.payment.findFirstOrThrow({ where: { applicationId, providerPaymentId: pay }, include: { unapplied: true } });
+      expect(recorded).toMatchObject({ verification: 'UNVERIFIED', subscriptionId: null, status: 'SUCCEEDED', provider: 'razorpay' });
+      expect(recorded.unapplied).toMatchObject({ status: 'OPEN', metadata: { reasonCode: 'no_subscription' } });
       expect(await prisma.subscription.count({ where: { applicationId, status: 'ACTIVE' } })).toBe(0);
     });
 

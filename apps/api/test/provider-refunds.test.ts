@@ -399,6 +399,7 @@ describe('razorpay: refund creation and its refusals', () => {
       ...REFUND,
       providerPaymentId: 'pay_ABC123',
       amount: 4900,
+      currency: 'INR',
     });
 
     expect(fn).toHaveBeenCalledWith(

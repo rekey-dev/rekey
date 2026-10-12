@@ -19,6 +19,7 @@ import { paidInvoicePayments, type StripeRefundTarget } from './stripe-invoice-p
 import { paymentPurchase, stripePriceIdFor, subscriptionPurchase } from './stripe-session-params.js';
 import { embeddedSessionParams, requirePublishableKey, retrieveCheckoutSnapshot } from './stripe-embedded.js';
 import { replaceWithHostedSession } from './stripe-hosted-fallback.js';
+import { fromProviderAmount, toProviderAmount } from './stripe-money.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
@@ -32,8 +33,10 @@ import type {
   ProviderPlanRef,
   RefundPaymentInput,
   RefundPaymentResult,
+  WebhookInspection,
 } from './types.js';
-import type { Plan } from '@prisma/client';
+import { providerRegistration } from '../priced-plan.js';
+import type { PricedPlan } from './types.js';
 
 interface RealStripeCreds {
   apiKey: string;
@@ -55,6 +58,23 @@ interface RealStripeCreds {
  * it.
  */
 const CHECKOUT_COUPON_TTL_SECONDS = 25 * 60 * 60;
+
+/** The events the Stripe handler consumes; auto-configure subscribes to exactly these. */
+const WEBHOOK_EVENTS: readonly Stripe.WebhookEndpointCreateParams.EnabledEvent[] = [
+  'checkout.session.completed',
+  // Checkout offers whatever methods the account enables, and a delayed
+  // one (bank debits, vouchers) completes the session unpaid. This is
+  // when its money actually arrives.
+  'checkout.session.async_payment_succeeded',
+  // And when it does not: the checkout is closed so the buyer can start
+  // another.
+  'checkout.session.async_payment_failed',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'charge.refunded',
+];
 
 export class RealStripeProvider implements BillingProvider {
   readonly name = 'stripe';
@@ -79,12 +99,14 @@ export class RealStripeProvider implements BillingProvider {
    * Create a Stripe Product + Price for this Plan if not already
    * registered, then return the Price id we'll reference at checkout.
    *
-   * Idempotency: we check `Plan.metadata.stripe.priceId` first; if
+   * Idempotency: we check this price's stored `stripe.priceId` first; if
    * present, return it without hitting Stripe. The very first call mints
-   * both Product and Price.
+   * both Product and Price. An additional price gets a Product of its own:
+   * only the price id is stored, so the default price's Product is not known
+   * here.
    */
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
-    const existing = (plan.metadata as { stripe?: { priceId?: string } } | null)?.stripe?.priceId;
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
+    const existing = providerRegistration(plan, 'stripe').priceId;
     if (existing) return { providerPlanId: existing };
 
     const product = await this.stripe.products.create({
@@ -97,13 +119,14 @@ export class RealStripeProvider implements BillingProvider {
 
     const price = await this.stripe.prices.create({
       product: product.id,
-      unit_amount: plan.amount,
+      unit_amount: toProviderAmount(plan.currency, plan.amount),
       currency: plan.currency.toLowerCase(),
       recurring: {
         interval: plan.interval === 'YEAR' ? 'year' : 'month',
       },
       metadata: {
         rekeyPlanId: plan.id,
+        ...(plan.planPriceId !== null && !plan.isDefaultPrice && { rekeyPlanPriceId: plan.planPriceId }),
       },
     });
 
@@ -136,7 +159,7 @@ export class RealStripeProvider implements BillingProvider {
     let coupon: Stripe.Coupon;
     try {
       coupon = await this.stripe.coupons.create({
-        amount_off: discount.amount,
+        amount_off: toProviderAmount(discount.currency, discount.amount),
         currency: discount.currency.toLowerCase(),
         duration: 'once',
         name: discount.code,
@@ -279,21 +302,6 @@ export class RealStripeProvider implements BillingProvider {
    * we delete + recreate to obtain a storable secret.
    */
   async registerWebhook(publicUrl: string): Promise<{ secret?: string; webhookId?: string }> {
-    const enabledEvents: Stripe.WebhookEndpointCreateParams.EnabledEvent[] = [
-      'checkout.session.completed',
-      // Checkout offers whatever methods the account enables, and a delayed
-      // one (bank debits, vouchers) completes the session unpaid. This is
-      // when its money actually arrives.
-      'checkout.session.async_payment_succeeded',
-      // And when it does not: the checkout is closed so the buyer can start
-      // another.
-      'checkout.session.async_payment_failed',
-      'customer.subscription.updated',
-      'customer.subscription.deleted',
-      'invoice.paid',
-      'invoice.payment_failed',
-      'charge.refunded',
-    ];
     const existing = await this.stripe.webhookEndpoints.list({ limit: 100 });
     const match = existing.data.find((e) => e.url === publicUrl);
     if (match) {
@@ -302,10 +310,21 @@ export class RealStripeProvider implements BillingProvider {
     const created = await this.stripe.webhookEndpoints.create({
       url: publicUrl,
       api_version: STRIPE_API_VERSION,
-      enabled_events: enabledEvents,
+      enabled_events: [...WEBHOOK_EVENTS],
       description: 'Rekey (auto-configured)',
     });
     return { webhookId: created.id, ...(created.secret && { secret: created.secret }) };
+  }
+
+  async inspectWebhook(publicUrl: string): Promise<WebhookInspection> {
+    const endpoints = await this.stripe.webhookEndpoints.list({ limit: 100 });
+    const match = endpoints.data.find((e) => e.url === publicUrl);
+    if (!match) return { state: 'missing' };
+    if (match.status !== 'enabled') return { state: 'disabled' };
+    const subscribed = new Set<string>(match.enabled_events);
+    if (subscribed.has('*')) return { state: 'registered' };
+    const missing = WEBHOOK_EVENTS.filter((name) => !subscribed.has(name));
+    return missing.length > 0 ? { state: 'missing_events', events: missing } : { state: 'registered' };
   }
 
   /**
@@ -380,6 +399,7 @@ export class RealStripeProvider implements BillingProvider {
   }
 
   async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentResult> {
+    const wireAmount = input.amount === undefined ? undefined : toProviderAmount(input.currency ?? '', input.amount);
     const target = await this.resolveRefundTarget(input.providerPaymentId);
     let refund: Stripe.Refund;
     try {
@@ -387,7 +407,7 @@ export class RealStripeProvider implements BillingProvider {
         {
           ...target,
           // Absent = Stripe refunds the full remaining amount itself.
-          ...(input.amount !== undefined && { amount: input.amount }),
+          ...(wireAmount !== undefined && { amount: wireAmount }),
           // Stripe's enum is fixed (`duplicate` / `fraudulent` /
           // `requested_by_customer`); the operator's own words go in metadata
           // where they survive for whoever reads this later.
@@ -416,7 +436,7 @@ export class RealStripeProvider implements BillingProvider {
     }
     return {
       refundId: refund.id,
-      amount: refund.amount,
+      amount: fromProviderAmount(refund.currency, refund.amount),
       currency: refund.currency.toUpperCase(),
       // Stripe's `pending` is a real state for delayed-notification methods.
       // Anything that is not outright succeeded is reported as pending so the

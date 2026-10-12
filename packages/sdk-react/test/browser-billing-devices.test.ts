@@ -204,3 +204,33 @@ describe('usage remaining and own credit ledger', () => {
     expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(TOKEN);
   });
 });
+
+describe('listBillingProviders', () => {
+  const LIST = { country: null, routedProvider: 'stripe', providers: [] };
+  const called = async (opts?: { country?: string; planSlug?: string }): Promise<[URL, Record<string, string>]> => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: LIST }));
+    await makeClient(fetchSpy).listBillingProviders(opts);
+    const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    return [new URL(url), init.headers as Record<string, string>];
+  };
+
+  it('sends planSlug so the API lists only providers that can charge that plan', async () => {
+    const [url] = await called({ planSlug: 'pro monthly' });
+    expect(url.pathname).toBe('/api/v1/billing/providers');
+    expect(url.searchParams.get('planSlug')).toBe('pro monthly');
+    expect(url.searchParams.has('country')).toBe(false);
+  });
+
+  it('sends country and planSlug together, in the query only', async () => {
+    const [url, headers] = await called({ country: 'in', planSlug: 'pro' });
+    expect(url.searchParams.get('country')).toBe('IN');
+    expect(url.searchParams.get('planSlug')).toBe('pro');
+    expect(headers['x-country']).toBeUndefined();
+  });
+
+  it('sends no query at all when nothing is asked', async () => {
+    const [url, headers] = await called();
+    expect(url.search).toBe('');
+    expect(headers['x-country']).toBeUndefined();
+  });
+});

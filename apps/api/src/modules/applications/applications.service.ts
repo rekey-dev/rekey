@@ -23,6 +23,7 @@ import { emailService, lockEmailCoupling } from '../email/email.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { generatePublicKey } from '../../lib/keys.js';
 import { assertNominatableFreePlan } from '../billing/free-plan.js';
+import { recordBillingSettingsChanges } from '../billing/billing-settings-events.js';
 import { assertProductionAppQuota } from '../../lib/tenant-limits.js';
 import {
   AuthConfigSchema,
@@ -117,7 +118,9 @@ function defaultBillingConfig(provider: BillingProvider): BillingConfig {
     provider,
     billingSubject: 'user',
     trialPolicy: 'once_per_application',
-    currency: 'USD',
+    localPrices: 'trusted',
+    reportingCurrency: 'USD',
+    onUnavailableCurrency: 'fallback',
     metadata: {},
   };
 }
@@ -524,10 +527,14 @@ export const applicationsService = {
   },
 
   /**
-   * Patch the application's billingConfig, currently the `enabled` master
-   * switch. Off (default for new apps) gates the public billing API + hides the
-   * Billing group in the panel. A `defaultPlanSlug` must name an active plan
-   * that costs nothing (DEFAULT_PLAN_NOT_FOUND, BILLING_FREE_PLAN_NOT_FREE).
+   * Patch the application's billingConfig. `enabled` is the master switch: off
+   * (default for new apps) gates the public billing API + hides the Billing
+   * group in the panel. A `defaultPlanSlug` must name an active plan that
+   * costs nothing (DEFAULT_PLAN_NOT_FOUND, BILLING_FREE_PLAN_NOT_FREE).
+   *
+   * A change to `localPrices` or `onUnavailableCurrency` decides what a buyer
+   * is charged, so it is written to the billing log with the value before and
+   * after, in the transaction of the change.
    */
   async updateBillingConfig(args: {
     applicationId: string;
@@ -535,25 +542,45 @@ export const applicationsService = {
       enabled?: boolean | undefined;
       dunningEnabled?: boolean | undefined;
       billingSubject?: 'user' | 'org' | undefined;
+      trialPolicy?: BillingConfig['trialPolicy'] | undefined;
+      localPrices?: BillingConfig['localPrices'] | undefined;
+      onUnavailableCurrency?: BillingConfig['onUnavailableCurrency'] | undefined;
       // string sets the free-tier default plan slug; null clears it.
       defaultPlanSlug?: string | null | undefined;
     };
+    /** The operator making the change, named in the billing log. Left out for a change no operator made. */
+    operatorId?: string | undefined;
   }): Promise<Application> {
-    const app = await this.get(args.applicationId);
+    await this.get(args.applicationId);
     if (typeof args.patch.defaultPlanSlug === 'string') {
       await assertNominatableFreePlan(args.applicationId, args.patch.defaultPlanSlug);
     }
-    const current = BillingConfigSchema.parse(app.billingConfig);
     const cleaned = Object.fromEntries(
       Object.entries(args.patch).filter(([, v]) => v !== undefined),
     );
-    const merged: Record<string, unknown> = { ...current, ...cleaned };
-    // Explicit null clears the optional free-tier default.
-    if (cleaned.defaultPlanSlug === null) delete merged.defaultPlanSlug;
-    const next = BillingConfigSchema.parse(merged);
-    const updated = await prisma.application.update({
-      where: { id: args.applicationId },
-      data: { billingConfig: next as object },
+    const updated = await prisma.$transaction(async (tx) => {
+      // The config is one JSON value with several writers (this patch, the
+      // reporting currency). Read under the row lock, so a patch merges into
+      // what the last writer committed instead of writing back a copy read
+      // before it. NO KEY UPDATE, because a plain FOR UPDATE would also queue
+      // every insert of a row that references this Application behind it.
+      const [row] = await tx.$queryRaw<Array<{ billing_config: unknown }>>`
+        SELECT "billing_config" FROM "applications" WHERE "id" = ${args.applicationId} FOR NO KEY UPDATE`;
+      const current = BillingConfigSchema.parse(row?.billing_config ?? {});
+      const merged: Record<string, unknown> = { ...current, ...cleaned };
+      // Explicit null clears the optional free-tier default.
+      if (cleaned.defaultPlanSlug === null) delete merged.defaultPlanSlug;
+      const next = BillingConfigSchema.parse(merged);
+      await recordBillingSettingsChanges(tx, {
+        applicationId: args.applicationId,
+        before: current,
+        after: next,
+        operatorId: args.operatorId,
+      });
+      return tx.application.update({
+        where: { id: args.applicationId },
+        data: { billingConfig: next as object },
+      });
     });
     // The overview tile shows `billing.enabled`; do not let it lag the toggle.
     forgetDashboard(statsCacheKey(args.applicationId));

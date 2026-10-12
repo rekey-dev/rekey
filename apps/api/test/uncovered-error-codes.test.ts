@@ -254,7 +254,7 @@ describe('uncovered error codes', () => {
         method: 'POST',
         url: `/api/v1/admin/applications/${b.applicationId}/plans`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { slug: 'pro_monthly', name: 'Pro', amount: 999, currency: 'usd' },
+        payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'usd', amount: 999 } },
       });
       expect(plan.statusCode).toBe(201);
       const signUp = await app.inject({
@@ -296,7 +296,7 @@ describe('uncovered error codes', () => {
 
     it('COUPON_INACTIVE: a deactivated coupon stops discounting', async () => {
       const f = await couponFixture('cinactive');
-      await createCoupon(f, { code: 'OFF20', discountType: 'PERCENT', amountOff: 2000 });
+      await createCoupon(f, { code: 'OFF20', discountType: 'PERCENT', basisPoints: 2000 });
       // Active first, otherwise "refused" proves nothing about the flag.
       expect((await validate(f, 'OFF20')).statusCode).toBe(200);
 
@@ -318,7 +318,7 @@ describe('uncovered error codes', () => {
       await createCoupon(f, {
         code: 'SOON',
         discountType: 'PERCENT',
-        amountOff: 1000,
+        basisPoints: 1000,
         startsAt: new Date(Date.now() + 86_400_000).toISOString(),
       });
 
@@ -333,10 +333,10 @@ describe('uncovered error codes', () => {
       });
       const ok = await validate(f, 'SOON');
       expect(ok.statusCode).toBe(200);
-      expect((ok.json().data as { discountAmount: number }).discountAmount).toBe(99);
+      expect((ok.json().data as { discountAmount: number }).discountAmount).toBe(100); // 10% of 9.99, rounded up toward the buyer
     });
 
-    it('COUPON_CURRENCY_MISMATCH: a fixed-amount coupon is not applied across currencies', async () => {
+    it('COUPON_CURRENCY_NOT_COVERED: a fixed-amount coupon is not applied across currencies', async () => {
       const f = await couponFixture('ccurrency');
       // The plan is priced in USD; this coupon is denominated in EUR. Applying
       // it anyway would take 500 *cents* off a dollar price, a silent
@@ -344,40 +344,38 @@ describe('uncovered error codes', () => {
       await createCoupon(f, {
         code: 'EUR5',
         discountType: 'AMOUNT',
-        amountOff: 500,
-        currency: 'EUR',
+        amounts: [{ currency: 'EUR', amountOff: 500 }],
       });
 
       const res = await validate(f, 'EUR5');
       expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_CURRENCY_MISMATCH');
+      expect(res.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
 
       // The same face value in the plan's own currency applies.
-      await createCoupon(f, { code: 'USD5', discountType: 'AMOUNT', amountOff: 500, currency: 'USD' });
+      await createCoupon(f, { code: 'USD5', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }] });
       const ok = await validate(f, 'USD5');
       expect(ok.statusCode).toBe(200);
       expect((ok.json().data as { discountAmount: number }).discountAmount).toBe(500);
     });
 
-    it('COUPON_CURRENCY_REQUIRED: an AMOUNT coupon cannot be created without a currency', async () => {
-      // Without one, 500 would come off a plan in any currency: $5, 5 EUR,
-      // or 500 yen, whichever the buyer happened to pick (#290).
+    it('COUPON_AMOUNTS_REQUIRED: an AMOUNT coupon cannot be created without an amount in some currency', async () => {
+      // Without one it would have nothing to take off in any currency (#290).
       const f = await couponFixture('ccurreq');
       const res = await app.inject({
         method: 'POST',
         url: `/api/v1/admin/applications/${f.applicationId}/coupons`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { code: 'ANY5', discountType: 'AMOUNT', amountOff: 500 },
+        payload: { code: 'ANY5', discountType: 'AMOUNT', amounts: [] },
       });
       expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_CURRENCY_REQUIRED');
+      expect(res.json().error.code).toBe('COUPON_AMOUNTS_REQUIRED');
       expect(await prisma.coupon.count({ where: { applicationId: f.applicationId } })).toBe(0);
 
       // The fix it gives works: the same body with a currency is accepted.
-      await createCoupon(f, { code: 'ANY5', discountType: 'AMOUNT', amountOff: 500, currency: 'USD' });
+      await createCoupon(f, { code: 'ANY5', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }] });
 
       // PERCENT is unaffected: a percentage means the same thing in every currency.
-      await createCoupon(f, { code: 'PCT10', discountType: 'PERCENT', amountOff: 1000 });
+      await createCoupon(f, { code: 'PCT10', discountType: 'PERCENT', basisPoints: 1000 });
     });
 
     it('COUPON_CURRENCY_INVALID: a currency that is not ISO 4217 is refused at create', async () => {
@@ -386,19 +384,19 @@ describe('uncovered error codes', () => {
         method: 'POST',
         url: `/api/v1/admin/applications/${f.applicationId}/coupons`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { code: 'BOGUS5', discountType: 'AMOUNT', amountOff: 500, currency: 'ABC' },
+        payload: { code: 'BOGUS5', discountType: 'AMOUNT', amounts: [{ currency: 'ABC', amountOff: 500 }] },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe('COUPON_CURRENCY_INVALID');
       expect(await prisma.coupon.count({ where: { applicationId: f.applicationId } })).toBe(0);
 
       // Case does not matter, matching how the plan comparison treats it.
-      await createCoupon(f, { code: 'LOWER5', discountType: 'AMOUNT', amountOff: 500, currency: 'usd' });
+      await createCoupon(f, { code: 'LOWER5', discountType: 'AMOUNT', amounts: [{ currency: 'usd', amountOff: 500 }] });
     });
 
-    it('COUPON_CURRENCY_REQUIRED: a legacy AMOUNT coupon with no currency is refused, not applied at face value', async () => {
-      // Rows created before `currency` was required still exist. The API can
-      // no longer write one, so the row is seeded directly.
+    it('COUPON_CURRENCY_NOT_COVERED: a legacy AMOUNT coupon with no currency is refused, not applied at face value', async () => {
+      // Rows created before `currency` was required still exist and have no
+      // amount row. The API can no longer write one, so the row is seeded directly.
       const f = await couponFixture('ccurlegacy');
       await prisma.coupon.create({
         data: {
@@ -412,7 +410,7 @@ describe('uncovered error codes', () => {
 
       const res = await validate(f, 'LEGACY5');
       expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_CURRENCY_REQUIRED');
+      expect(res.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
 
       // Checkout goes through the same gate, so nothing is reserved or minted.
       const checkout = await app.inject({
@@ -427,7 +425,7 @@ describe('uncovered error codes', () => {
         },
       });
       expect(checkout.statusCode).toBe(400);
-      expect(checkout.json().error.code).toBe('COUPON_CURRENCY_REQUIRED');
+      expect(checkout.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
       expect(await prisma.couponRedemption.count({ where: { applicationId: f.applicationId } })).toBe(0);
     });
   });
@@ -497,7 +495,7 @@ describe('uncovered error codes', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${b.applicationId}/plans`,
         headers: { authorization: `Bearer ${b.tenantAccess}` },
-        payload: { slug, name: slug, amount: 100 },
+        payload: { slug, name: slug, price: { currency: 'USD', amount: 100 } },
       });
       expect(r.statusCode).toBe(201);
     };

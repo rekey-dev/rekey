@@ -303,6 +303,10 @@ operators have `list_devices`, `release_device`, `block_device` and
 `unblock_device` over MCP, and end-users `list_my_devices`. Legacy accounts
 come over through `POST /api/v1/users/import` (see [auth.md](auth.md)).
 
+Releasing or blocking a device removes it from an open support case that names
+it, and closes the case when it was the last one. Unblocking it or signing in
+on it again does not put it back. See [support-mode.md](support-mode.md).
+
 ## Not yet
 
 An offline-verifiable activation token with a grace period, for clients that

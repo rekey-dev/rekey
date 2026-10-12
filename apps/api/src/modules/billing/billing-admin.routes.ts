@@ -62,10 +62,10 @@ const GrantResult: JsonSchema = {
 /** The 401/403/429 trio every `/api/v1/admin/*` route shares. */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 const Params = z.object({ id: z.string().min(1) });
@@ -78,6 +78,7 @@ const GrantBody = z
     organizationId: z.string().min(1).max(64).optional(),
     currentPeriodEnd: z.string().datetime().optional(),
     note: z.string().max(500).optional(),
+    currency: z.string().length(3).optional(),
   })
   // Naming the subscriber twice is not a convenience, it is two answers to one
   // question, and the wrong one silently winning is how a subscription gets
@@ -164,6 +165,17 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
               description:
                 "Why this was granted. Stored on the subscription and in the audit log.",
             },
+            currency: {
+              type: "string",
+              minLength: 3,
+              maxLength: 3,
+              description:
+                "The currency the subscriber is billed in, ISO 4217. The subscription takes the " +
+                "plan's price in it, so MRR and `subscription.*` events report that price. The " +
+                "plan must have a price in it. Omit it and the subscription follows the plan's " +
+                "default price. A lapsed subscription takes the price named. A live one keeps " +
+                "its currency: naming another is refused with 409.",
+            },
           },
         },
         response: {
@@ -174,19 +186,24 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
           201: ok(GrantResult, "The subscription is now active."),
           ...errs({
             400:
-              "VALIDATION_ERROR — a field failed schema validation, or neither/both of " +
-              "`endUserId` and `email` were given; or BILLING_ORGANIZATION_REQUIRED — the " +
+              "VALIDATION_ERROR: a field failed schema validation, or neither/both of " +
+              "`endUserId` and `email` were given; or BILLING_ORGANIZATION_REQUIRED: the " +
               "Application bills per organization and none was named; or " +
-              "SUBSCRIPTION_PERIOD_END_IN_PAST — `currentPeriodEnd` is not in the future.",
+              "SUBSCRIPTION_PERIOD_END_IN_PAST: `currentPeriodEnd` is not in the future; or " +
+              "BILLING_PLAN_CURRENCY_UNAVAILABLE: the plan has no price in `currency`.",
             ...SUPER_ADMIN_ERRORS,
             404:
-              "APPLICATION_NOT_FOUND — no application with that id; or PLAN_NOT_FOUND — no such " +
-              "plan in this application; or END_USER_NOT_FOUND — nobody in this application " +
-              "matches that id or email; or ORGANIZATION_NOT_FOUND — no such organization here.",
+              "APPLICATION_NOT_FOUND: no application with that id; or PLAN_NOT_FOUND: no such " +
+              "plan in this application; or END_USER_NOT_FOUND: nobody in this application " +
+              "matches that id or email; or ORGANIZATION_NOT_FOUND: no such organization here.",
             409:
               "BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: the subscriber already holds this plan " +
               "live for a different billing subject (another organization, or their personal " +
-              "account). A subscription to one plan is stored once per subscriber.",
+              "account). A subscription to one plan is stored once per subscriber. Or " +
+              "BILLING_SUBSCRIPTION_CURRENCY_KEPT: the subscriber's live subscription is in " +
+              "another currency than `currency`, and a grant does not change it. Or " +
+              "BILLING_SUBSCRIPTION_PRICE_UNSETTLED: `currency` was named for a live subscription " +
+              "that a checkout opened and that has no price recorded.",
           }),
         },
       },
@@ -208,6 +225,7 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
           currentPeriodEnd: new Date(body.currentPeriodEnd),
         }),
         ...(body.note !== undefined && { note: body.note }),
+        ...(body.currency !== undefined && { currency: body.currency }),
       });
 
       // Money-adjacent state with no payment behind it: who did it, to whom, on
@@ -263,7 +281,7 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
           "Sets `billingConfig.defaultPlanSlug`, the plan `POST /api/v1/billing/subscribe` " +
           "activates and whose FEATURE flags and included usage apply as the free tier. Pass " +
           "`null` to clear it. The slug must name an active plan on this Application that costs " +
-          "nothing (`amount` 0, no `pricePerUnitCents`). " +
+          "nothing (`isFree` true: no `price`, and not a USAGE plan). " +
           "Operators do the same through `PATCH /api/v1/tenant/applications/:id/billing-config`.",
         params: {
           type: "object",
@@ -289,13 +307,13 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              "DEFAULT_PLAN_NOT_FOUND — no active plan with that slug on this Application; or " +
-              "VALIDATION_ERROR — the body is not `{ slug: string | null }`.",
+              "DEFAULT_PLAN_NOT_FOUND: no active plan with that slug on this Application; or " +
+              "VALIDATION_ERROR: the body is not `{ slug: string | null }`.",
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
             409:
-              "BILLING_FREE_PLAN_NOT_FREE: the plan has a nonzero `amount` or a " +
-              "`pricePerUnitCents`, and the free tier must cost nothing.",
+              "BILLING_FREE_PLAN_NOT_FREE: the plan is not free (it has a price, or it is a " +
+              "USAGE plan), and the free tier must cost nothing.",
           }),
         },
       },

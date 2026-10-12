@@ -1,57 +1,58 @@
 /**
- * PayPal reports and accepts amounts in the currency's own units, so the scale
- * factor is part of the amount's meaning. Getting it wrong is a clean 100×,
- * straight into the operator's revenue figures, and on the currencies PayPal
- * takes no decimals on, it also makes checkout creation fail outright.
+ * PayPal reports and accepts amounts as decimal strings in the currency's own
+ * units, so the scale is part of the amount's meaning. Getting it wrong is a
+ * clean 100x straight into the operator's revenue figures, and on the
+ * currencies PayPal takes no decimals on it also makes checkout creation fail
+ * outright.
  *
- * The set is PayPal's, not ISO 4217's, because they disagree: ISO calls ISK
- * zero-decimal, PayPal accepts decimals for it. A shared cross-provider table
- * would be wrong for somebody, which is why this one lives beside the module
- * that talks to PayPal.
+ * A stored amount is at the ISO 4217 exponent. The no-decimals set is
+ * PayPal's own, and the two disagree on HUF and TWD: ISO gives them two
+ * places and PayPal takes none.
  */
 import { describe, expect, it } from 'vitest';
 import {
-  paypalScale,
-  paypalMajorString,
+  PAYPAL_NO_DECIMALS,
+  paypalMinorFromMajor,
+  toProviderAmount,
 } from '../src/modules/billing/providers/paypal-money.js';
 
-describe('inbound: provider decimal string to integer minor units', () => {
+describe('inbound: provider decimal string to stored minor units', () => {
   it('a zero-decimal currency is already in its smallest unit', () => {
-    // "5000" JPY IS 5000. Scaling by 100 recorded ¥500,000.
-    expect(paypalScale('JPY')).toBe(1);
-    expect(Math.round(5000 * paypalScale('JPY'))).toBe(5000);
+    // "5000" JPY IS 5000. Scaling by 100 recorded 500,000 yen.
+    expect(paypalMinorFromMajor('5000', 'JPY')).toBe(5000);
   });
 
-  it.each(['HUF', 'TWD'])('%s takes no decimals at PayPal either', (c) => {
-    expect(paypalScale(c)).toBe(1);
-  });
-
-  it('ISK follows PayPal, not ISO — PayPal accepts decimals for it', () => {
-    // Using ISO here would have introduced a fresh 100× error in the opposite
-    // direction while fixing the yen one.
-    expect(paypalScale('ISK')).toBe(100);
+  it.each(['HUF', 'TWD'])('%s arrives in whole units and is stored at two places', (c) => {
+    expect(PAYPAL_NO_DECIMALS.has(c)).toBe(true);
+    expect(paypalMinorFromMajor('5000', c)).toBe(500000);
   });
 
   it('the common case is unchanged, and is case/whitespace insensitive', () => {
-    expect(paypalScale('USD')).toBe(100);
-    expect(paypalScale(' jpy ')).toBe(1);
-    expect(paypalScale(undefined)).toBe(100);
+    expect(paypalMinorFromMajor('49.99', 'USD')).toBe(4999);
+    expect(paypalMinorFromMajor('5000', ' jpy ')).toBe(5000);
+  });
+
+  it('an amount with no currency has no scale', () => {
+    expect(paypalMinorFromMajor('49.99', undefined)).toBeNull();
   });
 });
 
-describe('outbound: integer minor units to the string PayPal expects', () => {
-  it('a zero-decimal plan is sent without a decimal point', () => {
-    // A ¥5000 plan stores amount = 5000, because the yen IS the minor unit. It
-    // used to be sent as "50.00": a hundredth of the price, AND a decimal
-    // point PayPal rejects for JPY, so the checkout failed rather than merely
-    // undercharging.
-    expect(paypalMajorString(5000, 'JPY')).toBe('5000');
-    expect(paypalMajorString(5000, 'HUF')).toBe('5000');
-    expect(paypalMajorString(0, 'JPY')).toBe('0');
+describe('outbound: stored minor units to the string PayPal expects', () => {
+  it('a no-decimals plan is sent without a decimal point', () => {
+    // A 5000 yen plan stores 5000, because the yen IS the minor unit. It used
+    // to be sent as "50.00": a hundredth of the price, AND a decimal point
+    // PayPal rejects for JPY.
+    expect(toProviderAmount('JPY', 5000)).toBe('5000');
+    expect(toProviderAmount('JPY', 0)).toBe('0');
+    // A 5000 Ft plan stores 500000: HUF has two places in ISO.
+    expect(toProviderAmount('HUF', 500000)).toBe('5000');
   });
 
   it('a two-decimal plan is unchanged', () => {
-    expect(paypalMajorString(4999, 'USD')).toBe('49.99');
-    expect(paypalMajorString(5000, 'ISK')).toBe('50.00');
+    expect(toProviderAmount('USD', 4999)).toBe('49.99');
+  });
+
+  it('a zero-decimal currency PayPal takes decimals on gets ".00"', () => {
+    expect(toProviderAmount('ISK', 5000)).toBe('5000.00');
   });
 });

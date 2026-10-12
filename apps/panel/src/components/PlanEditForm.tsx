@@ -28,9 +28,15 @@ import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 import { Banner } from './Banner';
 import { savedStateKey } from '@/lib/saved-state-key';
+import { formatMoney } from '@/lib/format';
+import { minorToMajorText } from '@/lib/money-input';
+import { amountRule } from '@/lib/price-currencies';
+import { CurrencyInput } from './CurrencyCatalog';
 
 const ERR: Record<string, string> = {
   missing: 'Name cannot be empty.',
+  amount:
+    'That amount cannot be saved. Type it the way it is written in the currency shown, such as 19.99. A currency with no decimals (JPY) takes a whole number, and so do HUF, TWD and MGA. After changing the currency, type the amount again.',
   PLAN_NOT_FOUND: 'That plan no longer exists.',
   PLAN_PRICE_IMMUTABLE:
     'This plan is registered with the payment provider, so its price can no longer change. Archive it and create a replacement at the new price.',
@@ -43,8 +49,10 @@ const ERR: Record<string, string> = {
 export interface EditablePlan {
   slug: string;
   name: string;
-  amount: number;
-  currency: string;
+  /** The default price, or null for a plan with no flat price. */
+  price: { amount: number; currency: string } | null;
+  /** The currency offered for a plan with no flat price: the Application's reporting currency. */
+  unpricedCurrency: string;
   interval: 'MONTH' | 'YEAR';
   /** Price is only editable while no provider price exists. */
   priceEditable: boolean;
@@ -62,6 +70,10 @@ export function PlanEditForm({
   const label = 'block text-xs font-medium text-[var(--color-muted-fg)]';
   const input =
     'mt-1 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
+
+  const startCurrency = plan.price?.currency ?? plan.unpricedCurrency;
+  const [currency, setCurrency] = React.useState(startCurrency);
+  const amountHintId = React.useId();
 
   return (
     <ActionForm key={savedStateKey(plan)} action={action} className="space-y-4">
@@ -98,29 +110,24 @@ export function PlanEditForm({
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className={label} htmlFor="plan-edit-amount">
-              Amount (minor units)
+              Amount
             </label>
             <input
               id="plan-edit-amount"
               name="amount"
-              type="number"
-              min={0}
-              defaultValue={plan.amount}
-              className={input}
+              type="text"
+              inputMode="decimal"
+              defaultValue={plan.price ? (minorToMajorText(plan.price.amount, plan.price.currency) ?? '') : '0'}
+              placeholder="9.99"
+              aria-describedby={amountHintId}
+              className={`${input} font-mono`}
             />
           </div>
           <div>
-            <label className={label} htmlFor="plan-edit-currency">
+            <label className={label}>
               Currency
+              <CurrencyInput name="currency" value={currency} onChange={setCurrency} required className={input} />
             </label>
-            <input
-              id="plan-edit-currency"
-              name="currency"
-              defaultValue={plan.currency}
-              minLength={3}
-              maxLength={3}
-              className={`${input} uppercase`}
-            />
           </div>
           <div>
             <label className={label} htmlFor="plan-edit-interval">
@@ -136,12 +143,17 @@ export function PlanEditForm({
               <option value="YEAR">Yearly</option>
             </select>
           </div>
+          <p id={amountHintId} className="col-span-3 text-xs text-[var(--color-muted-fg)]">
+            {amountRule(currency) ??
+              `Type the amount as it is written: 19.99 for ${formatMoney(1999, 'USD')}, a whole number for a currency with no decimals.`}{' '}
+            {currency !== startCurrency && 'After changing the currency, type the amount again.'}
+          </p>
         </div>
       ) : (
         <div>
           <span className={label}>Price</span>
           <p className="mt-1 text-sm text-[var(--color-fg)]">
-            {(plan.amount / 100).toFixed(2)} {plan.currency.toUpperCase()} /{' '}
+            {plan.price ? formatMoney(plan.price.amount, plan.price.currency) : 'No flat price'} /{' '}
             {plan.interval.toLowerCase()}
           </p>
           <p className="mt-1 text-xs text-[var(--color-muted-fg)]">

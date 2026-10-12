@@ -95,3 +95,18 @@ export async function requestRollup(applicationId: string, log: RollupLog): Prom
   state.done = drain(applicationId, redis, log);
   return state.done;
 }
+
+/**
+ * Resolves once no triggered rollup is running or waiting on this replica.
+ * The app awaits it when it closes: the request that asks for a run does not
+ * wait for it, and a run abandoned inside its read transaction keeps that
+ * transaction's locks until the transaction times out.
+ *
+ * @example
+ *   app.addHook('onClose', () => triggeredRollupsSettled());
+ */
+export async function triggeredRollupsSettled(): Promise<void> {
+  while (inFlight.size > 0) {
+    await Promise.all([...inFlight.values()].map((state) => state.done));
+  }
+}

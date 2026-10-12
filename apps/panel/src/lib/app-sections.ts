@@ -33,6 +33,7 @@ export const SEG_SCOPE: Record<string, Scope | null> = {
   '': null,
   users: 'overview:read',
   'end-users': 'end-users:read',
+  support: 'end-users:read',
   onboarding: 'end-users:read',
   roles: 'organizations:read',
   organizations: 'organizations:read',
@@ -48,6 +49,7 @@ export const SEG_SCOPE: Record<string, Scope | null> = {
   payments: 'billing:read',
   dunning: 'billing:read',
   'unapplied-payments': 'billing:read',
+  'billing-log': 'billing:read',
   imports: 'billing:read',
   coupons: 'billing:read',
   licenses: 'billing:read',
@@ -77,6 +79,7 @@ export const BILLING_GATED_SEGS: readonly string[] = [
   'payments',
   'dunning',
   'unapplied-payments',
+  'billing-log',
   'imports',
   'coupons',
   'licenses',
@@ -92,6 +95,7 @@ export const APP_SECTION_GROUPS: AppSectionGroup[] = [
     sections: [
       { seg: 'users', label: 'Overview', keywords: 'analytics active users dau mau retention funnel' },
       { seg: 'end-users', label: 'End-users', keywords: 'users customers accounts' },
+      { seg: 'support', label: 'Support mode', keywords: 'support cases capabilities diagnostics debug' },
       { seg: 'onboarding', label: 'Onboarding', keywords: 'profile fields questions schema skip complete' },
       // Both role catalogs live here rather than on the two pages they
       // govern. Splitting them put the word "roles" on End-users and on
@@ -135,6 +139,7 @@ export const APP_SECTION_GROUPS: AppSectionGroup[] = [
       { seg: 'payments', label: 'Payments', keywords: 'charges refunds invoices' },
       { seg: 'unapplied-payments', label: 'Unapplied', keywords: 'unmatched payments' },
       { seg: 'dunning', label: 'Dunning', keywords: 'failed payments retries' },
+      { seg: 'billing-log', label: 'Billing log', keywords: 'history trail events fallback default price reconciliation refunds why' },
       { seg: 'imports', label: 'Imports', keywords: 'migrate subscriptions import' },
       { seg: 'portal', label: 'Portal', keywords: 'customer billing portal' },
     ],

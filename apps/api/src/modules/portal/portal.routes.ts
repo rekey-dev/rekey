@@ -95,13 +95,13 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(PortalConfig, 'Public config for this application\'s hosted portal.'),
           ...errs({
-            400: 'VALIDATION_ERROR — the slug exceeds 120 characters.',
+            400: 'VALIDATION_ERROR: the slug exceeds 120 characters.',
             404:
-              'PORTAL_NOT_FOUND — no application with that slug, the application has not ' +
+              'PORTAL_NOT_FOUND: no application with that slug, the application has not ' +
               'opted into the hosted portal, or the application itself is disabled (the same ' +
               'response in all three cases, so none can be told apart from a non-existent ' +
               'slug).',
-            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+            429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
           }),
         },
       },

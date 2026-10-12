@@ -80,8 +80,7 @@ describe('second-audit findings', () => {
         payload: {
           slug: 'over',
           name: 'Over',
-          amount: JUST_OVER_INT4,
-          currency: 'usd',
+          price: { currency: 'usd', amount: JUST_OVER_INT4 },
           interval: 'MONTH',
         },
       });
@@ -103,8 +102,7 @@ describe('second-audit findings', () => {
         payload: {
           slug: 'atmax',
           name: 'At max',
-          amount: INT4_MAX,
-          currency: 'usd',
+          price: { currency: 'usd', amount: INT4_MAX },
           interval: 'MONTH',
         },
       });
@@ -118,7 +116,7 @@ describe('second-audit findings', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${applicationId}/coupons`,
         headers: { authorization: `Bearer ${token}` },
-        payload: { code: 'OVER', discountType: 'AMOUNT', currency: 'USD', amountOff: JUST_OVER_INT4 },
+        payload: { code: 'OVER', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: JUST_OVER_INT4 }] },
       });
 
       expect(res.statusCode).toBe(400);

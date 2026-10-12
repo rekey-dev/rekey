@@ -103,6 +103,8 @@ export interface ProviderDescriptorInfo {
   label: string;
   docsUrl: string;
   defaultCountries: string[];
+  supportedCurrencies: string[] | 'all-sellable';
+  preselectedCurrencies: string[];
   priority: number;
   capabilities: ProviderModule['capabilities'];
   credentialFields: ProviderCredentialFieldInfo[];
@@ -119,6 +121,8 @@ export function providerDescriptor(module: ProviderModule): ProviderDescriptorIn
     label: module.display.label,
     docsUrl: module.display.docsUrl,
     defaultCountries: module.display.defaultCountries,
+    supportedCurrencies: module.display.supportedCurrencies,
+    preselectedCurrencies: module.display.preselectedCurrencies,
     priority: module.display.priority,
     capabilities: module.capabilities,
     credentialFields: module.credentialSchema.map((f) => ({
@@ -181,7 +185,7 @@ export function credentialRulesSchema(module: ProviderModule): z.ZodType<Record<
           path: [f.key],
           message: `${module.display.label} credentials require ${keyList(required)}.`,
           params: {
-            fix: `Get these from the ${module.display.label} dashboard — see ${module.display.docsUrl}.`,
+            fix: `Get these from the ${module.display.label} dashboard. See ${module.display.docsUrl}.`,
           },
         });
         return;

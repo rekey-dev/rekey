@@ -235,6 +235,11 @@ export const SECURITY_EVENT_LABEL = {
   'end_user.verification_resent': 'Verification email re-sent by an operator',
   'end_user.password_reset_sent': 'Password reset email sent by an operator',
   'end_user.sessions_revoked_by_operator': 'Sessions revoked by an operator',
+  // Support mode. The reason stays on the case row and is never in metadata,
+  // so neither the data export nor erasure has to strip it from events.
+  'end_user.support_opened': 'Support case opened',
+  'end_user.support_updated': 'Support case changed',
+  'end_user.support_closed': 'Support case closed',
 
   // ── Workspace / team ──
   'workspace.member_invited': 'Teammate invited',

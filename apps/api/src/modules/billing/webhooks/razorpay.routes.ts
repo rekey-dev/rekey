@@ -83,15 +83,15 @@ export async function razorpayWebhookRoutes(app: FastifyInstance): Promise<void>
           },
           ...errs({
             400:
-              'VALIDATION_ERROR — the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING ' +
-              '— internal misconfiguration (fastify-raw-body not wired).',
+              'VALIDATION_ERROR: the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING: ' +
+              'internal misconfiguration (fastify-raw-body not wired).',
             401:
-              'WEBHOOK_SIGNATURE_MISSING — no `x-razorpay-signature` header; or ' +
-              "WEBHOOK_SIGNATURE_INVALID — the HMAC-SHA256 signature does not match this " +
+              'WEBHOOK_SIGNATURE_MISSING: no `x-razorpay-signature` header; or ' +
+              "WEBHOOK_SIGNATURE_INVALID: the HMAC-SHA256 signature does not match this " +
               "Application's stored webhook secret.",
-            404: 'APPLICATION_NOT_FOUND — no application with that slug.',
+            404: 'APPLICATION_NOT_FOUND: no application with that slug.',
             503:
-              'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no Razorpay webhook ' +
+              'BILLING_CREDENTIALS_NOT_CONFIGURED: this Application has no Razorpay webhook ' +
               'secret configured.',
           }),
         },

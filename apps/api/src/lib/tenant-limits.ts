@@ -174,7 +174,7 @@ export function assertDefaultTenantLimitsValid(): void {
   const decoded = decodeDefaultTenantLimits(raw);
   if (decoded.ok) return;
   throw new Error(
-    `[CONFIG] DEFAULT_TENANT_LIMITS is not usable — ${decoded.reason}. ` +
+    `[CONFIG] DEFAULT_TENANT_LIMITS is not usable: ${decoded.reason}. ` +
       'It must be a JSON object matching TenantLimitsSchema, e.g. ' +
       '\'{"maxProductionApps":1}\' or \'{"maxActiveEndUsers":1000,"maxProductionApps":1}\'. ' +
       'Leave it unset for unlimited (the default).',

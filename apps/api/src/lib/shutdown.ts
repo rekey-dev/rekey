@@ -61,7 +61,7 @@ export function registerGracefulShutdown(
     if (shuttingDown) return;
     shuttingDown = true;
 
-    app.log.info({ signal }, 'shutting down — draining requests and flushing buffers');
+    app.log.info({ signal }, 'shutting down: draining requests and flushing buffers');
 
     // app.close() runs every onClose hook (request-log flush, Redis quit,
     // interval clears) and waits for in-flight requests to finish.

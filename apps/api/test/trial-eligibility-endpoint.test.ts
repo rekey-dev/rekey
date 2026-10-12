@@ -71,9 +71,9 @@ describe('GET /billing/trial-eligibility', () => {
     await configureSandboxStripe(applicationId);
 
     for (const p of [
-      { slug: 'pro', name: 'Pro', amount: 9900, kind: 'SUBSCRIPTION', trialDays: 14 },
-      { slug: 'team', name: 'Team', amount: 4900, kind: 'SUBSCRIPTION', trialDays: 14 },
-      { slug: 'basic', name: 'Basic', amount: 900, kind: 'SUBSCRIPTION' },
+      { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 9900 }, kind: 'SUBSCRIPTION', trialDays: 14 },
+      { slug: 'team', name: 'Team', price: { currency: 'USD', amount: 4900 }, kind: 'SUBSCRIPTION', trialDays: 14 },
+      { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 900 }, kind: 'SUBSCRIPTION' },
     ]) {
       const res = await app.inject({
         method: 'POST',

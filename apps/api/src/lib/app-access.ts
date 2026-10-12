@@ -58,6 +58,7 @@
  */
 
 import type { FastifyRequest } from 'fastify';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import {
   accessContextFromRequest,
   accessScope,
@@ -129,6 +130,20 @@ export function redactApplicationForBilling<
   T extends { authConfig?: unknown; oauthConfig?: unknown },
 >(application: T): T {
   return { ...application, authConfig: {}, oauthConfig: {} };
+}
+
+/**
+ * The Application with its `billingConfig` complete. The column holds the
+ * JSON as it was last saved, so a setting added since is missing from it; a
+ * read route answers with the default the API itself applies, never with a
+ * gap. A stored config the schema refuses is returned as it is.
+ *
+ * @example
+ * withBillingDefaults(application).billingConfig.onUnavailableCurrency; // 'fallback'
+ */
+export function withBillingDefaults<T extends { billingConfig: unknown }>(application: T): T {
+  const parsed = BillingConfigSchema.safeParse(application.billingConfig);
+  return parsed.success ? { ...application, billingConfig: parsed.data } : application;
 }
 
 /**

@@ -468,6 +468,18 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(headers.Authorization).toBe('Bearer rp_live_token');
     expect(headers['X-Rekey-User-Token']).toBe('user.jwt.value');
   });
+
+  it('users.getSupport reads support mode for a user, and for one device when given', async () => {
+    const support = { active: false, capabilities: [] };
+    const fetchSpy = vi.fn().mockImplementation(async () => jsonResponse(200, { success: true, data: support }));
+    const client = makeClient(fetchSpy);
+    expect(await client.users.getSupport('eu/1')).toEqual(support);
+    await client.users.getSupport('eu_1', { deviceId: 'dev 1' });
+    expect(fetchSpy.mock.calls.map((c) => c[0])).toEqual([
+      'https://api.example.com/api/v1/users/eu%2F1/support',
+      'https://api.example.com/api/v1/users/eu_1/support?deviceId=dev%201',
+    ]);
+  });
 });
 
 describe('WEBHOOK_EVENTS registry', () => {
@@ -499,6 +511,7 @@ describe('WEBHOOK_EVENTS registry', () => {
       'subscription.trial_will_end',
       'payment.succeeded',
       'payment.failed',
+      'payment.refunded',
       'dunning.case_opened',
       'dunning.case_recovered',
       'dunning.case_exhausted',
@@ -516,6 +529,9 @@ describe('WEBHOOK_EVENTS registry', () => {
       'contact.subscribed',
       'contact.unsubscribed',
       'contact.submission.created',
+      'support.opened',
+      'support.updated',
+      'support.closed',
     ]);
     expect(WEBHOOK_EVENTS.map((e) => e.name)).toEqual(KNOWN_WEBHOOK_EVENTS);
     // Every entry carries a non-empty description for picker/autocomplete UIs.

@@ -42,6 +42,7 @@ import { cancelEffect } from '@rekey.dev/shared-types';
 import type { Page } from '@/lib/paginate';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { formatMoney } from '@/lib/format';
+import { subscriptionPriceLabel } from '@/lib/subscription-price';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
@@ -54,6 +55,9 @@ import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { cancelSubscription, grantSubscription, setEntitlementOverrides } from '../actions';
+import { grantPlanOptions, type HeldSubscription } from '@/lib/grant-currencies';
+import { BillingHistory, SubscriptionHistory } from './BillingHistory';
+import { GrantPlanFields } from './GrantPlanFields';
 import { getEndUserBilling, type SubscriptionRow } from '../shared';
 import { savedStateKey } from '@/lib/saved-state-key';
 
@@ -62,6 +66,12 @@ import { savedStateKey } from '@/lib/saved-state-key';
  * one of these is authoritative somewhere else; Rekey mirrors it.
  */
 const INBOUND_ONLY_PROVIDERS = new Set(['external']);
+
+/**
+ * How many subscription rows load their history into a dialog. Each one is a
+ * request made while the page renders, so the rest link to the billing log.
+ */
+const EMBEDDED_HISTORIES = 5;
 
 /** Statuses a cancel can still act on. */
 const CANCELLABLE = new Set(['ACTIVE', 'PAST_DUE', 'TRIALING', 'PENDING']);
@@ -80,6 +90,12 @@ const GRANT_ERR: Record<string, string> = {
   END_USER_ERASED:
     'This end-user was erased. Nothing can be granted to a tombstone, and an erasure cannot be undone.',
   SUBSCRIPTION_PERIOD_END_IN_PAST: 'The period end has to be in the future.',
+  BILLING_PLAN_CURRENCY_UNAVAILABLE:
+    'That plan has no price in the currency you picked. Its prices may have changed since this page loaded. Pick the plan again and choose one of the currencies it lists.',
+  BILLING_SUBSCRIPTION_PRICE_UNSETTLED:
+    'This end-user has a subscription to that plan which a checkout opened and nobody has paid yet. Its price is settled by that checkout, so a grant cannot name a currency for it. Nothing was changed. Grant again at the plan default, or wait for the checkout to be paid or to expire.',
+  BILLING_SUBSCRIPTION_CURRENCY_KEPT:
+    'This end-user already has a live subscription to that plan in another currency, and a subscriber keeps their currency for the life of the subscription. Nothing was changed. To bill them in a different currency, cancel that subscription and grant again.',
 };
 
 // Codes with panel copy: the panel's own checks and the access refusals. An
@@ -200,8 +216,14 @@ export default async function EndUserSubscriptionsPage({
                 applicationId={id}
                 euid={euid}
                 plans={plans}
+                held={billing.subscriptions.map((s) => ({
+                  planSlug: s.plan.slug,
+                  status: s.status,
+                  currency: s.price?.currency ?? null,
+                }))}
                 error={grantError}
                 keptPlanSlug={typeof sp.planSlug === 'string' ? sp.planSlug : undefined}
+                keptCurrency={typeof sp.currency === 'string' ? sp.currency : undefined}
                 keptPeriodEnd={typeof sp.periodEnd === 'string' ? sp.periodEnd : undefined}
               />
             ) : undefined
@@ -276,11 +298,13 @@ export default async function EndUserSubscriptionsPage({
                 <TH>Provider</TH>
                 <TH>Renews</TH>
                 <TH>Started</TH>
-                {(canCancel || canAdjust) && <TH align="right"> </TH>}
+                <TH align="right">
+                  <span className="sr-only">Actions</span>
+                </TH>
               </TR>
             </THead>
             <TBody>
-              {billing.subscriptions.map((s) => (
+              {billing.subscriptions.map((s, index) => (
                 <TR key={s.id} hover>
                   <TD>
                     <span className="font-medium text-[var(--color-fg)]">{s.plan.name}</span>{' '}
@@ -293,8 +317,7 @@ export default async function EndUserSubscriptionsPage({
                       </Badge>
                     )}
                     <div className="text-[11px] text-[var(--color-muted-fg)]">
-                      {formatMoney(s.plan.amount, s.plan.currency)}
-                      {s.plan.interval ? ` / ${s.plan.interval.toLowerCase()}` : ''}
+                      {subscriptionPriceLabel(s)}
                     </div>
                     <OverrideChips overrides={s.entitlementOverrides} />
                   </TD>
@@ -317,23 +340,31 @@ export default async function EndUserSubscriptionsPage({
                   <TD muted className="text-xs">
                     {formatDate(s.createdAt)}
                   </TD>
-                  {(canCancel || canAdjust) && (
-                    <TD align="right">
-                      <div className="flex items-center justify-end gap-2">
-                        {canAdjust && (
-                          <OverridesForm
-                            applicationId={id}
-                            euid={euid}
-                            subscription={s}
-                            error={overrideSub === s.id ? overrideError : undefined}
-                            detail={overrideSub === s.id ? overrideFlash.detail : undefined}
-                            fix={overrideSub === s.id ? overrideFlash.fix : undefined}
-                          />
-                        )}
-                        {canCancel && <CancelAction applicationId={id} euid={euid} subscription={s} />}
-                      </div>
-                    </TD>
-                  )}
+                  <TD align="right">
+                    <div className="flex items-center justify-end gap-2">
+                      {index < EMBEDDED_HISTORIES ? (
+                        <SubscriptionHistory applicationId={id} subscriptionId={s.id} planName={s.plan.name} />
+                      ) : (
+                        <Link
+                          href={`/applications/${id}/billing-log?view=all&subscriptionId=${encodeURIComponent(s.id)}`}
+                          className="text-xs text-[var(--color-primary)] hover:underline"
+                        >
+                          History<span className="sr-only"> of the {s.plan.name} subscription</span>
+                        </Link>
+                      )}
+                      {canAdjust && (
+                        <OverridesForm
+                          applicationId={id}
+                          euid={euid}
+                          subscription={s}
+                          error={overrideSub === s.id ? overrideError : undefined}
+                          detail={overrideSub === s.id ? overrideFlash.detail : undefined}
+                          fix={overrideSub === s.id ? overrideFlash.fix : undefined}
+                        />
+                      )}
+                      {canCancel && <CancelAction applicationId={id} euid={euid} subscription={s} />}
+                    </div>
+                  </TD>
                 </TR>
               ))}
             </TBody>
@@ -345,7 +376,7 @@ export default async function EndUserSubscriptionsPage({
         <SectionHeader
           title="Payments"
           count={`(${billing.payments.length})`}
-          description="Most recent 50, newest first."
+          description="Most recent 50, newest first. Open one for its refunds and its history."
         />
         {billing.payments.length === 0 ? (
           <EmptyState variant="inline" title="No payments recorded" />
@@ -364,7 +395,12 @@ export default async function EndUserSubscriptionsPage({
               {billing.payments.map((p) => (
                 <TR key={p.id} hover>
                   <TD muted className="whitespace-nowrap text-xs">
-                    {formatDateTime(p.createdAt)}
+                    <Link
+                      href={`/applications/${id}/payments/${encodeURIComponent(p.id)}`}
+                      className="underline decoration-[var(--color-border)] underline-offset-2 hover:text-[var(--color-fg)]"
+                    >
+                      {formatDateTime(p.createdAt)}
+                    </Link>
                   </TD>
                   <TD align="right" mono className="tabular-nums">
                     {formatMoney(p.amount, p.currency)}
@@ -384,6 +420,8 @@ export default async function EndUserSubscriptionsPage({
           </Table>
         )}
       </section>
+
+      <BillingHistory applicationId={id} endUserId={euid} />
 
       <section className="space-y-3">
         <SectionHeader
@@ -462,17 +500,21 @@ function GrantForm({
   applicationId,
   euid,
   plans,
+  held,
   error,
   keptPlanSlug,
+  keptCurrency,
   keptPeriodEnd,
 }: {
   applicationId: string;
   euid: string;
   plans: PlanRow[];
+  held: HeldSubscription[];
   error?: string | undefined;
   /** Echoed back on a refusal so the form is not lost. The note is not, see `grantSubscription`. */
-  keptPlanSlug?: string | undefined;
-  keptPeriodEnd?: string | undefined;
+  keptPlanSlug: string | undefined;
+  keptCurrency: string | undefined;
+  keptPeriodEnd: string | undefined;
 }): React.JSX.Element {
   if (plans.length === 0) {
     return (
@@ -495,23 +537,12 @@ function GrantForm({
       trigger="Grant subscription"
     >
       <ActionForm
-        key={savedStateKey({ keptPlanSlug, keptPeriodEnd })}
+        key={savedStateKey({ keptPlanSlug, keptCurrency, keptPeriodEnd })}
         action={grantSubscription.bind(null, applicationId, euid)}
         className="space-y-3"
       >
         {error && <Banner tone="error">{errorMessage(GRANT_ERR, error)}</Banner>}
-        <Field label="Plan" required hint="Active plans only. Withdrawn plans can still be granted through the API.">
-          <select name="planSlug" required defaultValue={keptPlanSlug ?? ""} className={inputCls}>
-            <option value="" disabled>
-              Pick a plan…
-            </option>
-            {plans.map((p) => (
-              <option key={p.id} value={p.slug}>
-                {p.name} ({formatMoney(p.amount, p.currency)} / {p.interval.toLowerCase()})
-              </option>
-            ))}
-          </select>
-        </Field>
+        <GrantPlanFields plans={grantPlanOptions(plans)} held={held} keptPlanSlug={keptPlanSlug} keptCurrency={keptCurrency} />
         <Field
           label="Reason"
           required

@@ -34,9 +34,11 @@
  * the operator's money path would fail at the processor, not here.
  */
 
+import { isSellableCurrency } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { RekeyError } from '../../lib/error.js';
+import { recordBillingEvent } from '../billing-log/index.js';
 import { getModule, credentialRulesSchema } from './providers/registry.js';
 import type { ProviderModule } from './providers/module-types.js';
 
@@ -117,8 +119,139 @@ export interface CredentialsStatus {
   mode: BillingMode;
   countries: string[];
   priority: number;
+  /** Currencies this account can charge, upper-case. Empty means none. */
+  currencies: string[];
+  /**
+   * The stored currencies this provider cannot charge at all: saved before
+   * the list was checked on save. Routing skips them.
+   */
+  unsupportedCurrencies: string[];
   /** Whether the provider webhook secret/id is set (manually or auto-registered). */
   webhookConfigured: boolean;
+}
+
+export interface EnabledProvider {
+  provider: BillingProviderName;
+  priority: number;
+  countries: string[];
+  /** Upper-case. Empty means none: the provider is not used for any checkout. */
+  currencies: string[];
+  /** The stored currencies this provider cannot charge at all. `canCharge` skips them. */
+  unsupportedCurrencies: string[];
+  mode: BillingMode;
+}
+
+interface CredentialOptions {
+  countries?: string[];
+  currencies?: string[];
+  priority?: number;
+  enabled?: boolean;
+  mode?: BillingMode;
+  /** The operator saving the row, named in the billing log when the currency list changes. */
+  operatorId?: string;
+}
+
+type Tx = Parameters<typeof recordBillingEvent>[0];
+
+function sameCurrencies(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && [...a].sort().join() === [...b].sort().join();
+}
+
+/**
+ * Write `provider.currencies_changed` in the transaction that saved the list.
+ * A save that leaves the same currencies writes nothing.
+ */
+async function recordCurrenciesChange(
+  tx: Tx,
+  args: { applicationId: string; provider: string; before: readonly string[]; after: readonly string[]; operatorId: string | undefined },
+): Promise<void> {
+  if (sameCurrencies(args.before, args.after)) return;
+  await recordBillingEvent(tx, {
+    type: 'provider.currencies_changed',
+    applicationId: args.applicationId,
+    actor: args.operatorId === undefined ? { type: 'system' } : { type: 'operator', id: args.operatorId },
+    provider: args.provider,
+    data: { before: [...args.before], after: [...args.after] },
+  });
+}
+
+/**
+ * Whether a provider can charge a currency at all, by its module's published
+ * list. A provider with no registered module is not judged.
+ *
+ * @example
+ * providerSupportsCurrency('paypal', 'INR'); // false
+ */
+export function providerSupportsCurrency(provider: string, currency: string): boolean {
+  const supported = getModule(provider)?.display.supportedCurrencies;
+  if (supported === undefined) return true;
+  const code = currency.toUpperCase();
+  return supported === 'all-sellable' ? isSellableCurrency(code) : supported.includes(code);
+}
+
+/**
+ * The stored currencies a provider cannot charge at all, in the order stored.
+ *
+ * @example
+ * unsupportedCurrenciesOf('paypal', ['USD', 'INR']); // ['INR']
+ */
+export function unsupportedCurrenciesOf(provider: string, currencies: readonly string[]): string[] {
+  return currencies.filter((code) => !providerSupportsCurrency(provider, code));
+}
+
+/**
+ * The currency list to store for a provider: upper-case, no repeats. Refuses
+ * a code the provider cannot charge at all, so a price in it is never
+ * promised to a buyer.
+ */
+function normaliseCurrencies(provider: string, currencies: string[]): string[] {
+  const codes = [...new Set(currencies.map((c) => c.toUpperCase().trim()).filter(Boolean))];
+  const unsupported = unsupportedCurrenciesOf(provider, codes);
+  if (unsupported.length > 0) {
+    const label = getModule(provider)?.display.label ?? provider;
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'BILLING_PROVIDER_CURRENCY_NOT_OFFERED',
+      message: `${label} ("${provider}") cannot charge ${unsupported.join(', ')}.`,
+      fix: `Remove ${unsupported.join(', ')} from \`currencies\` and save again. GET /api/v1/tenant/applications/:id/billing/providers lists what each provider can charge in \`supportedCurrencies\`.`,
+    });
+  }
+  return codes;
+}
+
+/**
+ * Whether a provider account can charge a currency, by the operator's own
+ * declaration. An empty list means none. A stored code the provider cannot
+ * charge at all is never chargeable.
+ *
+ * @example
+ * canCharge({ currencies: ['INR'] }, 'usd'); // false
+ * canCharge({ currencies: [] }, 'usd'); // false
+ * canCharge({ currencies: ['INR', 'USD'], unsupportedCurrencies: ['INR'] }, 'inr'); // false
+ */
+export function canCharge(
+  provider: { currencies: string[]; unsupportedCurrencies?: readonly string[] | undefined },
+  currency: string,
+): boolean {
+  const code = currency.toUpperCase();
+  if (provider.unsupportedCurrencies?.includes(code)) return false;
+  return provider.currencies.includes(code);
+}
+
+/**
+ * The currencies a new credential row starts with when its caller names
+ * none: what the module says an account usually charges. Without it a row
+ * saved with no list would charge nothing.
+ *
+ * @example
+ * currenciesForNewRow('razorpay'); // ['INR']
+ */
+export function currenciesForNewRow(provider: string): string[] {
+  return [...(getModule(provider)?.display.preselectedCurrencies ?? [])];
+}
+
+function defaultPriority(provider: string): number {
+  return getModule(provider)?.display.priority ?? Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -177,7 +310,7 @@ function resolveMode(
       statusCode: 400,
       code: 'BILLING_CREDENTIALS_MODE_CONTRADICTED',
       message: `These ${provider} credentials are ${detected} credentials, but they were submitted as \`mode: ${requested}\`.`,
-      fix: `The key itself decides — ${provider} keys state their mode, and the provider SDK reads the key, not the label. Submit the ${requested} credentials, or drop \`mode\` and let it be read from the key.`,
+      fix: `The key itself decides: ${provider} keys state their mode, and the provider SDK reads the key, not the label. Submit the ${requested} credentials, or drop \`mode\` and let it be read from the key.`,
     });
   }
   return detected;
@@ -220,7 +353,7 @@ function unwrap<P extends BillingProviderName>(
     throw new RekeyError({
       statusCode: 500,
       code: 'BILLING_CREDENTIALS_SHAPE_INVALID',
-      message: `Stored credentials for "${expected}" decrypted to a non-object — corruption suspected.`,
+      message: `Stored credentials for "${expected}" decrypted to a non-object. Corruption suspected.`,
       fix: 'Re-enter credentials via PUT /tenant/applications/:id/billing-credentials/:provider.',
     });
   }
@@ -266,6 +399,8 @@ export const billingCredentialsService = {
         mode: (r.mode === 'live' ? 'live' : 'test') as BillingMode,
         countries: r.countries,
         priority: r.priority,
+        currencies: r.currencies,
+        unsupportedCurrencies: unsupportedCurrenciesOf(r.provider, r.currencies),
         webhookConfigured,
       };
     });
@@ -326,8 +461,7 @@ export const billingCredentialsService = {
    *
    *   - /providers UI: shows the full picker; country-matching ones float to
    *     the top so the IN user sees Razorpay first but PayPal still appears.
-   *   - pickProvider: applies stricter rules on top (country-restricted
-   *     providers don't auto-pick for non-matching countries).
+   *   - pickProvider: takes the first entry of this order.
    *
    * Sort order:
    *   1. Country-specific match (countries[] contains country), by priority.
@@ -337,11 +471,11 @@ export const billingCredentialsService = {
   async listEnabled(
     applicationId: string,
     country?: string,
-  ): Promise<{ provider: BillingProviderName; priority: number; countries: string[]; mode: BillingMode }[]> {
+  ): Promise<EnabledProvider[]> {
     const rows = await prisma.billingCredentials.findMany({
       where: { applicationId, enabled: true },
       orderBy: { priority: 'asc' },
-      select: { provider: true, priority: true, countries: true, mode: true },
+      select: { provider: true, priority: true, countries: true, currencies: true, mode: true },
     });
     const upper = country?.toUpperCase();
     const score = (r: { countries: string[] }): number => {
@@ -354,10 +488,20 @@ export const billingCredentialsService = {
         provider: r.provider as BillingProviderName,
         priority: r.priority,
         countries: r.countries,
+        currencies: r.currencies,
+        unsupportedCurrencies: unsupportedCurrenciesOf(r.provider, r.currencies),
         mode: (r.mode === 'live' ? 'live' : 'test') as BillingMode,
         _s: score(r),
       }))
-      .sort((a, b) => a._s - b._s || a.priority - b.priority)
+      // Equal priorities fall to the module's own default order and then the
+      // name, so routing never depends on the order rows were saved in.
+      .sort(
+        (a, b) =>
+          a._s - b._s ||
+          a.priority - b.priority ||
+          defaultPriority(a.provider) - defaultPriority(b.provider) ||
+          a.provider.localeCompare(b.provider),
+      )
       .map(({ _s: _, ...rest }) => rest);
   },
 
@@ -371,10 +515,7 @@ export const billingCredentialsService = {
    * `listEnabled`, because "is this provider configured" is a different
    * question from "can a buyer pay here".
    */
-  async listCheckoutEnabled(
-    applicationId: string,
-    country?: string,
-  ): Promise<{ provider: BillingProviderName; priority: number; countries: string[]; mode: BillingMode }[]> {
+  async listCheckoutEnabled(applicationId: string, country?: string): Promise<EnabledProvider[]> {
     const rows = await this.listEnabled(applicationId, country);
     return rows.filter((r) => getModule(r.provider)?.capabilities.checkout !== false);
   },
@@ -392,7 +533,7 @@ export const billingCredentialsService = {
     applicationId: string,
     provider: BillingProviderName,
     data: Record<string, string>,
-    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
+    options?: CredentialOptions,
   ): Promise<void> {
     const module = requireModule(provider);
     const { merged, hadStored } = await this.mergeOverStored(applicationId, provider, data);
@@ -504,7 +645,7 @@ export const billingCredentialsService = {
     applicationId: string,
     provider: BillingProviderName,
     data: unknown,
-    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
+    options?: CredentialOptions,
   ): Promise<void> {
     const ciphertext = encryptJson(data);
     const countries = (options?.countries ?? []).map((c) => c.toUpperCase().trim()).filter(Boolean);
@@ -521,25 +662,44 @@ export const billingCredentialsService = {
     // about the new one.
     const secretsChanged =
       previous === null || canonicalJson(previous) !== canonicalJson(data) || previousMode !== mode;
-    await prisma.billingCredentials.upsert({
-      where: { applicationId_provider: { applicationId, provider } },
-      create: {
+    const createCurrencies = normaliseCurrencies(provider, options?.currencies ?? currenciesForNewRow(provider));
+    const updateCurrencies =
+      options?.currencies === undefined ? undefined : normaliseCurrencies(provider, options.currencies);
+    await prisma.$transaction(async (tx) => {
+      const stored = await tx.billingCredentials.findUnique({
+        where: { applicationId_provider: { applicationId, provider } },
+        select: { currencies: true },
+      });
+      const saved = await tx.billingCredentials.upsert({
+        where: { applicationId_provider: { applicationId, provider } },
+        create: {
+          applicationId,
+          provider,
+          ciphertext,
+          countries,
+          currencies: createCurrencies,
+          priority: options?.priority ?? 100,
+          enabled: options?.enabled ?? true,
+          mode,
+        },
+        update: {
+          ciphertext,
+          mode,
+          ...(secretsChanged && { secretsUpdatedAt: new Date() }),
+          ...(options?.countries !== undefined && { countries }),
+          ...(updateCurrencies !== undefined && { currencies: updateCurrencies }),
+          ...(options?.priority !== undefined && { priority: options.priority }),
+          ...(options?.enabled !== undefined && { enabled: options.enabled }),
+        },
+        select: { currencies: true },
+      });
+      await recordCurrenciesChange(tx, {
         applicationId,
         provider,
-        ciphertext,
-        countries,
-        priority: options?.priority ?? 100,
-        enabled: options?.enabled ?? true,
-        mode,
-      },
-      update: {
-        ciphertext,
-        mode,
-        ...(secretsChanged && { secretsUpdatedAt: new Date() }),
-        ...(options?.countries !== undefined && { countries }),
-        ...(options?.priority !== undefined && { priority: options.priority }),
-        ...(options?.enabled !== undefined && { enabled: options.enabled }),
-      },
+        before: stored?.currencies ?? [],
+        after: saved.currencies,
+        operatorId: options?.operatorId,
+      });
     });
   },
 
@@ -621,6 +781,37 @@ export const billingCredentialsService = {
         countries: countries.map((c) => c.toUpperCase().trim()).filter(Boolean),
         priority,
       },
+    });
+  },
+
+  /**
+   * Declare which currencies this provider account can charge. An empty list
+   * is kept as it is and means none: the provider is not used for any checkout.
+   *
+   * The change is written to the billing log as `provider.currencies_changed`,
+   * naming `operatorId` when there is one.
+   *
+   * @example
+   * await billingCredentialsService.setCurrencies(appId, 'razorpay', ['INR'], operatorId);
+   */
+  async setCurrencies(
+    applicationId: string,
+    provider: BillingProviderName,
+    currencies: string[],
+    operatorId?: string,
+  ): Promise<void> {
+    await this.assertConfigured(applicationId, provider);
+    const after = normaliseCurrencies(provider, currencies);
+    await prisma.$transaction(async (tx) => {
+      const stored = await tx.billingCredentials.findUniqueOrThrow({
+        where: { applicationId_provider: { applicationId, provider } },
+        select: { currencies: true },
+      });
+      await tx.billingCredentials.update({
+        where: { applicationId_provider: { applicationId, provider } },
+        data: { currencies: after },
+      });
+      await recordCurrenciesChange(tx, { applicationId, provider, before: stored.currencies, after, operatorId });
     });
   },
 

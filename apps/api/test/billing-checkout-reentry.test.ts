@@ -81,8 +81,8 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
     await configureSandboxStripe(applicationId);
 
     for (const plan of [
-      { slug: 'pro', name: 'Pro', amount: 1000 },
-      { slug: 'pack', name: 'Credit pack', amount: PACK_AMOUNT, kind: 'CREDIT', creditsAmount: 100 },
+      { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1000 } },
+      { slug: 'pack', name: 'Credit pack', price: { currency: 'USD', amount: PACK_AMOUNT }, kind: 'CREDIT', creditsAmount: 100 },
     ]) {
       const res = await app.inject({
         method: 'POST',
@@ -179,8 +179,8 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // old session spends the code that session was priced with. Reading the
       // row-level `couponId` would have redeemed whichever code was typed
       // most recently, or, worse, a code the completed checkout never used.
-      await createCoupon({ code: 'oldcode', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000 });
-      await createCoupon({ code: 'newcode', discountType: 'AMOUNT', currency: 'USD', amountOff: 2000 });
+      await createCoupon({ code: 'oldcode', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }] });
+      await createCoupon({ code: 'newcode', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 2000 }] });
       const oldCoupon = await prisma.coupon.findFirstOrThrow({ where: { applicationId, code: 'oldcode' } });
 
       const first = await checkout({ planSlug: 'pack', couponCode: 'oldcode' });
@@ -213,7 +213,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // The row-level mirror used to be sticky: a coupon-less second checkout
       // left the previous code's id on the subscription, so completing it
       // redeemed a code that purchase never used.
-      await createCoupon({ code: 'sticky', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000 });
+      await createCoupon({ code: 'sticky', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }] });
       await checkout({ planSlug: 'pack', couponCode: 'sticky' });
       const plain = await checkout({ planSlug: 'pack' });
 
@@ -301,7 +301,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
     it('stays ACTIVE when they try a coupon from the account page', async () => {
       // The exact flow the marketing account panel added: an Apply/Subscribe
       // form rendered in front of an EXISTING subscriber.
-      await createCoupon({ code: 'tryme', discountType: 'PERCENT', amountOff: 1000 });
+      await createCoupon({ code: 'tryme', discountType: 'PERCENT', basisPoints: 1000 });
       const subId = await activate();
 
       await checkout({ planSlug: 'pro', couponCode: 'tryme' });

@@ -6,11 +6,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EndUser, Plan } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { getModule } from '../src/modules/billing/providers/registry.js';
 
 const creds = { clientId: 'AbC-client', clientSecret: 'shh', webhookId: 'WH-1' };
-const plan = {
+const plan = pricedPlan({
   id: 'plan_1',
   slug: 'standard',
   name: 'Cloud Standard',
@@ -19,7 +20,7 @@ const plan = {
   currency: 'USD',
   interval: 'MONTH',
   metadata: { paypal: { planId: 'P-STANDARD' } },
-} as unknown as Plan;
+} as unknown as Plan, null);
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
 
 type Call = { url: string; init: RequestInit | undefined };
@@ -242,7 +243,7 @@ describe('RealPaypalProvider, embedded checkout', () => {
     const result = await new RealPaypalProvider(creds, 'test').createEmbeddedCheckout({
       ...input,
       kind: 'one_time',
-      plan: { ...plan, currency: 'usd' } as Plan,
+      plan: { ...plan, currency: 'usd' },
     });
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/v2/checkout/orders'))!.init?.body)) as {
       purchase_units: Array<{ amount: { currency_code: string } }>;

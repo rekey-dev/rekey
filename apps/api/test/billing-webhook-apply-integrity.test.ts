@@ -23,6 +23,7 @@ import Stripe from 'stripe';
 import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { pricedAt } from './subscription-price-fixture.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { billingStatsService } from '../src/modules/billing/stats.service.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
@@ -89,7 +90,7 @@ describe('billing webhook apply integrity', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug, name: slug, amount: 2900, kind: 'SUBSCRIPTION', interval: 'MONTH' },
+      payload: { slug, name: slug, price: { currency: 'USD', amount: 2900 }, kind: 'SUBSCRIPTION', interval: 'MONTH' },
     });
     if (r.statusCode !== 201) throw new Error(`makePlan ${r.statusCode}: ${r.body}`);
   }
@@ -254,7 +255,7 @@ describe('billing webhook apply integrity', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${appId}/plans`,
         headers: auth(),
-        payload: { slug: 'free', name: 'free', amount: 0, kind: 'SUBSCRIPTION', interval: 'MONTH' },
+        payload: { slug: 'free', name: 'free', kind: 'SUBSCRIPTION', interval: 'MONTH' },
       });
       expect(r.statusCode).toBe(201);
       await putEntitlement('free', { kind: 'FEATURE', key: 'tier', valueType: 'STRING', value: 'community' });
@@ -518,6 +519,50 @@ describe('billing webhook apply integrity', () => {
     const paymentOf = (id: string) =>
       prisma.payment.findFirstOrThrow({ where: { applicationId: appId, providerPaymentId: id } });
 
+    it('checks a charge against the subscription\'s own currency, not the plan\'s', async () => {
+      const euId = await endUser('own-currency@example.com');
+      await post(activated('ext_inr', { endUserId: euId }));
+      const sub = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
+      await prisma.subscription.update({ where: { id: sub.id }, data: await pricedAt(sub.planId, 'INR', 49900) });
+
+      // The plan is sold in USD; this subscriber pays INR.
+      await post(event('payment.succeeded', { payment: { id: 'pay_inr', subscriptionId: 'ext_inr', amount: 49900, currency: 'inr' } }));
+      expect(await paymentOf('pay_inr')).toMatchObject({ currency: 'INR', amount: 49900 });
+
+      // A charge in the plan's currency is now the mismatch. It is recorded,
+      // unverified and linked to no subscription, with a case for the operator.
+      await post(event('payment.succeeded', { payment: { id: 'pay_usd', subscriptionId: 'ext_inr', amount: 2000, currency: 'usd' } }));
+      const mismatched = await prisma.payment.findFirstOrThrow({
+        where: { applicationId: appId, providerPaymentId: 'pay_usd' },
+        include: { unapplied: true },
+      });
+      expect(mismatched).toMatchObject({ verification: 'UNVERIFIED', subscriptionId: null, endUserId: euId, amount: 2000, currency: 'USD', status: 'SUCCEEDED' });
+      expect(mismatched.unapplied).toMatchObject({ status: 'OPEN', metadata: { reasonCode: 'currency_mismatch' } });
+      const notApplied = await prisma.billingEvent.findFirstOrThrow({ where: { applicationId: appId, type: 'payment.not_applied', paymentId: mismatched.id } });
+      expect(notApplied).toMatchObject({ subscriptionId: sub.id, currency: 'USD', amount: 2000 });
+      expect(notApplied.data).toMatchObject({ reason: 'currency_mismatch', expected: { currency: 'INR', amount: 49900 } });
+    });
+
+    it('measures the amount ceiling from the larger of the subscription\'s price and the plan\'s', async () => {
+      const euId = await endUser('repriced@example.com');
+      await post(activated('ext_repriced', { endUserId: euId }));
+      const sub = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId }, include: { plan: true } });
+      // The subscriber was stamped at a price a hundredth of what the plan now costs.
+      await prisma.subscription.update({ where: { id: sub.id }, data: await pricedAt(sub.planId, sub.plan.currency, Math.floor(sub.plan.amount / 100)) });
+
+      await post(event('payment.succeeded', { payment: { id: 'pay_new_price', subscriptionId: 'ext_repriced', amount: sub.plan.amount, currency: sub.plan.currency } }));
+      expect(await paymentOf('pay_new_price')).toMatchObject({ amount: sub.plan.amount });
+
+      const absurd = sub.plan.amount * 100;
+      await post(event('payment.succeeded', { payment: { id: 'pay_absurd', subscriptionId: 'ext_repriced', amount: absurd, currency: sub.plan.currency } }));
+      const outOfBand = await prisma.payment.findFirstOrThrow({
+        where: { applicationId: appId, providerPaymentId: 'pay_absurd' },
+        include: { unapplied: true },
+      });
+      expect(outOfBand).toMatchObject({ verification: 'UNVERIFIED', subscriptionId: null, amount: absurd });
+      expect(outOfBand.unapplied).toMatchObject({ status: 'OPEN', metadata: { reasonCode: 'amount_out_of_band' } });
+    });
+
     it('accumulates partial refunds, refuses an over-refund, and nets revenue', async () => {
       await paidPayment('pay_r', 2000);
 
@@ -530,7 +575,7 @@ describe('billing webhook apply integrity', () => {
       p = await paymentOf('pay_r');
       expect(p.status).toBe('PARTIALLY_REFUNDED');
       expect(p.refundedAmount).toBe(1000);
-      expect((await billingStatsService.forApplication(appId)).revenueLast30dCents).toBe(1000);
+      expect((await billingStatsService.forApplication(appId)).revenueLast30d[0]).toMatchObject({ currency: 'USD', netCents: 1000 });
 
       const over = refund('pay_r', 5000);
       const res = await post(over);
@@ -544,8 +589,8 @@ describe('billing webhook apply integrity', () => {
       expect(p.status).toBe('REFUNDED');
       expect(p.refundedAmount).toBe(2000);
       const stats = await billingStatsService.forApplication(appId);
-      expect(stats.revenueLast30dCents).toBe(0);
-      expect(stats.monthlyRevenue.at(-1)?.amountCents).toBe(0);
+      expect(stats.revenueLast30d[0]).toMatchObject({ currency: 'USD', netCents: 0 });
+      expect(stats.monthlyRevenue[0]?.months.at(-1)?.amountCents).toBe(0);
     });
 
     it('eight concurrent refunds neither lose an update nor overshoot the payment', async () => {

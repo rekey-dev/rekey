@@ -14,7 +14,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Plan } from '@prisma/client';
+import { providerRegistration } from '../priced-plan.js';
+import type { PricedPlan } from './types.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
@@ -27,11 +28,12 @@ import type {
   ProviderSubscriptionSnapshot,
   RefundPaymentInput,
   RefundPaymentResult,
+  WebhookInspection,
 } from './types.js';
 import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 import { RekeyError } from '../../../lib/error.js';
-import { paypalMajorString, paypalMinorFromMajor } from './paypal-money.js';
+import { paypalMinorFromMajor, toProviderAmount } from './paypal-money.js';
 import { LIVE_BASE, SANDBOX_BASE, paypalError, paypalFetch } from './paypal-http.js';
 import { capturePaypalOrder, createPaypalOrder, readPaypalOrder, type CreatedPaypalOrder, type PaypalApi } from './paypal-orders.js';
 
@@ -39,6 +41,25 @@ interface AccessToken {
   access_token: string;
   expires_at: number; // ms epoch
 }
+
+/**
+ * The events the PayPal handler consumes. Registering applies the whole set,
+ * so an older webhook gains the Orders v2 events the next time it is
+ * configured.
+ */
+const WEBHOOK_EVENT_TYPES = [
+  'BILLING.SUBSCRIPTION.ACTIVATED',
+  'BILLING.SUBSCRIPTION.CANCELLED',
+  'BILLING.SUBSCRIPTION.EXPIRED',
+  'BILLING.SUBSCRIPTION.SUSPENDED',
+  'CHECKOUT.ORDER.APPROVED',
+  'PAYMENT.SALE.COMPLETED',
+  'PAYMENT.SALE.DENIED',
+  'PAYMENT.SALE.REVERSED',
+  'PAYMENT.CAPTURE.COMPLETED',
+  'PAYMENT.CAPTURE.REVERSED',
+  'PAYMENT.CAPTURE.REFUNDED',
+] as const;
 
 export class RealPaypalProvider implements BillingProvider {
   readonly name = 'paypal';
@@ -84,7 +105,7 @@ export class RealPaypalProvider implements BillingProvider {
     return json.access_token;
   }
 
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
     // PayPal subscriptions need a Product first, then a billing Plan referencing it.
     // We create-or-reuse a single product per Rekey Application slug to keep things tidy.
     const token = await this.accessToken();
@@ -106,9 +127,15 @@ export class RealPaypalProvider implements BillingProvider {
     });
     // Ignore non-2xx, most commonly 422 "ALREADY_EXISTS" which we want.
 
-    const requestId = `REKEY-PLAN-${plan.id}`;
+    // The default price keeps the id it has always had: changing it would
+    // make PayPal mint a second plan for every plan already on sale.
+    const requestId =
+      // An additional price is keyed on its own row and amount: PayPal
+      // replays the plan it made for a request id, so one keyed on the
+      // currency alone would hand back the old amount after a re-price.
+      plan.planPriceId === null || plan.isDefaultPrice ? `REKEY-PLAN-${plan.id}` : `REKEY-PRICE-${plan.planPriceId}-${plan.amount}`;
     const interval = plan.interval === 'YEAR' ? 'YEAR' : 'MONTH';
-    const valueMajor = paypalMajorString(plan.amount, plan.currency);
+    const valueMajor = toProviderAmount(plan.currency, plan.amount);
     const planRes = await paypalFetch(`${this.base}/v1/billing/plans`, {
       method: 'POST',
       headers: {
@@ -229,9 +256,7 @@ export class RealPaypalProvider implements BillingProvider {
   ): Promise<{ id: string; approveUrl: string; planId: string }> {
     const token = await this.accessToken();
     // Lookup or create the PayPal plan id.
-    const meta = (input.plan.metadata as Record<string, unknown> | null) ?? {};
-    const paypalMeta = (meta.paypal as { planId?: string } | undefined) ?? {};
-    let paypalPlanId = paypalMeta.planId;
+    let paypalPlanId = providerRegistration(input.plan, 'paypal').planId;
     if (!paypalPlanId) {
       paypalPlanId = (await this.ensurePlanRegistered(input.plan)).providerPlanId;
     }
@@ -322,21 +347,7 @@ export class RealPaypalProvider implements BillingProvider {
    */
   async registerWebhook(publicUrl: string): Promise<{ webhookId?: string }> {
     const token = await this.accessToken();
-    const eventTypes = [
-      'BILLING.SUBSCRIPTION.ACTIVATED',
-      'BILLING.SUBSCRIPTION.CANCELLED',
-      'BILLING.SUBSCRIPTION.EXPIRED',
-      'BILLING.SUBSCRIPTION.SUSPENDED',
-      'CHECKOUT.ORDER.APPROVED',
-      'PAYMENT.SALE.COMPLETED',
-      'PAYMENT.SALE.DENIED',
-      'PAYMENT.SALE.REVERSED',
-      'PAYMENT.CAPTURE.COMPLETED',
-      // Reversals on the Orders v2 side. An existing webhook picks these up the
-      // next time this runs (auto-configure, or saving the credentials).
-      'PAYMENT.CAPTURE.REVERSED',
-      'PAYMENT.CAPTURE.REFUNDED',
-    ].map((name) => ({ name }));
+    const eventTypes = WEBHOOK_EVENT_TYPES.map((name) => ({ name }));
 
     const res = await paypalFetch(`${this.base}/v1/notifications/webhooks`, {
       method: 'POST',
@@ -371,6 +382,22 @@ export class RealPaypalProvider implements BillingProvider {
     }
     console.error('paypal webhook register failed', res.status, text);
     throw paypalError('webhook registration', res.status, text);
+  }
+
+  async inspectWebhook(publicUrl: string): Promise<WebhookInspection> {
+    const token = await this.accessToken();
+    const res = await paypalFetch(`${this.base}/v1/notifications/webhooks/${encodeURIComponent(this.creds.webhookId)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    // PayPal answers 404 for an id from another account or the other mode.
+    if (res.status === 404) return { state: 'missing' };
+    if (!res.ok) throw paypalError('webhook lookup', res.status, await res.text());
+    const webhook = (await res.json()) as { url?: string; event_types?: Array<{ name?: string }> };
+    if (webhook.url !== publicUrl) return { state: 'wrong_url', url: webhook.url ?? '' };
+    const subscribed = new Set((webhook.event_types ?? []).map((e) => e.name));
+    if (subscribed.has('*')) return { state: 'registered' };
+    const missing = WEBHOOK_EVENT_TYPES.filter((name) => !subscribed.has(name));
+    return missing.length > 0 ? { state: 'missing_events', events: missing } : { state: 'registered' };
   }
 
   /**
@@ -411,7 +438,7 @@ export class RealPaypalProvider implements BillingProvider {
   async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentResult> {
     const token = await this.accessToken();
     const amountMajor =
-      input.amount !== undefined ? paypalMajorString(input.amount, input.currency) : null;
+      input.amount !== undefined ? toProviderAmount(input.currency ?? '', input.amount) : null;
 
     const post = (url: string, body: unknown) =>
       paypalFetch(url, {

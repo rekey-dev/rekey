@@ -7,5 +7,6 @@ export { razorpayWebhookRoutes } from './razorpay.routes.js';
 // route plus the shared appliers the per-provider paths delegate to. The
 // bespoke dispatchers (stripe/razorpay/paypal .handler.ts) were deleted in
 // P2; per-event logic lives in the modules' `translate` + apply.ts.
-export { billingProviderWebhookRoutes, handleBillingProviderWebhook } from './pipeline.js';
+export { handleBillingProviderWebhook } from './pipeline.js';
+export { billingProviderWebhookRoutes } from './generic.routes.js';
 export { applyBillingEvent } from './apply.js';

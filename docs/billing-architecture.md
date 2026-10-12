@@ -27,7 +27,7 @@ A `Plan` has a `kind`, and the kind decides what a purchase provisions:
 | `LICENSE` | One-off charge | A licence key — perpetual, timed, or seat-counted |
 | `USAGE` | Recurring charge | An included quota against a meter — but only where explicit `PlanEntitlement` rows say so. A `USAGE` plan with none synthesizes an entitlement with a null quantity, which resolves to *no quota* and is therefore uncapped. |
 
-`amount` is always an integer in the currency's smallest unit. `$9.99` is `999`. Never a float, never at rest, never in transit.
+Every amount is an integer in the minor unit of its currency. `$9.99` is `999`. Never a float, never at rest, never in transit. A plan's prices are rows of their own (`PlanPrice`): one default price, and one more for each other currency the plan is sold in. A subscription keeps the price it was sold at, and a payment and a refund each carry their own currency. Nothing is converted between currencies. See [billing.md](billing.md#a-plan-in-more-than-one-currency) and [currencies.md](currencies.md).
 
 ### Entitlements
 
@@ -48,7 +48,7 @@ a person always; for an organization only on an org-billed Application, once
 an OWNER or ADMIN claimed it with `POST /billing/subscribe`
 (`OrganizationFreeTierClaim`), and without the default's per-unit USAGE price.
 The
-plan must cost nothing (`amount` 0, no `pricePerUnitCents`): writes refuse a
+plan must be free (`isFree`: it has no price at all): writes refuse a
 priced one, and `loadDefaultPlan` ignores one that got there anyway, so a
 repriced default cannot hand a paid plan to every signed-in user. A
 SUBSCRIPTION or USAGE plan suppresses it entirely (`suppressesFreeTier` — buying
@@ -93,7 +93,7 @@ The external billing provider is the same idea driven by events instead of by an
 
 ### Coupons apply once, and the model cannot express anything else
 
-`Coupon` carries `discountType`, `amountOff`, validity window, and redemption limits. It has **no duration field**. Every coupon is implicitly first-period-only, and the provider call says so explicitly — a Stripe coupon is minted `duration: 'once'`.
+`Coupon` carries `discountType`, a discount (a percentage in `basisPoints`, or one amount per currency), a validity window, and redemption limits. It has **no duration field**. Every coupon is implicitly first-period-only, and the provider call says so explicitly: a Stripe coupon is minted `duration: 'once'`. The provider is handed the computed amount, never the percentage.
 
 The redemption grain follows from that: `@@unique([couponId, checkoutSessionId])`, one redemption per purchase, specifically so a renewal invoice cannot record a second redemption for the same discount.
 
@@ -132,7 +132,7 @@ The change this document accompanies.
 
 ### The problem
 
-Usage meters could count and cap, but not charge. `Plan.pricePerUnitCents` is **mandatory** on `USAGE` plan creation, **immutable** afterwards, shown in the panel and the CLI as though it were live — and read by nothing in the billing path. An operator is required to declare a currency price they cannot change and which charges nobody. Until that field is repurposed or removed, a priced meter means two prices on screen and only one of them real; say so in the panel rather than letting an operator find out. So "pay for what your agent spends" was metering with a wall at the end, not billing.
+Usage meters could count and cap, but not charge. `Plan.pricePerUnitCents` was mandatory on `USAGE` plan creation, immutable afterwards, shown in the panel and the CLI as though it were live, and read by nothing in the billing path: an operator had to declare a price that charged nobody. The field was removed in 2.2.0-rc.7 (a body that sends it is refused with `BILLING_FIELD_REMOVED`). So "pay for what your agent spends" was metering with a wall at the end, not billing.
 
 ### Why prepaid, and not an invoice at month end
 
@@ -214,6 +214,7 @@ This is the extension the current design deliberately leaves room for rather tha
 
 Postpaid requires charging an unknown amount later, so it requires a mandate. The seam is a third provider primitive alongside the existing two:
 
+<!-- snippet: no-check a fragment of a proposed interface that is not built -->
 ```ts
 capabilities: {
   /** Can store a payment method and charge it later, merchant-initiated. */
@@ -250,5 +251,5 @@ Do not reach for "subscribe discounted, then revise to full price at period n". 
 - **Postpaid usage billing.** See above. Needs mandates.
 - **Trials.** The clock is ours to build; the blocker is that grants cannot be time-boxed.
 - **Discount durations.** Model change first.
-- **Refunds, proration, mid-cycle changes.** Wrap provider behaviour; do not reinvent.
+- **Proration, mid-cycle changes.** Wrap provider behaviour; do not reinvent. Refunds are built: see [billing.md](billing.md#refunds).
 - **Tax.** Provider or external. Not our scope.

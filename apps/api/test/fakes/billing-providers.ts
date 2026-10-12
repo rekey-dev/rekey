@@ -18,11 +18,11 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import type { Plan } from '@prisma/client';
 import { discountUnsupported } from '../../src/modules/billing/providers/discount.js';
 import { RekeyError } from '../../src/lib/error.js';
 import { ExternalBillingProvider } from '../../src/modules/billing/providers/external.js';
 import type {
+  PricedPlan,
   BillingProvider,
   CancelSubscriptionInput,
   CheckoutSessionInput,
@@ -58,7 +58,7 @@ export class FakeStripeProvider implements BillingProvider {
     return this.creds?.webhookSecret ?? null;
   }
 
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
     return {
       providerPlanId: deterministicId('price', plan.id, plan.amount.toString(), plan.interval),
     };
@@ -156,7 +156,7 @@ export class FakeStripeProvider implements BillingProvider {
 export class FakePaypalProvider implements BillingProvider {
   readonly name = 'paypal';
   lastCheckout: CheckoutSessionInput | null = null;
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
     return { providerPlanId: `P-stub-${plan.slug}` };
   }
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
@@ -247,7 +247,7 @@ export class FakePaypalProvider implements BillingProvider {
 export class FakeRazorpayProvider implements BillingProvider {
   readonly name = 'razorpay';
   lastCheckout: CheckoutSessionInput | null = null;
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
     return { providerPlanId: `plan_stub_${plan.slug}` };
   }
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {

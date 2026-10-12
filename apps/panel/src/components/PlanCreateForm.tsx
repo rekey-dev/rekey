@@ -5,14 +5,16 @@
  * changes based on the chosen `kind`:
  *   - SUBSCRIPTION → amount + interval
  *   - LICENSE      → amount + interval + licenseKind + (expires-days | seats)
- *   - USAGE        → amount (base fee) + interval + meterSlug + pricePerUnit
+ *   - USAGE        → amount (base fee) + interval + meterSlug
  *
  * The kind selector is presented as three big radio cards at the top, easier
  * to read than a dropdown and shows the trade-offs upfront.
  */
 
 import * as React from 'react';
+import { amountHint } from '@/lib/plan-amount-hint';
 import { ActionForm } from './ActionForm';
+import { CurrencyInput } from './CurrencyCatalog';
 import { SubmitButton } from './SubmitButton';
 import { Banner } from './Banner';
 import { errorMessage } from '@/lib/error-message';
@@ -29,7 +31,7 @@ const ERR: Record<string, string> = {
   PLAN_LICENSE_KIND_REQUIRED: 'Pick a license kind (Perpetual / Timed / Seats).',
   PLAN_LICENSE_DURATION_REQUIRED: 'TIMED licenses need a duration in days.',
   PLAN_LICENSE_SEATS_REQUIRED: 'SEATS licenses need a seats-allowed count.',
-  PLAN_USAGE_CONFIG_REQUIRED: 'USAGE plans need a meter + per-unit price.',
+  PLAN_USAGE_CONFIG_REQUIRED: 'USAGE plans need a meter.',
   PLAN_USAGE_METER_UNKNOWN: 'That meter is not in this Application. Add it under Billing, Meters.',
   PLAN_CREDITS_AMOUNT_REQUIRED: 'Credit packs need a positive credits amount (credits granted per purchase).',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can create plans.',
@@ -157,44 +159,24 @@ const KIND_CARDS: Array<{
   },
 ];
 
-/**
- * The Amount field's hint: a static example while the field is empty, and
- * only the typed value converted to dollars once there is one.
- *
- * @example
- * amountHint('SUBSCRIPTION', '');     // { example: '999 = $9.99', live: null }
- * amountHint('SUBSCRIPTION', '1999'); // { example: null, live: '1999 = $19.99' }
- */
-export function amountHint(kind: Kind, amount: string): { example: string | null; live: string | null } {
-  const cents = Number(amount);
-  if (amount.trim() !== '' && Number.isFinite(cents) && cents > 0) {
-    return { example: null, live: `${cents} = $${(cents / 100).toFixed(2)}` };
-  }
-  const example =
-    kind === 'USAGE'
-      ? '0 = pure pay-as-you-go.'
-      : kind === 'CREDIT'
-        ? 'One-time charge for the pack. 4999 = $49.99'
-        : '999 = $9.99';
-  return { example, live: null };
-}
-
 export function PlanCreateForm({
   action,
   meters,
+  defaultCurrency,
   error,
 }: {
   action: (formData: FormData) => Promise<void>;
   meters: MeterOption[];
+  /** The currency the form starts on: the Application's reporting currency. */
+  defaultCurrency: string;
   error?: string;
 }): React.JSX.Element {
   const [kind, setKind] = React.useState<Kind>('SUBSCRIPTION');
   const [licenseKind, setLicenseKind] = React.useState<'PERPETUAL' | 'TIMED' | 'SEATS'>('PERPETUAL');
 
-  // Live cents → dollars preview for the Amount field (same pattern as
-  // CouponAmountPreview), removes the cents-vs-dollars ambiguity as you type.
   const [amount, setAmount] = React.useState('');
-  const hint = amountHint(kind, amount);
+  const [currency, setCurrency] = React.useState(defaultCurrency);
+  const hint = amountHint(kind, amount, currency);
 
   // Bundle builder state. The list is serialized into a hidden `entitlements`
   // input and applied (one PUT each) by the server action after the plan is
@@ -320,7 +302,7 @@ export function PlanCreateForm({
           <input type="text" name="name" required placeholder="Pro" className={inputCls} />
         </Field>
         <Field
-          label={kind === 'USAGE' ? 'Base fee (cents)' : kind === 'CREDIT' ? 'Pack price (cents)' : 'Amount (cents)'}
+          label={kind === 'USAGE' ? 'Base fee' : kind === 'CREDIT' ? 'Pack price' : 'Amount'}
           required
           hint={
             <>
@@ -332,19 +314,18 @@ export function PlanCreateForm({
           }
         >
           <input
-            type="number"
+            type="text"
+            inputMode="decimal"
             name="amount"
             required
-            min={0}
-            step={1}
-            placeholder={kind === 'USAGE' ? '0' : '999'}
+            placeholder={kind === 'USAGE' ? '0' : '9.99'}
             value={amount}
             onChange={(e) => setAmount(e.currentTarget.value)}
             className={`${inputCls} font-mono`}
           />
         </Field>
-        <Field label="Currency" hint="ISO 4217">
-          <input type="text" name="currency" defaultValue="USD" maxLength={3} minLength={3} className={`${inputCls} font-mono`} />
+        <Field label="Currency">
+          <CurrencyInput name="currency" value={currency} onChange={setCurrency} required className={inputCls} />
         </Field>
         {kind !== 'CREDIT' && (
           <Field label="Billing interval" hint={kind === 'LICENSE' ? 'Ignored for perpetual licenses.' : undefined}>
@@ -411,7 +392,11 @@ export function PlanCreateForm({
             </p>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Meter" required hint="Plan bills against records on this meter.">
+              <Field
+                label="Meter"
+                required
+                hint="The plan counts use on this meter. How much is included, and what use past that costs in credits, is set on the plan's usage entitlement."
+              >
                 <select name="meterSlug" required defaultValue="" className={`${inputCls} font-mono`}>
                   <option value="" disabled>Pick a meter…</option>
                   {meters.map((m) => (
@@ -420,9 +405,6 @@ export function PlanCreateForm({
                     </option>
                   ))}
                 </select>
-              </Field>
-              <Field label="Price per unit (cents)" required hint="5 = $0.05/unit">
-                <input type="number" name="pricePerUnitCents" min={0} step={1} placeholder="5" className={`${inputCls} font-mono`} />
               </Field>
             </div>
           )}

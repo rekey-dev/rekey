@@ -20,6 +20,10 @@ import { registerInitCommand } from './commands/init.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerAppsCommand } from './commands/apps.js';
 import { registerPlansCommand } from './commands/plans.js';
+import { registerCouponsCommand } from './commands/coupons.js';
+import { registerBillingCommand } from './commands/billing.js';
+import { registerRefundsCommand } from './commands/refunds.js';
+import { registerPaymentsCommand } from './commands/payments.js';
 import { registerListsCommand } from './commands/lists.js';
 import { registerAnalyticsCommand } from './commands/analytics.js';
 import { registerVersionCommand } from './commands/version.js';
@@ -50,7 +54,10 @@ export function buildProgram(): Command {
     .option('--api-url <url>', 'Rekey API URL (env: REKEY_URL)')
     .option('--admin-key <key>', 'Super-admin key (env: SUPER_ADMIN_KEY)')
     .option('--secret-key <key>', 'Application secret key, for `lists` (env: REKEY_SECRET)')
-    .option('--operator-token <token>', 'Operator personal access token, for `analytics` (env: REKEY_OPERATOR_TOKEN)')
+    .option(
+      '--operator-token <token>',
+      'Operator personal access token, for `plans prices`, `coupons`, `billing`, `payments`, `refunds`, `analytics` and the money checks of `doctor` (env: REKEY_OPERATOR_TOKEN)',
+    )
     .option('--json', 'Emit machine-readable JSON on stdout (errors still go to stderr).')
     .showHelpAfterError();
 
@@ -59,6 +66,10 @@ export function buildProgram(): Command {
   registerDoctorCommand(program);
   registerAppsCommand(program);
   registerPlansCommand(program);
+  registerCouponsCommand(program);
+  registerBillingCommand(program);
+  registerPaymentsCommand(program);
+  registerRefundsCommand(program);
   registerListsCommand(program);
   registerAnalyticsCommand(program);
 

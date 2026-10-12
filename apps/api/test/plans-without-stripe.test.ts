@@ -67,7 +67,7 @@ describe('plan creation without Stripe credentials', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: { authorization: `Bearer ${operator}` },
-      payload: { slug, name: slug, amount: 1200, interval: 'MONTH' },
+      payload: { slug, name: slug, price: { currency: 'USD', amount: 1200 }, interval: 'MONTH' },
     });
 
   it('the real provider factory does throw for these apps — the suite mock is what hides it', async () => {

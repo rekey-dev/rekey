@@ -35,6 +35,7 @@ Switching is non-breaking in both directions: the API verifies **both** algorith
 
 ## Verifying tokens offline (`@rekey.dev/node`)
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 import { verifyAccessToken } from '@rekey.dev/node';
 

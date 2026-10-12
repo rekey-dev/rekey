@@ -28,6 +28,7 @@ export function ConfirmButton({
   confirmLabel,
   variant = 'danger',
   triggerClassName,
+  triggerPressed,
 }: {
   /** Body text explaining what will happen. */
   confirm: string;
@@ -40,6 +41,11 @@ export function ConfirmButton({
   variant?: 'danger' | 'subtle';
   /** Replaces the trigger's text-link style, for a trigger that should read as a button. */
   triggerClassName?: string;
+  /**
+   * `aria-pressed` for a trigger that is one choice in a group of toggle
+   * buttons, so it announces like its siblings. Leave it off otherwise.
+   */
+  triggerPressed?: boolean;
 }): React.JSX.Element {
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const baseId = React.useId();
@@ -73,7 +79,13 @@ export function ConfirmButton({
 
   return (
     <>
-      <button type="button" className={triggerCls} onClick={open} aria-busy={pending || undefined}>
+      <button
+        type="button"
+        className={triggerCls}
+        onClick={open}
+        aria-busy={pending || undefined}
+        aria-pressed={triggerPressed}
+      >
         {children}
       </button>
       <dialog

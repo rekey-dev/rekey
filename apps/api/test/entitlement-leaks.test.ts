@@ -81,10 +81,10 @@ describe('entitlement resolution — revenue leaks', () => {
       payload: {
         slug,
         name: slug,
-        amount: kind === 'SUBSCRIPTION' ? 0 : 500,
+        ...(kind !== 'SUBSCRIPTION' && { price: { currency: 'USD', amount: 500 } }),
         kind,
         ...(kind === 'CREDIT' && { creditsAmount: 100 }),
-        ...(kind === 'USAGE' && { meterSlug: 'calls', pricePerUnitCents: 1 }),
+        ...(kind === 'USAGE' && { meterSlug: 'calls' }),
       },
     });
     if (included !== undefined) {

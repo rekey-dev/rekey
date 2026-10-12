@@ -29,7 +29,7 @@ type FailureMode = 'FALLBACK_TO_REDIRECT' | 'REFUSE';
 const CHECK_LABEL: Record<CheckoutReadinessCheck['id'], string> = {
   portal: 'Portal reachable',
   provider: 'Provider supports the page',
-  webhook: 'Webhook registered and delivering',
+  webhook: 'Webhook registered',
   plans: 'Plans ready in this mode',
   return_urls: 'Return URL origin registered',
   browser_credential: 'Browser credential',

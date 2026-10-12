@@ -4,25 +4,42 @@
  */
 
 import { describeClientUserAgent } from '@rekey.dev/shared-types';
+import { formatMoney as formatRegistryMoney } from '@rekey.dev/shared-types/currency';
+
+const DEFAULT_MONEY_LOCALE = 'en-US';
 
 /**
- * Format an integer amount in the smallest currency unit as a human price
- * string. e.g. (999, 'USD') → '$9.99'. Uses Intl.NumberFormat for locale
- * decimals, the panel runs server-side, so the locale is the server's.
+ * The locale each currency is written in, where en-US would group its digits
+ * wrongly: rupees are read in lakhs, 1,00,000 and not 100,000. English
+ * locales only, since the panel is in English.
+ *
+ * Chosen by the currency and never by the runtime, so an amount rendered on
+ * the server and the same amount rendered in a client component (the preview
+ * in the add-price form) read the same whatever the operator's browser is set
+ * to.
+ */
+const MONEY_LOCALE_BY_CURRENCY: Readonly<Record<string, string>> = {
+  INR: 'en-IN',
+};
+
+function moneyLocale(currency: string): string {
+  const code = currency.toUpperCase();
+  return Object.hasOwn(MONEY_LOCALE_BY_CURRENCY, code)
+    ? (MONEY_LOCALE_BY_CURRENCY[code] as string)
+    : DEFAULT_MONEY_LOCALE;
+}
+
+/**
+ * Format a stored minor-unit amount as a price, such as (999, 'USD') as
+ * '$9.99', (1500, 'JPY') as '¥1,500', (500000, 'HUF') as 'HUF 5,000' and
+ * (10000000, 'INR') as '₹1,00,000.00'.
+ *
+ * How many decimals the amount has is the currency registry's answer. This
+ * only picks the locale. Throws a RangeError for an amount that is not a
+ * whole number.
  */
 export function formatMoney(amount: number, currency: string): string {
-  // Most non-zero-decimal currencies are two-decimal; we hard-code that
-  // for the MVP. JPY/KRW/etc. are zero-decimal, future improvement is
-  // a lookup table or use the runtime locale's currency formatter.
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-    }).format(amount / 100);
-  } catch {
-    return `${(amount / 100).toFixed(2)} ${currency}`;
-  }
+  return formatRegistryMoney(amount, currency, moneyLocale(currency));
 }
 
 export function formatPercent(basisPointsTimesTen: number): string {

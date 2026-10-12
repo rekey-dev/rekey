@@ -7,10 +7,10 @@
  * or one stamped for another buyer, must never be captured and fulfilled.
  */
 
-import type { Plan } from '@prisma/client';
+
+import type { CheckoutSession } from '@prisma/client';
 import { prisma } from '../../../lib/prisma.js';
 import { recordSecurityEvent } from '../../../lib/security-events.js';
-import { couponForSession } from '../checkout-sessions.js';
 import type { BillingProvider, ProviderOrderSnapshot } from '../providers/types.js';
 
 /** What the provider was asked to charge for a one-time checkout. Smallest currency unit, upper-case ISO 4217. */
@@ -39,38 +39,35 @@ export function orderMismatch(
 }
 
 /**
+ * What a one-time checkout must charge: the amount its session was opened at
+ * less its discount, in the session's currency. Null for a recurring session,
+ * whose first charge a trial or a proration can change.
+ *
  * @example
- * expectedChargeOf({ expectedCharge: { amount: 4999, currency: 'USD' } }); // { amount: 4999, currency: 'USD' }
+ * expectedChargeOfSession(session); // { amount: 3999, currency: 'USD' }
  */
-export function expectedChargeOf(metadata: unknown): ExpectedCharge | null {
-  if (typeof metadata !== 'object' || metadata === null) return null;
-  const value = (metadata as { expectedCharge?: unknown }).expectedCharge;
-  if (typeof value !== 'object' || value === null) return null;
-  const { amount, currency } = value as { amount?: unknown; currency?: unknown };
-  return typeof amount === 'number' && typeof currency === 'string' ? { amount, currency } : null;
+export function expectedChargeOfSession(
+  session: Pick<CheckoutSession, 'kind' | 'currency' | 'chargeAmount'>,
+): ExpectedCharge | null {
+  if (session.kind !== 'ONE_TIME' || session.currency === null || session.chargeAmount === null) return null;
+  return { amount: session.chargeAmount, currency: session.currency.toUpperCase() };
 }
 
 /**
- * What a one-time order must charge: the amount its CheckoutSession recorded,
- * or, for a session recorded before that existed, the plan's price less the
- * coupon that session carried.
+ * What a one-time order must charge, from the CheckoutSession Rekey recorded
+ * for it. Null when Rekey holds no session for the order, so there is nothing
+ * to hold the order to and it must not be captured.
  *
  * @example
- * await expectedChargeForOrder(appId, 'ORDER-1', subscription); // { amount: 3999, currency: 'USD' }
+ * await expectedChargeForOrder(appId, 'ORDER-1'); // { amount: 3999, currency: 'USD' }
  */
-export async function expectedChargeForOrder(
-  applicationId: string,
-  orderId: string,
-  subscription: { metadata: unknown; plan: Pick<Plan, 'amount' | 'currency'> },
-): Promise<ExpectedCharge> {
+export async function expectedChargeForOrder(applicationId: string, orderId: string): Promise<ExpectedCharge | null> {
   const session = await prisma.checkoutSession.findFirst({
     where: { applicationId, providerSessionId: orderId },
-    select: { metadata: true },
+    orderBy: { createdAt: 'desc' },
+    select: { kind: true, currency: true, chargeAmount: true },
   });
-  const recorded = expectedChargeOf(session?.metadata);
-  if (recorded !== null) return recorded;
-  const discount = couponForSession(subscription.metadata, orderId)?.discountAmount ?? 0;
-  return { amount: subscription.plan.amount - discount, currency: subscription.plan.currency.toUpperCase() };
+  return session === null ? null : expectedChargeOfSession(session);
 }
 
 /**
@@ -85,21 +82,24 @@ export async function expectedChargeForOrder(
 export async function orderCaptureRefusal(args: {
   provider: BillingProvider;
   application: { id: string; tenantId: string };
-  subscription: { id: string; endUserId: string; metadata: unknown; plan: Pick<Plan, 'amount' | 'currency'> };
+  subscription: { id: string; endUserId: string };
   orderId: string;
-}): Promise<OrderMismatch | 'provider_cannot_verify' | null> {
+}): Promise<OrderMismatch | 'provider_cannot_verify' | 'no_checkout_session' | null> {
   const { provider, application, subscription, orderId } = args;
-  const expected = await expectedChargeForOrder(application.id, orderId, subscription);
-  const reason = provider.getOrder
-    ? orderMismatch(await provider.getOrder(orderId), orderId, `${application.id}:${subscription.endUserId}`, expected)
-    : 'provider_cannot_verify';
+  const expected = await expectedChargeForOrder(application.id, orderId);
+  const reason =
+    expected === null
+      ? 'no_checkout_session'
+      : provider.getOrder
+        ? orderMismatch(await provider.getOrder(orderId), orderId, `${application.id}:${subscription.endUserId}`, expected)
+        : 'provider_cannot_verify';
   if (reason === null) return null;
   void recordSecurityEvent({
     type: 'app.checkout_capture_refused',
     actorType: 'system',
     tenantId: application.tenantId,
     applicationId: application.id,
-    metadata: { subscriptionId: subscription.id, providerOrderId: orderId.slice(0, 64), reason, expected: { ...expected } },
+    metadata: { subscriptionId: subscription.id, providerOrderId: orderId.slice(0, 64), reason, expected: expected === null ? null : { ...expected } },
   });
   return reason;
 }

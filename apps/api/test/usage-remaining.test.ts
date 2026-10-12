@@ -99,7 +99,7 @@ describe('Usage remaining + meter catalogue', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: op(),
-      payload: { slug: planSlug, name: planSlug, amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug: planSlug, name: planSlug, kind: 'SUBSCRIPTION' },
     });
     const put = await app.inject({
       method: 'PUT',

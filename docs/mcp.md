@@ -217,7 +217,7 @@ subscription. `organizationId` in their output says which subject answered.
 | Tool | Returns |
 |---|---|
 | `get_profile` | `{ id, email, emailVerified, role, metadata, createdAt, organization }`. `organization` is the bound organization with the user's role in it, `{ id, name, slug, role, baseRole }`, in any Application, or `null` for a personal grant. |
-| `get_subscription` | `{ status, provider, currentPeriodEnd, cancelAt, plan, organizationId } \| null`, the subscription `GET /billing/subscription` reports for the same subject, picked by the same ranking (`billingService.getCurrentSubscription`), without `providerCapabilities` |
+| `get_subscription` | `{ status, provider, currentPeriodEnd, cancelAt, price, plan, organizationId } \| null`. `price` is what the subscription is charged, `{ id, currency, amount, formatted }` or `null` when it records no price of its own; `plan` is `{ slug, name, interval, price }` with the plan's default price in the same shape (`null` for a plan with no flat price). Every `amount` is an integer in the minor units of its `currency`. It is the subscription `GET /billing/subscription` reports for the same subject, picked by the same ranking (`billingService.getCurrentSubscription`), without `providerCapabilities` |
 | `get_credits` | `{ balance, organizationId }`, the organization's shared pool or the user's own balance (`creditsService.getBalance`) |
 | `list_licenses` | `{ licenses: [{ id, kind, status, organizationId, seatsAllowed, expiresAt, createdAt }], organizationId, truncated }` (no keys): the same rows `GET /users/me/licenses` returns for the same subject (`licensesService.listForEndUser`), with fewer fields (no `keyPrefix`), the user's own plus, when bound in an org-billed Application, the organization's pool. Newest 100; `truncated: true` when there are more. |
 | `list_my_devices` | `{ devices: [{ id, label, status, firstSeenAt, lastSeenAt, releasedAt }] }` (no IPs, no operator notes). Always personal: a device belongs to a person. |
@@ -318,6 +318,15 @@ being handed a long-lived secret to paste.
 | `list_invitations` | pending workspace invitations — **`minRole: ADMIN`** |
 | `recent_payments` | filter by `status`, `limit` |
 | `recent_subscriptions` | filter by `status`, `limit` |
+| `recent_billing_events` | one Application's billing log, newest first; filter by `type`, `endUserId`, `subscriptionId`, `paymentId`, `currency`, `from`, `to`; page with `cursor`. See [billing-log.md](billing-log.md) |
+| `get_billing_stats` | one Application's figures, one entry per currency in every list (`mrr`, `revenueLast30d`, `monthlyRevenue`, `unverified`), the reporting currency first. No total across currencies. Needs `billing:read` |
+| `get_reporting_currency` | the currency an Application reports in. Needs `billing:read` |
+| `preview_checkout_routing` | which price and provider a buyer in a `country` would get, and why, for one `plan` or every active plan; with `couponCode`, what the coupon takes off or the refusal it would get. Opens no checkout. Needs `billing:read` |
+| `list_price_fallbacks` | how often a buyer was charged the default price because their currency could not be charged, grouped by plan, currencies and country. Counts only. Needs `billing:read` |
+| `get_billing_reconciliation` | where the billing log and the payments, refunds and subscriptions disagree, for a period of at most 31 days. Needs `billing:read` |
+| `get_payment` | one payment by id, with the `provider` that took it, whether it is `refundable` through Rekey and the `refundBlockedReason` when it is not: the judgement `create_refund` makes before it asks a provider. Needs `billing:read` |
+| `list_payment_refunds` | every refund recorded against one payment, oldest first. Needs `billing:read` |
+| `list_coupons` | an Application's coupons with what each has taken off per currency. Needs `billing:read` |
 | `recent_security_events` | filter by `actorType`, `limit` — **`minRole: ADMIN`** |
 | `recent_webhook_events` | filter by `provider`, `onlyFailed`, `limit` |
 | `recent_failed_webhook_deliveries` | last-N FAILED outbound deliveries |
@@ -325,6 +334,7 @@ being handed a long-lived secret to paste.
 | `get_user_analytics` | one app's Users overview (`overview:read`): the `GET .../analytics/users` sections and filters, counts only |
 | `get_end_user` | one end-user: verification state, app environment, current subscription |
 | `list_devices` | an end-user's devices, newest activity first, optionally filtered by `status` |
+| `list_support_cases` | an application's support cases: open ones oldest first, or closed ones most recently opened first, optionally for one end-user. Each case has its `noteCount`; note bodies are not returned. See [support-mode.md](support-mode.md) |
 | `list_organization_roles` | an application's organization-role catalog + each role's `baseRole` tier. Also reports `organizationsEnabled`, and when it is false returns a note naming `update_auth_config`, so an agent asking about roles on an app without organizations gets the next step rather than an empty list |
 | `list_organizations` | an application's organizations, newest first, with member and pending-invitation counts. `query` matches name or slug; `limit` (max 100) and `offset` page, with `total` and `hasMore`. Lives in `operator-organization-tools.ts` and needs `organizations:read` |
 | `list_contact_lists` | an application's lists (waitlists, newsletters, contact forms) with member and submission counts, Public capture and archived state. Needs `audience:read`, and a viewer or billing grant is refused as over REST |
@@ -343,7 +353,8 @@ Hidden from `tools/list` unless the caller has write capability **and** the role
 and re-checked on `tools/call`:
 
 `create_application`, `update_auth_config`, `create_plan`, `update_plan`,
-`set_plan_active`, `create_webhook_endpoint`, `update_webhook_endpoint`,
+`set_plan_price`, `remove_plan_price`, `create_coupon`, `update_coupon`,
+`set_reporting_currency`, `set_plan_active`, `create_webhook_endpoint`, `update_webhook_endpoint`,
 `invite_member`, `revoke_invitation`, `change_member_role`, `remove_member`,
 `create_organization_role`, `update_organization_role`,
 `delete_organization_role`, `add_organization_member`,
@@ -394,14 +405,30 @@ slot back and revokes the device's sessions), `block_device` (refuses sign-in
 from that fingerprint until unblocked) and `unblock_device`. See
 [devices.md](devices.md).
 
+`close_support_case` ends the open support case on an end-user, so its
+capabilities stop being reported. There is deliberately no tool to open or
+change a case: that is done in the panel or over REST. See
+[support-mode.md](support-mode.md).
+
 Two more are flagged `admin`, needing `mcp:operator:admin` rather than plain
 write: `configure_billing_provider` (the secret travels through the MCP client;
 its `provider` enum comes from the billing-provider registry, so it includes
 `external`, which takes only `webhookSecret`) and `cancel_subscription`
 (irreversible).
 
-Still not exposed at any tier: delete application, refund, webhook-secret
-rotation.
+A third admin tool, `create_refund`, refunds a recorded payment in full or in
+part. It pays money out and cannot be undone. Repeating the same call is one
+refund.
+
+Every amount a billing tool takes or returns is an integer in the minor unit
+of its currency. `create_coupon` and `update_coupon` take `basisPoints` for a
+percentage or `amounts` with one amount per currency; `amountOff` and
+`currency` at the top level are refused with `BILLING_FIELD_REMOVED`.
+`update_coupon` also takes `endsAt`, `maxRedemptions` and
+`maxRedemptionsPerUser`, each a value or null to remove it; a cap below the
+redemptions already held is refused with `COUPON_LIMIT_BELOW_REDEEMED`.
+
+Still not exposed at any tier: delete application, webhook-secret rotation.
 
 Each goes through the same service the panel uses — no MCP-only write path — and
 emits a security event on success, so an agent's writes are as auditable as a
@@ -461,6 +488,7 @@ Three new tables added in migration `20260531230000_operator_mcp_oauth`:
 
 #### Token shape
 
+<!-- snippet: no-check a shape written out for reading, not a program -->
 ```ts
 { typ: 'op_mcp_access', sub: tenantUserId, tid: tenantId, cid: clientId, scope, aud: '<issuer>', iat, exp }
 ```

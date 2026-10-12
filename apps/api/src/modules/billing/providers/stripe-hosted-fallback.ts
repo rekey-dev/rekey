@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import type Stripe from 'stripe';
 import { RekeyError } from '../../../lib/error.js';
 import { clientReference, purchaseFor, stripeReturnUrl } from './stripe-embedded.js';
+import { fromProviderAmount } from './stripe-money.js';
 import type { CheckoutSessionResult, HostedFallbackInput } from './types.js';
 
 type Discounts = Stripe.Checkout.SessionCreateParams.Discount[] | undefined;
@@ -73,7 +74,11 @@ function carriedDiscounts(session: Stripe.Checkout.Session): Discounts {
 function hostedParams(input: HostedFallbackInput, embedded: Stripe.Checkout.Session): Stripe.Checkout.SessionCreateParams {
   const plan =
     input.kind === 'one_time' && embedded.amount_subtotal !== null && embedded.currency !== null
-      ? { ...input.plan, amount: embedded.amount_subtotal, currency: embedded.currency }
+      ? {
+          ...input.plan,
+          amount: fromProviderAmount(embedded.currency, embedded.amount_subtotal),
+          currency: embedded.currency,
+        }
       : input.plan;
   return {
     ...purchaseFor({ ...input, plan }, input.kind, input.priceId, carriedDiscounts(embedded)),

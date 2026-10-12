@@ -43,6 +43,21 @@ describe('users analytics cache', () => {
     await seedUsers(w.appId, 50, 11);
   });
 
+  /**
+   * The allowance is counted per clock minute, so a run that crosses a minute
+   * boundary starts a new count part way through. Hold the clock still.
+   */
+  async function withinOneMinute(run: () => Promise<void>): Promise<void> {
+    const realNow = Date.now;
+    const fixed = realNow();
+    Date.now = () => fixed;
+    try {
+      await run();
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
   const get = (qs = '?range=7d') =>
     w.inject({ method: 'GET', url: `/api/v1/tenant/applications/${w.appId}/analytics/users${qs}`, headers: bearer(w.ownerToken) });
 
@@ -141,34 +156,38 @@ describe('users analytics cache', () => {
   });
 
   it('counts computations, not requests: cache hits never use up the allowance', async () => {
-    const keys = await redis.keys('rk:an:computes:*');
-    if (keys.length) await redis.del(...keys);
-    for (let i = 0; i < 30; i++) {
-      const r = await get(`?range=7d&sections=kpis&country=${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`);
-      expect(r.statusCode, r.body).toBe(200);
-    }
-    const over = await get('?range=7d&sections=kpis&country=ZZ');
-    expect(over.statusCode).toBe(429);
-    expect(over.json().error.code).toBe('RATE_LIMITED');
-    expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
-    for (let i = 0; i < 40; i++) {
-      const hit = await get('?range=7d&sections=kpis&country=AA');
-      expect(hit.statusCode).toBe(200);
-      expect(hit.json().data.sections.kpis.cache.hit).toBe(true);
-    }
+    await withinOneMinute(async () => {
+      const keys = await redis.keys('rk:an:computes:*');
+      if (keys.length) await redis.del(...keys);
+      for (let i = 0; i < 30; i++) {
+        const r = await get(`?range=7d&sections=kpis&country=${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`);
+        expect(r.statusCode, r.body).toBe(200);
+      }
+      const over = await get('?range=7d&sections=kpis&country=ZZ');
+      expect(over.statusCode).toBe(429);
+      expect(over.json().error.code).toBe('RATE_LIMITED');
+      expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
+      for (let i = 0; i < 40; i++) {
+        const hit = await get('?range=7d&sections=kpis&country=AA');
+        expect(hit.statusCode).toBe(200);
+        expect(hit.json().data.sections.kpis.cache.hit).toBe(true);
+      }
+    });
   });
 
   it('MCP calls draw on the same per-operator allowance as the REST route', async () => {
-    const keys = await redis.keys('rk:an:computes:*');
-    if (keys.length) await redis.del(...keys);
-    const tool = allOperatorTools.find((t) => t.name === 'get_user_analytics')!;
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: w.appId } });
-    const owner = await prisma.tenantMembership.findFirstOrThrow({ where: { tenantId: application.tenantId, role: 'OWNER' } });
-    const ctx = { tenantUserId: owner.tenantUserId, tenantId: application.tenantId, role: 'OWNER' as const, tenantMembershipId: owner.id, scopes: UNRESTRICTED, canWrite: false, canAdmin: false };
-    const country = (i: number) => `${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`;
-    for (let i = 0; i < 20; i++) expect((await get(`?range=7d&sections=kpis&country=${country(i)}`)).statusCode).toBe(200);
-    for (let i = 20; i < 30; i++) await tool.handler(ctx, { applicationId: w.appId, range: '7d', sections: 'kpis', country: country(i) });
-    await expect(tool.handler(ctx, { applicationId: w.appId, range: '7d', sections: 'kpis', country: 'ZZ' })).rejects.toMatchObject({ code: 'RATE_LIMITED' });
-    expect((await get('?range=7d&sections=kpis&country=ZY')).statusCode).toBe(429);
+    await withinOneMinute(async () => {
+      const keys = await redis.keys('rk:an:computes:*');
+      if (keys.length) await redis.del(...keys);
+      const tool = allOperatorTools.find((t) => t.name === 'get_user_analytics')!;
+      const application = await prisma.application.findUniqueOrThrow({ where: { id: w.appId } });
+      const owner = await prisma.tenantMembership.findFirstOrThrow({ where: { tenantId: application.tenantId, role: 'OWNER' } });
+      const ctx = { tenantUserId: owner.tenantUserId, tenantId: application.tenantId, role: 'OWNER' as const, tenantMembershipId: owner.id, scopes: UNRESTRICTED, canWrite: false, canAdmin: false };
+      const country = (i: number) => `${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`;
+      for (let i = 0; i < 20; i++) expect((await get(`?range=7d&sections=kpis&country=${country(i)}`)).statusCode).toBe(200);
+      for (let i = 20; i < 30; i++) await tool.handler(ctx, { applicationId: w.appId, range: '7d', sections: 'kpis', country: country(i) });
+      await expect(tool.handler(ctx, { applicationId: w.appId, range: '7d', sections: 'kpis', country: 'ZZ' })).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+      expect((await get('?range=7d&sections=kpis&country=ZY')).statusCode).toBe(429);
+    });
   });
 });

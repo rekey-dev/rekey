@@ -114,8 +114,9 @@ describe('tree-shaking the published bundle', () => {
   it('ships no zod even when the whole barrel is imported', async () => {
     const { bytes, text } = await bundle(`import * as all from ${entry};\nconsole.log(all);`);
     expect(containsZod(text)).toBe(false);
-    // Measured 37,248 B, every component and the client. Was 111,028 B.
-    expect(bytes).toBeLessThan(60_000);
+    // Measured 62,025 B: every component, the client and the currency
+    // registry that prices are formatted with (12,190 B). Was 111,028 B.
+    expect(bytes).toBeLessThan(80_000);
   });
 
   it('imports RekeyError from the zod-free subpath, not the schema barrel', async () => {

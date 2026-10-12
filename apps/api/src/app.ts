@@ -139,10 +139,17 @@ import {
 import { portalConfigRoutes } from "./modules/portal/index.js";
 import { tenantEndUserBanRoutes } from "./modules/end-user-bans/index.js";
 import {
+  tenantSupportCapabilityRoutes,
+  tenantSupportCaseRoutes,
+} from "./modules/support-cases/index.js";
+import {
   checkoutProbeRoutes,
   checkoutSessionRoutes,
 } from "./modules/billing/checkout/checkout-sessions.routes.js";
 import { tenantCheckoutRoutes } from "./modules/billing/checkout/tenant-checkout.routes.js";
+import { refundsRoutes } from "./modules/billing/refunds.routes.js";
+import { paymentsRoutes } from "./modules/billing/payments.routes.js";
+import { planPricesRoutes } from "./modules/plans/plan-prices.routes.js";
 import { usagePublicRoutes, usageSelfRoutes } from "./modules/usage/index.js";
 import { creditsPublicRoutes, creditsSelfRoutes } from "./modules/credits/index.js";
 import {
@@ -163,6 +170,17 @@ import {
   startWebhookWorker,
   stopWebhookWorker,
 } from "./modules/webhooks/index.js";
+import { pollBillingEventOutbox } from "./modules/billing-log/index.js";
+import {
+  startBillingEventOutboxWorker,
+  stopBillingEventOutboxWorker,
+} from "./modules/billing-log/outbox.queue.js";
+import {
+  startBillingLogMaintenance,
+  stopBillingLogMaintenance,
+} from "./modules/billing-log/maintenance.queue.js";
+import { tenantBillingLogRoutes } from "./modules/billing-log/billing-log.routes.js";
+import { tenantBillingReportingRoutes } from "./modules/billing/reporting.routes.js";
 import {
   organizationsAuthenticatedRoutes,
   organizationsAcceptInvitationRoutes,
@@ -170,6 +188,7 @@ import {
 import { securityEventsRoutes } from "./modules/security-events/index.js";
 import { mcpRoutes, mcpWellKnownRoutes } from "./modules/mcp/index.js";
 import { adminMetricsRoutes } from "./modules/admin-metrics/index.js";
+import { adminBillingOutboxRoutes } from "./modules/admin-metrics/billing-outbox.routes.js";
 import { operatorInvitesRoutes } from "./modules/operator-invites/index.js";
 import {
   tenantMcpRoutes,
@@ -188,6 +207,7 @@ import { insightsTenantRoutes } from "./modules/end-users/insights.routes.js";
 import { applicationSettingsRoutes } from "./modules/analytics/settings.routes.js";
 import { analyticsTenantRoutes } from "./modules/analytics/analytics.routes.js";
 import { ROLLUP_TICK_MS, runAnalyticsRollup } from "./modules/analytics/rollup/job.js";
+import { triggeredRollupsSettled } from "./modules/analytics/rollup/trigger.js";
 
 export interface BuildAppOptions {
   /** Override the default logger config (e.g. silence in tests). */
@@ -247,7 +267,7 @@ export function trustProxyConfig(
   if (!Number.isNaN(hops)) {
     if (Number.isInteger(hops) && hops > 0) return hops;
     throw new Error(
-      `[CONFIG] TRUSTED_PROXIES="${value}" is not a valid hop count — use a positive integer, an IP/CIDR list, or leave it unset.`,
+      `[CONFIG] TRUSTED_PROXIES="${value}" is not a valid hop count. Use a positive integer, an IP/CIDR list, or leave it unset.`,
     );
   }
 
@@ -852,6 +872,14 @@ export async function buildApp(
     await stopScheduledDeliveries();
   });
 
+  // A reporting-timezone change starts a rollup the request does not wait
+  // for. Let it finish before the process lets go of the database: cut off
+  // inside its read transaction, it holds that transaction's locks until the
+  // transaction times out, half a minute later.
+  app.addHook("onClose", async () => {
+    await triggeredRollupsSettled();
+  });
+
   // Terminate the bcrypt verification workers, if an imported hash ever
   // started them. They are unref'd while idle, so this is tidiness on a normal
   // stop, not what lets the process exit.
@@ -986,7 +1014,22 @@ export async function buildApp(
     // without a working queue. The DB poller above stays as the crash backstop.
     if (isQueueEnabled()) {
       await startWebhookWorker(app.log);
+      await startBillingEventOutboxWorker(app.log);
+      await startBillingLogMaintenance(app.log);
     }
+
+    // Billing-event outbox poller. The queue above only makes a drain happen
+    // sooner; this is what guarantees a queued event reaches the log after a
+    // lost job or a Redis flush. Drains may overlap: each event is deduplicated.
+    // A minute, because the queue carries the ordinary case and the table is
+    // empty nearly always: an idle tick is one indexed existence check.
+    const BILLING_OUTBOX_POLL_INTERVAL_MS = 60 * 1000;
+    const billingOutboxTimer = setInterval(() => {
+      void pollBillingEventOutbox(app.log).catch((err) =>
+        app.log.warn({ err }, "billing event outbox poll failed"),
+      );
+    }, BILLING_OUTBOX_POLL_INTERVAL_MS);
+    billingOutboxTimer.unref();
 
     app.addHook("onClose", async () => {
       clearInterval(flushTimer);
@@ -995,7 +1038,10 @@ export async function buildApp(
       clearInterval(webhookRetryTimer);
       clearInterval(dunningTimer);
       clearInterval(trialTimer);
+      clearInterval(billingOutboxTimer);
       await stopWebhookWorker();
+      await stopBillingEventOutboxWorker();
+      await stopBillingLogMaintenance();
     });
   }
 
@@ -1166,6 +1212,12 @@ export async function buildApp(
   await app.register(tenantEndUserBanRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
+  await app.register(tenantSupportCaseRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantSupportCapabilityRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
   await app.register(profileTenantRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
@@ -1182,6 +1234,21 @@ export async function buildApp(
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantCheckoutRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(refundsRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(paymentsRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(planPricesRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantBillingLogRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantBillingReportingRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantMfaRoutes, { prefix: "/api/v1/tenant/auth/mfa" });
@@ -1222,6 +1289,7 @@ export async function buildApp(
   // Read-only deployment-wide rollups for the super-admin dashboard.
   // GET-only; gated by SUPER_ADMIN_KEY.
   await app.register(adminMetricsRoutes, { prefix: "/api/v1/admin/metrics" });
+  await app.register(adminBillingOutboxRoutes, { prefix: "/api/v1/admin/metrics" });
 
   app.setNotFoundHandler((req, reply) => {
     // `requestId` here too: docs/errors.md documents it on every error envelope,

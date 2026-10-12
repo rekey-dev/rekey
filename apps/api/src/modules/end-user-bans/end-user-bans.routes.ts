@@ -51,7 +51,7 @@ const HISTORY_ENTRY = {
   required: ['id', 'type', 'actorId', 'actorEmail', 'reason', 'createdAt'],
 } as const;
 
-const ERRORS = {
+export const OPERATOR_END_USER_ERRORS = {
   401:
     'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or TENANT_SESSION_INVALID: ' +
     'the token is invalid, expired, or the operator account no longer exists.',
@@ -64,7 +64,7 @@ const ERRORS = {
     'MEMBER holding no grant on it); or END_USER_NOT_FOUND: no end-user with that id in this Application.',
 } as const;
 
-function actorOf(req: FastifyRequest): BanActor {
+export function operatorActorOf(req: FastifyRequest): BanActor {
   const { ip, userAgent } = requestContext(req);
   return {
     // Set by requireTenantSession for every operator credential it admits.
@@ -100,7 +100,7 @@ export async function tenantEndUserBanRoutes(app: FastifyInstance): Promise<void
             },
             'Current ban state and history.',
           ),
-          ...errs(ERRORS),
+          ...errs(OPERATOR_END_USER_ERRORS),
         },
       },
     },
@@ -150,7 +150,7 @@ export async function tenantEndUserBanRoutes(app: FastifyInstance): Promise<void
             'The ban as it now stands.',
           ),
           ...errs({
-            ...ERRORS,
+            ...OPERATOR_END_USER_ERRORS,
             400: 'BAN_REASON_INVALID: `reason` is empty after trimming or longer than 500 characters.',
             410: 'END_USER_ERASED: the end-user was erased; there is nothing to ban.',
           }),
@@ -165,7 +165,7 @@ export async function tenantEndUserBanRoutes(app: FastifyInstance): Promise<void
         applicationId: id,
         endUserId: euid,
         reason: body.reason,
-        actor: actorOf(req),
+        actor: operatorActorOf(req),
       });
       return { success: true, data };
     },
@@ -193,14 +193,14 @@ export async function tenantEndUserBanRoutes(app: FastifyInstance): Promise<void
             },
             'The end-user, no longer banned.',
           ),
-          ...errs({ ...ERRORS, 410: 'END_USER_ERASED: the end-user was erased.' }),
+          ...errs({ ...OPERATOR_END_USER_ERRORS, 410: 'END_USER_ERASED: the end-user was erased.' }),
         },
       },
     },
     async (req) => {
       const { id, euid } = Params.parse(req.params);
       await ensureAppAccess(req, id, 'write');
-      const data = await endUserBansService.unban({ applicationId: id, endUserId: euid, actor: actorOf(req) });
+      const data = await endUserBansService.unban({ applicationId: id, endUserId: euid, actor: operatorActorOf(req) });
       return { success: true, data };
     },
   );

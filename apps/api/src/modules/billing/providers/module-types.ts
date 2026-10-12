@@ -222,8 +222,23 @@ interface PaymentEventBase extends DomainEventBase {
    * to record or log-and-drop, preserving the poisoned-row protections.
    */
   amount: number | null | undefined;
+  /**
+   * The amount as the provider wrote it, for a provider that does not report
+   * the smallest unit (PayPal sends "12.34"). Quoted in the billing log when
+   * `amount` cannot be recorded; absent, `amount` itself is quoted.
+   */
+  reportedAmount?: string;
   currency: string | null;
   description: string | null;
+  /**
+   * The provider's id for the price this charge bills: the Stripe price id of
+   * the invoice's subscription lines, the Razorpay plan id of the charged
+   * subscription. Set only when the payload names exactly one. The applier
+   * still records a succeeded payment whose id is not the one registered for
+   * the subscription's price, and flags it on the webhook receipt; absent,
+   * nothing is compared.
+   */
+  providerPriceId?: string;
 }
 
 export interface PaymentSucceededEvent extends PaymentEventBase {
@@ -267,6 +282,25 @@ export interface PaymentFailedEvent extends PaymentEventBase {
 export interface PaymentRefundedEvent extends PaymentEventBase {
   type: 'payment.refunded';
   refundedTotal?: number;
+  /** The provider's id for this one refund, when the payload names it. A refund id is recorded once. */
+  providerRefundId?: string;
+  /** How far this one refund has got. Absent means it went through. */
+  refundStatus?: ProviderRefund['status'];
+  /**
+   * Every refund the payload lists against the payment (Stripe's
+   * `charge.refunds`). Each is recorded under its own id. When
+   * `refundedTotal` is larger than they add up to, the rest is recorded as one
+   * more refund with no id.
+   */
+  refunds?: ProviderRefund[];
+}
+
+/** One refund as a provider's payload lists it. */
+export interface ProviderRefund {
+  providerRefundId: string;
+  /** Smallest currency unit, passed through UNVALIDATED like every event amount. */
+  amount: number | null | undefined;
+  status?: 'pending' | 'succeeded' | 'failed';
 }
 
 /**
@@ -376,6 +410,13 @@ export interface SubscriptionGrantedEvent extends DomainEventBase {
   currentPeriodEnd?: Date | null;
   trialEndsAt?: Date | null;
   /**
+   * The currency the sender bills this subscription in. A subscription the
+   * event creates, or one that has no price yet, takes the plan's price in
+   * it. A currency the plan has no price in is noted and otherwise ignored:
+   * the subscription is still activated and follows the plan's default price.
+   */
+  currency?: string;
+  /**
    * When the sender says the activation happened. An activation at or before
    * a cancellation already applied to the same subscription id is stale and
    * does not reopen it. Absent = no ordering information.
@@ -447,6 +488,20 @@ export interface ProviderModule {
      * these, it routes purely on what is stored on the credential row.
      */
     defaultCountries: string[];
+    /**
+     * Every currency this provider can charge at all, from its own published
+     * list, or `'all-sellable'` when that is every currency a Rekey price may
+     * be in. What one account can really charge depends on the account, so
+     * the stored row is the operator's statement.
+     */
+    supportedCurrencies: string[] | 'all-sellable';
+    /**
+     * What an account can usually charge without further setup. A credential
+     * row saved without a currency list starts with these, and the panel
+     * ticks them for a new row. Never empty: a row with no currency is used
+     * for no checkout, and only an operator may choose that.
+     */
+    preselectedCurrencies: string[];
     priority: number;
   };
   capabilities: {
@@ -591,7 +646,9 @@ export interface ProviderModule {
    *
    * Implement it in any module that registers plans eagerly.
    */
-  planCheckoutBlocker?(plan: Plan): PlanCheckoutBlocker | null;
+  planCheckoutBlocker?(
+    plan: Pick<Plan, 'applicationId' | 'slug' | 'metadata' | 'registrationStatus' | 'registrationError'>,
+  ): PlanCheckoutBlocker | null;
   credentialSchema: CredentialField[];
   /** Escape hatch for cross-field rules the declarative schema can't express. */
   validateCredentials?(creds: Record<string, string>): void;
@@ -646,6 +703,14 @@ export interface ProviderModule {
      * or null for a payload that does not say, and nothing is compared.
      */
     eventMode?(payload: unknown): 'test' | 'live' | null;
+    /**
+     * True when this provider's renewal payment names its subscription and
+     * not the price it bills (PayPal's sale). The pipeline then reads the
+     * subscription from the provider and puts its plan id on the payment
+     * event as `providerPriceId`, so the applier can hold the charge to the
+     * price the subscription is on.
+     */
+    renewalPriceFromSubscription?: boolean;
     /**
      * null = unhandled event type (logged + acked, receipt marked). May be
      * async for a module that needs a provider read to finish translating;

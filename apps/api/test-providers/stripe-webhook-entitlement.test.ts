@@ -80,8 +80,7 @@ describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitl
       applicationId: fixture.applicationId,
       slug: 'team',
       name: `${HARNESS_PREFIX} Team ${runId}`,
-      amount: 3000,
-      currency: 'usd',
+      price: { currency: 'usd', amount: 3000 },
       interval: 'MONTH',
     });
     const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe!.priceId!;

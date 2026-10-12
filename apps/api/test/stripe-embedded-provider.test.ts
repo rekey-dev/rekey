@@ -9,6 +9,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EndUser, Plan } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
 import { STRIPE_JS_RELEASE_TRAIN } from '@rekey.dev/shared-types';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
@@ -75,7 +76,7 @@ function input(over: Partial<CheckoutSessionInput> = {}): CheckoutSessionInput {
   return {
     application: { id: 'app_1', slug: 'app' },
     endUser: { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser,
-    plan: {
+    plan: pricedPlan({
       id: 'pl_1',
       applicationId: 'app_1',
       slug: 'pro',
@@ -84,7 +85,7 @@ function input(over: Partial<CheckoutSessionInput> = {}): CheckoutSessionInput {
       currency: 'USD',
       interval: 'MONTH',
       metadata: { stripe: { priceId: 'price_fake' } },
-    } as unknown as Plan,
+    } as unknown as Plan, null),
     successUrl: 'https://app.example/ok',
     cancelUrl: 'https://app.example/cancel',
     ...over,

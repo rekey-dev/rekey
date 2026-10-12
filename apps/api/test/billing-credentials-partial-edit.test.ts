@@ -190,9 +190,10 @@ describe('Billing credentials: partial edit keeps the stored secret', () => {
     expect(row.mode).toBe('live');
     const creds = decryptJson<Record<string, string>>(row.ciphertext);
     expect(creds.clientSecret).toBe('live-client-secret');
-    // And the non-secret optional field survives too: losing it 503s every
-    // inbound PayPal webhook.
-    expect(creds.webhookId).toBe('WH-123');
+    // And a webhook id survives too: losing it 503s every inbound PayPal
+    // webhook. A changed client id re-registers the webhook, so the id is the
+    // one the provider returned for the new credentials, never a blank.
+    expect(creds.webhookId).toMatch(/^WH-stub-/);
   });
 
   it('does not carry anything into a different application', async () => {

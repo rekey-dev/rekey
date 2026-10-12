@@ -19,10 +19,10 @@ import { env } from "../../config/env.js";
  */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 /**
@@ -223,7 +223,7 @@ export async function operatorInvitesRoutes(
           ),
           ...errs({
             400:
-              "BAD_REQUEST — the body failed schema validation; or " +
+              "BAD_REQUEST: the body failed schema validation; or " +
               "OPERATOR_INVITE_EXPIRY_IN_PAST: `expiresAt` is not in the future; or " +
               "OPERATOR_INVITE_TENANT_REQUIRED: `email` or `role` without `tenantId`; or " +
               "OPERATOR_INVITE_EMAIL_REQUIRED: `tenantId` without `email`.",
@@ -286,7 +286,7 @@ export async function operatorInvitesRoutes(
         response: {
           200: okPage(OperatorInvite, "A page of operator-invite keys."),
           ...errs({
-            400: "BAD_REQUEST — `limit` or `offset` is outside the declared range.",
+            400: "BAD_REQUEST: `limit` or `offset` is outside the declared range.",
             ...SUPER_ADMIN_ERRORS,
           }),
         },
@@ -321,8 +321,8 @@ export async function operatorInvitesRoutes(
           ),
           ...errs({
             ...SUPER_ADMIN_ERRORS,
-            404: "OPERATOR_INVITE_NOT_FOUND — no invite key with that id.",
-            409: "OPERATOR_INVITE_ALREADY_USED — the key already minted an operator and cannot be revoked.",
+            404: "OPERATOR_INVITE_NOT_FOUND: no invite key with that id.",
+            409: "OPERATOR_INVITE_ALREADY_USED: the key already minted an operator and cannot be revoked.",
           }),
         },
       },

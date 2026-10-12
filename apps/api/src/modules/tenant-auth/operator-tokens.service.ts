@@ -90,7 +90,7 @@ export const operatorTokensService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'OPERATOR_TOKEN_EXPIRY_IN_PAST',
-        message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future — the token would be dead on arrival.`,
+        message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future. The token would be dead on arrival.`,
         fix: 'Pass a future expiresAt, or omit it for a non-expiring token.',
       });
     }

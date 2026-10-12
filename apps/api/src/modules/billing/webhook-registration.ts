@@ -23,6 +23,19 @@ import {
   type BillingProviderName,
 } from './credentials.service.js';
 import { getProviderForApplication } from './providers/index.js';
+import { getModule } from './providers/registry.js';
+import { prisma } from '../../lib/prisma.js';
+
+/**
+ * The public URL a provider delivers this Application's webhooks to.
+ *
+ * @example
+ * providerWebhookUrl('paypal', 'acme'); // 'https://api.example.com/api/v1/billing/webhook/paypal/acme'
+ */
+export function providerWebhookUrl(provider: BillingProviderName, appSlug: string): string {
+  const base = (env.PUBLIC_WEBHOOK_BASE_URL ?? env.API_URL).replace(/\/$/, '');
+  return `${base}/api/v1/billing/webhook/${provider}/${appSlug}`;
+}
 
 export async function registerProviderWebhook(
   applicationId: string,
@@ -59,7 +72,7 @@ export async function registerProviderWebhook(
       fix: `Save the ${provider} API keys first, then auto-configure the webhook.`,
     });
   }
-  const url = `${base}/api/v1/billing/webhook/${provider}/${appSlug}`;
+  const url = providerWebhookUrl(provider, appSlug);
   const application = await applicationsService.get(applicationId);
   const inst = await getProviderForApplication(application, provider);
   if (!inst.registerWebhook) {
@@ -99,4 +112,68 @@ export async function registerProviderWebhook(
     mode: stored!.mode,
   });
   return { provider, webhookConfigured: hasWebhookConfigured(provider, merged), url };
+}
+
+export type WebhookRefresh = 'unchanged' | 'reconfigured' | 'failed';
+
+/**
+ * After a credential edit, point the webhook at the account the new
+ * credentials belong to.
+ *
+ * A stored webhook id or signing secret belongs to the account that issued
+ * it. New keys for another account, or the other mode, leave it stored and
+ * dead: every inbound event then fails verification. Runs only when a webhook
+ * was already set up, the secrets or mode changed, and the edit did not name
+ * the webhook field itself (a pasted value, or a blank to clear it). `failed` leaves the stored value alone, and the
+ * readiness check and the Reconfigure action take it from there.
+ *
+ * @example
+ * const before = await webhookStateBeforeEdit(appId, 'paypal');
+ * await billingCredentialsService.upsertCredentials(appId, 'paypal', data);
+ * const webhook = await refreshWebhookAfterEdit(appId, 'paypal', slug, before, data);
+ */
+export async function refreshWebhookAfterEdit(
+  applicationId: string,
+  provider: BillingProviderName,
+  appSlug: string,
+  before: WebhookStateBeforeEdit,
+  submitted: Record<string, string | undefined> = {},
+): Promise<WebhookRefresh> {
+  const module = getModule(provider);
+  if (!module?.capabilities.autoWebhookRegister || !before.webhookConfigured) return 'unchanged';
+  const webhookField = module.credentialSchema.find((f) => f.webhookRole)?.key;
+  if (webhookField !== undefined && submitted[webhookField] !== undefined) return 'unchanged';
+  const after = await secretsUpdatedAt(applicationId, provider);
+  if (after?.getTime() === before.secretsUpdatedAt?.getTime()) return 'unchanged';
+  try {
+    await registerProviderWebhook(applicationId, provider, appSlug);
+    return 'reconfigured';
+  } catch {
+    return 'failed';
+  }
+}
+
+export interface WebhookStateBeforeEdit {
+  webhookConfigured: boolean;
+  secretsUpdatedAt: Date | null;
+}
+
+/** Snapshot taken before a credential edit, for `refreshWebhookAfterEdit`. */
+export async function webhookStateBeforeEdit(
+  applicationId: string,
+  provider: BillingProviderName,
+): Promise<WebhookStateBeforeEdit> {
+  const stored = await billingCredentialsService.loadDecrypted(applicationId, provider).catch(() => null);
+  return {
+    webhookConfigured: hasWebhookConfigured(provider, stored),
+    secretsUpdatedAt: await secretsUpdatedAt(applicationId, provider),
+  };
+}
+
+async function secretsUpdatedAt(applicationId: string, provider: BillingProviderName): Promise<Date | null> {
+  const row = await prisma.billingCredentials.findUnique({
+    where: { applicationId_provider: { applicationId, provider } },
+    select: { secretsUpdatedAt: true },
+  });
+  return row?.secretsUpdatedAt ?? null;
 }

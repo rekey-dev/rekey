@@ -39,8 +39,8 @@ import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '.
  * shared by every route in this plugin.
  */
 const OPERATOR_PAT_ERRORS = {
-  401: 'OPERATOR_TOKEN_INVALID — the PAT is missing, unknown, revoked, or expired.',
-  403: "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in its bound workspace.",
+  401: 'OPERATOR_TOKEN_INVALID: the PAT is missing, unknown, revoked, or expired.',
+  403: "TENANT_MEMBERSHIP_REVOKED: the PAT's operator no longer has a membership in its bound workspace.",
 } as const;
 
 /**
@@ -117,12 +117,12 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: okPage(ref('Application'), "A page of Applications in the PAT's workspace."),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             401: OPERATOR_PAT_ERRORS[401],
             403:
-              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
-              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
-              'the `read` scope; or TENANT_ROLE_INSUFFICIENT — the operator who minted the ' +
+              "TENANT_MEMBERSHIP_REVOKED: the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT: the PAT does not carry ' +
+              'the `read` scope; or TENANT_ROLE_INSUFFICIENT: the operator who minted the ' +
               'token has since been demoted below admin.',
           }),
         },
@@ -181,10 +181,10 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             401: OPERATOR_PAT_ERRORS[401],
             403:
-              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
-              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
+              "TENANT_MEMBERSHIP_REVOKED: the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT: the PAT does not carry ' +
               'the `read` scope.',
-            404: "APPLICATION_NOT_FOUND — no application with that id in the PAT's workspace.",
+            404: "APPLICATION_NOT_FOUND: no application with that id in the PAT's workspace.",
           }),
         },
       },
@@ -238,15 +238,15 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'API_KEY_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
+              'API_KEY_EXPIRY_IN_PAST: `expiresAt` is not in the future; or ' +
               'API_KEY_LIMIT_REACHED: the application already has the maximum active keys; or ' +
               'API_KEY_SCOPE_UNKNOWN: `scopes` names a scope no route enforces.',
             401: OPERATOR_PAT_ERRORS[401],
             403:
-              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
-              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
+              "TENANT_MEMBERSHIP_REVOKED: the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT: the PAT does not carry ' +
               'the `keys:mint` scope.',
-            404: "APPLICATION_NOT_FOUND — no application with that id in the PAT's workspace.",
+            404: "APPLICATION_NOT_FOUND: no application with that id in the PAT's workspace.",
           }),
         },
       },
@@ -285,7 +285,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           apiKey: result.apiKey,
           rawKey: result.rawKey,
           warning:
-            'Store this rawKey now — it is shown exactly once and cannot be recovered. Treat it like a database password.',
+            'Store this rawKey now. It is shown exactly once and cannot be recovered. Treat it like a database password.',
         },
       });
     },

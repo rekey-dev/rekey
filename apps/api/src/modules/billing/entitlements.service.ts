@@ -40,8 +40,10 @@ import { assertTrialMaterialisesNothing } from '../plans/plans.service.js';
 import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { costsNothing } from './free-plan.js';
+import { WITH_DEFAULT_PRICE, withDefaultPrice, type PlanWithDefaultPrice } from '../plans/default-price.js';
 import { BillingConfigSchema, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { creditsService } from '../credits/credits.service.js';
+import { logCreditsGranted } from './money-events.js';
 import { licensesService } from '../licenses/licenses.service.js';
 
 /**
@@ -57,7 +59,7 @@ import { licensesService } from '../licenses/licenses.service.js';
  * row nominated before that check, or a plan repriced after nomination, would
  * otherwise give every signed-in user a paid plan's entitlements for nothing.
  */
-async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
+async function loadDefaultPlan(applicationId: string): Promise<PlanWithDefaultPrice | null> {
   const app = await prisma.application.findUnique({
     where: { id: applicationId },
     select: { billingConfig: true, tenantId: true },
@@ -66,7 +68,8 @@ async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
   const parsed = BillingConfigSchema.safeParse(app.billingConfig);
   const slug = parsed.success ? parsed.data.defaultPlanSlug : undefined;
   if (!slug) return null;
-  const plan = await prisma.plan.findFirst({ where: { applicationId, slug, active: true } });
+  const row = await prisma.plan.findFirst({ where: { applicationId, slug, active: true }, include: WITH_DEFAULT_PRICE });
+  const plan = row === null ? null : await withDefaultPrice(row);
   if (plan && !costsNothing(plan)) {
     reportIgnoredDefaultPlan(app.tenantId, plan);
     return null;
@@ -96,13 +99,13 @@ const IGNORED_DEFAULT_REPORT_INTERVAL_MS = 60 * 60 * 1000;
 const ignoredDefaultReportedAt = new Map<string, number>();
 
 /** Rate-limited: this runs on every entitlement read and every recorded usage event. */
-function reportIgnoredDefaultPlan(tenantId: string, plan: Plan): void {
-  const key = `${plan.id}:${plan.amount}:${plan.pricePerUnitCents}`;
+function reportIgnoredDefaultPlan(tenantId: string, plan: PlanWithDefaultPrice): void {
+  const key = `${plan.id}:${plan.defaultPrice?.id ?? 'unpriced'}:${plan.defaultPrice?.amount ?? 0}`;
   const now = Date.now();
   const last = ignoredDefaultReportedAt.get(key);
   if (last !== undefined && now - last < IGNORED_DEFAULT_REPORT_INTERVAL_MS) return;
   ignoredDefaultReportedAt.set(key, now);
-  const price = { amount: plan.amount, currency: plan.currency, pricePerUnitCents: plan.pricePerUnitCents };
+  const price = { amount: plan.defaultPrice?.amount ?? 0, currency: plan.defaultPrice?.currency ?? null, isFree: plan.isFree };
   console.warn(
     `[billing] free-tier default plan "${plan.slug}" in application ${plan.applicationId} charges money, so it is not applied`,
     price,
@@ -545,6 +548,8 @@ export const entitlementsService = {
      * its own identity.
      */
     purchaseRef?: string;
+    /** The payment this provisioning follows, when one is recorded. Written on the credit entries it grants. */
+    paymentId?: string;
   }): Promise<void> {
     const sub = args.subscription;
     const [plan, application, endUser] = await Promise.all([
@@ -633,6 +638,16 @@ export const entitlementsService = {
           // Idempotency anchor: one grant per (subscription, entitlement, period).
           paymentRef: `ent:${sub.id}:CREDIT:${e.key}:${period}`,
           metadata: { source: 'entitlement', planId: plan.id, subscriptionId: sub.id },
+          ...(args.paymentId !== undefined && { paymentId: args.paymentId }),
+          ...(sub.planPriceId !== null && { planPriceId: sub.planPriceId }),
+          afterEntry: (tx, entry) =>
+            logCreditsGranted(tx, entry, {
+              source: oneTime || period === 'initial' ? 'purchase' : 'refill',
+              subscriptionId: sub.id,
+              planId: plan.id,
+              ownerEndUserId: sub.endUserId,
+              provider: sub.provider,
+            }),
         });
       } else if (e.kind === 'LICENSE' && e.licenseKind) {
         // Owner+beneficiary (ORG_BILLING §3): an org-beneficiary sub issues ONE

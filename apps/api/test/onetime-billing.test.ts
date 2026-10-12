@@ -96,28 +96,28 @@ describe('one-time vs recurring checkout', () => {
       });
 
   it('CREDIT pack → one-time checkout', async () => {
-    await createPlan({ slug: 'pack', name: 'Pack', amount: 4999, kind: 'CREDIT', creditsAmount: 100 });
+    await createPlan({ slug: 'pack', name: 'Pack', price: { currency: 'USD', amount: 4999 }, kind: 'CREDIT', creditsAmount: 100 });
     const res = await checkout('pack');
     expect(res.url).toContain('/onetime/');
     expect(res.subscription.metadata.oneTime).toBe(true);
   });
 
   it('perpetual LICENSE → one-time checkout', async () => {
-    await createPlan({ slug: 'perp', name: 'Perpetual', amount: 9999, kind: 'LICENSE', licenseKind: 'PERPETUAL' });
+    await createPlan({ slug: 'perp', name: 'Perpetual', price: { currency: 'USD', amount: 9999 }, kind: 'LICENSE', licenseKind: 'PERPETUAL' });
     const res = await checkout('perp');
     expect(res.url).toContain('/onetime/');
     expect(res.subscription.metadata.oneTime).toBe(true);
   });
 
   it('SUBSCRIPTION → recurring checkout (not one-time)', async () => {
-    await createPlan({ slug: 'sub', name: 'Sub', amount: 999, kind: 'SUBSCRIPTION', interval: 'MONTH' });
+    await createPlan({ slug: 'sub', name: 'Sub', price: { currency: 'USD', amount: 999 }, kind: 'SUBSCRIPTION', interval: 'MONTH' });
     const res = await checkout('sub');
     expect(res.url).not.toContain('/onetime/');
     expect(res.subscription.metadata.oneTime).toBeUndefined();
   });
 
   it('TIMED LICENSE → recurring checkout (renews)', async () => {
-    await createPlan({ slug: 'timed', name: 'Timed', amount: 1999, kind: 'LICENSE', licenseKind: 'TIMED', licenseDurationDays: 365 });
+    await createPlan({ slug: 'timed', name: 'Timed', price: { currency: 'USD', amount: 1999 }, kind: 'LICENSE', licenseKind: 'TIMED', licenseDurationDays: 365 });
     const res = await checkout('timed');
     expect(res.url).not.toContain('/onetime/');
     expect(res.subscription.metadata.oneTime).toBeUndefined();

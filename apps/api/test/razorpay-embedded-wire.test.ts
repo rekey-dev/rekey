@@ -7,6 +7,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EndUser, Plan } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import type { EmbeddedCheckoutInput } from '../src/modules/billing/providers/types.js';
 
@@ -42,7 +43,7 @@ vi.mock('razorpay', () => {
   return { default: FakeRazorpay };
 });
 
-const plan = {
+const plan = pricedPlan({
   id: 'plan_local_1',
   slug: 'pack',
   name: '100 credits',
@@ -50,7 +51,7 @@ const plan = {
   currency: 'INR',
   interval: 'MONTH',
   metadata: { razorpay: { planId: 'plan_existing' } },
-} as unknown as Plan;
+} as unknown as Plan, null);
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
 
 function input(kind: 'recurring' | 'one_time', discount?: number): EmbeddedCheckoutInput {

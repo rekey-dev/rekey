@@ -100,7 +100,7 @@ describe('Granting a subscription without a payment provider', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug, name: slug, amount: 2900, kind: 'SUBSCRIPTION', interval: 'MONTH', ...body },
+      payload: { slug, name: slug, price: { currency: 'USD', amount: 2900 }, kind: 'SUBSCRIPTION', interval: 'MONTH', ...body },
     });
     if (r.statusCode !== 201) throw new Error(`makePlan ${r.statusCode}: ${r.body}`);
     return (r.json().data as { id: string }).id;
@@ -660,7 +660,7 @@ describe('Granting a subscription without a payment provider', () => {
     // row is newer than their live plan, and newest-first used to win, so they
     // read as "pending" from then on: every gate on the current subscription
     // refused them, and cancelling hit the checkout instead of the plan.
-    await makePlan('free', { amount: 0 });
+    await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');
     const euId = await makeEndUser('upgrader@example.com');
     expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
@@ -690,7 +690,7 @@ describe('Granting a subscription without a payment provider', () => {
     // with a paid row CREATED before the free one. Newest-first read them as
     // Free: the page offered Upgrade again (a second charge) and cancel ended
     // the free row while the paid one kept billing.
-    await makePlan('free', { amount: 0 });
+    await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');
     await setDefaultPlan('free');
     const euId = await makeEndUser('returning@example.com');
@@ -725,7 +725,7 @@ describe('Granting a subscription without a payment provider', () => {
     // The ranking cannot lean on today's `defaultPlanSlug` alone: an operator
     // who renames the free tier, or clears it, still has buyers holding the
     // old $0 rows, and those must not shadow what the buyer pays for.
-    await makePlan('free', { amount: 0 });
+    await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');
     await setDefaultPlan('free');
     const euId = await makeEndUser('renamed@example.com');
@@ -742,7 +742,7 @@ describe('Granting a subscription without a payment provider', () => {
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
     for (const slug of ['free-v2', '']) {
       if (slug) {
-        await makePlan(slug, { amount: 0 });
+        await makePlan(slug, { price: undefined });
         await setDefaultPlan(slug);
       } else {
         const current = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
@@ -758,7 +758,7 @@ describe('Granting a subscription without a payment provider', () => {
   });
 
   it('a paid plan that lapses on read falls back to the live free tier on that same read', async () => {
-    await makePlan('free', { amount: 0 });
+    await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');
     await setDefaultPlan('free');
     const euId = await makeEndUser('lapsed@example.com');
@@ -785,7 +785,7 @@ describe('Granting a subscription without a payment provider', () => {
   });
 
   it('the admin default-plan route sets and clears the free tier, and nothing else', async () => {
-    await makePlan('free', { amount: 0 });
+    await makePlan('free', { price: undefined });
     const setPlan = (slug: string | null, headers = admin(), extra: Record<string, unknown> = {}) =>
       app.inject({
         method: 'PATCH',

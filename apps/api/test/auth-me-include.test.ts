@@ -161,7 +161,6 @@ describe('GET /auth/me and /users/me ?include=', () => {
     const plan = await op('POST', `/api/v1/tenant/applications/${appId}/plans`, {
       slug,
       name: slug,
-      amount: 0,
       kind: 'SUBSCRIPTION',
     });
     expect(plan.statusCode).toBe(201);
@@ -272,7 +271,7 @@ describe('GET /auth/me and /users/me ?include=', () => {
         const error = res.json().error as { code: string; message: string; issues: Array<{ path: string }> };
         expect(error.code).toBe('VALIDATION_ERROR');
         expect(error.message).toContain(
-          'Supported values: entitlements, device, subscription, organization, licenses.',
+          'Supported values: entitlements, device, subscription, organization, licenses, support.',
         );
         expect(error.issues[0]!.path).toBe('include');
       }

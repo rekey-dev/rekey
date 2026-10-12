@@ -12,7 +12,7 @@ import {
   paged,
   paginationJsonSchema,
 } from "../../lib/pagination.js";
-import { stripApplicationSecrets } from "../../lib/app-access.js";
+import { stripApplicationSecrets, withBillingDefaults } from "../../lib/app-access.js";
 import { ok, okPage, errs, ref } from "../../lib/openapi.js";
 import { getModule, registryNames } from "../billing/providers/registry.js";
 
@@ -27,10 +27,10 @@ const HOSTED_PROVIDERS = registryNames.filter(
  */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 const CreateApplicationBody = z.object({
@@ -83,7 +83,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
             "A page of applications, newest first.",
           ),
           ...errs({
-            400: "VALIDATION_ERROR — `limit` or `offset` is out of range.",
+            400: "VALIDATION_ERROR: `limit` or `offset` is out of range.",
             ...SUPER_ADMIN_ERRORS,
           }),
         },
@@ -98,7 +98,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       ]);
       return {
         success: true,
-        data: paged(items.map(stripApplicationSecrets), total, take, skip),
+        data: paged(items.map((item) => stripApplicationSecrets(withBillingDefaults(item))), total, take, skip),
       };
     },
   );
@@ -119,7 +119,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref("Application"), "The application."),
           ...errs({
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
           }),
         },
       },
@@ -128,7 +128,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       const { id } = Params.parse(req.params);
       return {
         success: true,
-        data: stripApplicationSecrets(await applicationsService.get(id)),
+        data: stripApplicationSecrets(withBillingDefaults(await applicationsService.get(id))),
       };
     },
   );
@@ -198,18 +198,18 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
           201: ok(ref("Application"), "The created application."),
           ...errs({
             400:
-              "APPLICATION_SLUG_INVALID — the slug is not URL-safe; or VALIDATION_ERROR — a " +
+              "APPLICATION_SLUG_INVALID: the slug is not URL-safe; or VALIDATION_ERROR: a " +
               "field failed schema validation.",
             ...SUPER_ADMIN_ERRORS,
             403:
-              "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or " +
-              "ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy " +
+              "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or " +
+              "ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy " +
               "the API cannot identify; or " +
-              "TENANT_QUOTA_EXCEEDED — creating a PRODUCTION application would exceed the " +
+              "TENANT_QUOTA_EXCEEDED: creating a PRODUCTION application would exceed the " +
               "workspace's `maxProductionApps`.",
-            404: "TENANT_NOT_FOUND — no tenant with that `tenantId`.",
+            404: "TENANT_NOT_FOUND: no tenant with that `tenantId`.",
             409:
-              "APPLICATION_SLUG_TAKEN — another application already uses that slug " +
+              "APPLICATION_SLUG_TAKEN: another application already uses that slug " +
               "(slugs are unique deployment-wide).",
           }),
         },
@@ -234,7 +234,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply
         .status(201)
-        .send({ success: true, data: stripApplicationSecrets(application) });
+        .send({ success: true, data: stripApplicationSecrets(withBillingDefaults(application)) });
     },
   );
 }

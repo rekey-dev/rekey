@@ -40,6 +40,15 @@ export type {
   FeatureCheckDto,
   PublicPlanDto,
   PublicPlanCheckoutDto,
+  PublicPlanPriceDto,
+  ResolvedPriceDto,
+  PriceFallbackDto,
+  PriceReason,
+  CheckoutResultDto,
+  CreateCheckoutRequest,
+  ValidateCouponRequest,
+  ValidateCouponResultDto,
+  PublicCouponDto,
   SelfSubscriptionDto,
   EntitlementsDto,
   MeInclude,
@@ -123,7 +132,31 @@ export type {
   PricingTableProps,
   CheckoutButtonProps,
   PricingPlan,
+  PricingPlanPrice,
+  PricingPlanResolvedPrice,
 } from './billing-components.js';
+
+// What a buyer is told about the price before they pay.
+export { PriceFallbackNotice, CouponQuote } from './price-notices.js';
+export type { PriceFallbackNoticeProps, CouponQuoteProps } from './price-notices.js';
+/**
+ * Money written by the currency registry, for the few places a page formats an
+ * amount itself (a payment row, a subscription's price).
+ *
+ * @example
+ * ```ts
+ * formatMoney(payment.amount - payment.refundedAmount, payment.currency); // '$14.00'
+ * priceFallbackMessage(checkout.priceFallback); // 'Prices in INR are not available yet. You will pay $19.00.'
+ * ```
+ */
+export {
+  formatMoney,
+  minorUnitExponent,
+  validatePriceAmount,
+  sellableCurrencies,
+  priceFallbackMessage,
+} from '@rekey.dev/shared-types/currency';
+export type { PriceFallbackSides } from '@rekey.dev/shared-types/currency';
 
 // List forms: a newsletter or waitlist signup and a contact form.
 export { NewsletterForm, ContactForm, useListSubscribe } from './list-components.js';

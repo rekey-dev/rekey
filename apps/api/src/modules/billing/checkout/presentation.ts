@@ -6,7 +6,8 @@
  * PENDING row, no coupon or trial slot taken.
  */
 
-import type { Application, Plan } from '@prisma/client';
+import type { Application } from '@prisma/client';
+import type { PricedPlan } from '../providers/types.js';
 import type { CheckoutReadinessCheck } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
@@ -29,7 +30,7 @@ export interface CheckoutPresentation {
 export async function resolveCheckoutPresentation(args: {
   application: Application;
   provider: BillingProviderName;
-  plan: Plan;
+  plan: PricedPlan;
   successUrl: string;
   cancelUrl: string;
   endUserId: string;

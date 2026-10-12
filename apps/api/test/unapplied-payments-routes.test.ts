@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 
 let app: FastifyInstance;
 let token: string;
@@ -284,6 +285,17 @@ describe('extend', () => {
 });
 
 describe('refund', () => {
+  // A refund is refused before any provider is loaded when the provider that
+  // took the payment has no credentials on the Application.
+  beforeEach(async () => {
+    await billingCredentialsService.upsertRaw(
+      applicationId,
+      'stripe',
+      { apiKey: 'sk_test_ci_only', webhookSecret: 'whsec_ci_only' },
+      { mode: 'test', enabled: true, currencies: ['USD'], priority: 1 },
+    );
+  });
+
   it('refuses a partial amount above what remains unrefunded', async () => {
     const kase = await seedCase({ amount: 4900 });
     await prisma.payment.update({

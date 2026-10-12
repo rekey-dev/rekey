@@ -76,7 +76,7 @@ describe('operator subscription grants, switched off', () => {
       payload: {
         slug: `${tag}-pro`,
         name: 'Pro',
-        amount: 2900,
+        price: { currency: 'USD', amount: 2900 },
         kind: 'SUBSCRIPTION',
         interval: 'MONTH',
       },
@@ -159,7 +159,7 @@ describe('operator subscription grants, switched off', () => {
       payload: {
         slug: `sa-${tag}`,
         name: 'SA',
-        amount: 1000,
+        price: { currency: 'USD', amount: 1000 },
         kind: 'SUBSCRIPTION',
         interval: 'MONTH',
       },

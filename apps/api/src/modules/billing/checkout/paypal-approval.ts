@@ -24,7 +24,7 @@ import { getProviderForApplication } from '../providers/index.js';
 import type { BillingProvider } from '../providers/types.js';
 import { confirmApproval, type ConfirmationSession, type Refusal } from './confirm-approval.js';
 import type { EmbeddedSessionMetadata } from './sessions.service.js';
-import { orderMismatch } from './order-match.js';
+import { expectedChargeOfSession, orderMismatch, type ExpectedCharge } from './order-match.js';
 
 const SUBSCRIPTION_APPROVED = new Set(['APPROVED', 'ACTIVE']);
 const ORDER_APPROVED = new Set(['APPROVED', 'COMPLETED']);
@@ -63,10 +63,9 @@ async function verifyOrder(
   provider: BillingProvider,
   id: string,
   expectedCustomId: string,
-  meta: EmbeddedSessionMetadata,
+  expected: ExpectedCharge | null,
 ): Promise<Refusal | null> {
-  const expected = meta.expectedCharge;
-  if (!provider.getOrder || expected === undefined) return { reason: 'provider_cannot_verify', counted: true };
+  if (!provider.getOrder || expected === null) return { reason: 'provider_cannot_verify', counted: true };
   const snapshot = await provider.getOrder(id);
   const mismatch = orderMismatch(snapshot, id, expectedCustomId, expected);
   if (mismatch !== null || snapshot === null) return { reason: mismatch ?? 'unknown_at_paypal', counted: true };
@@ -87,7 +86,7 @@ async function verify(session: ConfirmationSession, approval: PaypalApproval): P
   const meta = session.metadata as unknown as EmbeddedSessionMetadata;
   const expectedCustomId = `${session.applicationId}:${session.endUserId}`;
   const refusal = oneTime
-    ? await verifyOrder(provider, id, expectedCustomId, meta)
+    ? await verifyOrder(provider, id, expectedCustomId, expectedChargeOfSession(session))
     : await verifySubscription(provider, id, expectedCustomId, meta);
   // Only the session's own not-yet-approved id can still be approved on this page.
   if (refusal !== null && !refusal.counted) {

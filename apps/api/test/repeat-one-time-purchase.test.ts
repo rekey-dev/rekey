@@ -92,8 +92,8 @@ describe('buying the same one-off plan twice', () => {
     await configureSandboxStripe(applicationId);
 
     for (const plan of [
-      { slug: 'pack', name: 'Pack', amount: PACK_AMOUNT, kind: 'CREDIT', creditsAmount: 100 },
-      { slug: 'perp', name: 'Perpetual', amount: PACK_AMOUNT, kind: 'LICENSE', licenseKind: 'PERPETUAL' },
+      { slug: 'pack', name: 'Pack', price: { currency: 'USD', amount: PACK_AMOUNT }, kind: 'CREDIT', creditsAmount: 100 },
+      { slug: 'perp', name: 'Perpetual', price: { currency: 'USD', amount: PACK_AMOUNT }, kind: 'LICENSE', licenseKind: 'PERPETUAL' },
     ]) {
       const res = await app.inject({
         method: 'POST',

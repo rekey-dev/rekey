@@ -97,7 +97,7 @@ export const apiKeysService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'API_KEY_EXPIRY_IN_PAST',
-        message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future — the key would be dead on arrival.`,
+        message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future. The key would be dead on arrival.`,
         fix: 'Pass a future expiresAt, or omit it for a non-expiring key.',
       });
     }

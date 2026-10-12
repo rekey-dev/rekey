@@ -90,7 +90,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Health'],
         security: [],
-        summary: 'Liveness probe — is the process up?',
+        summary: 'Liveness probe: is the process up?',
         description:
           'Returns 200 as soon as the process can serve HTTP. Touches no dependencies, so ' +
           'it stays green through a database or Redis outage. Unauthenticated and exempt ' +
@@ -122,7 +122,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Health'],
         security: [],
-        summary: 'Readiness probe — can the process serve traffic?',
+        summary: 'Readiness probe: can the process serve traffic?',
         description:
           '503 `not_ready` when Postgres is unreachable or a configured Redis is down, 200 ' +
           '`ready` otherwise. Unauthenticated and exempt from rate limiting.',

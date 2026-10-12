@@ -188,7 +188,7 @@ describe('Operator MCP admin tools + get_end_user', () => {
       toolResult(
         (await rpc(token, 'tools/call', {
           name: 'create_plan',
-          arguments: { applicationId: appId, slug: 'pro', name: 'Pro', amount: 1000 },
+          arguments: { applicationId: appId, slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1000 } },
         })).body,
       ).data as { id: string }
     ).id;

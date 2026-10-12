@@ -19,7 +19,8 @@
 
 import { randomUUID } from 'node:crypto';
 import Razorpay from 'razorpay';
-import type { Plan } from '@prisma/client';
+import { providerRegistration } from '../priced-plan.js';
+import type { PricedPlan } from './types.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
@@ -34,6 +35,7 @@ import type {
   RefundPaymentResult,
 } from './types.js';
 import { discountUnsupported } from './discount.js';
+import { fromProviderAmount, toProviderAmount } from './razorpay-money.js';
 import { RekeyError } from '../../../lib/error.js';
 import type { RazorpayCredentials } from '../credentials.service.js';
 
@@ -105,17 +107,15 @@ export class RealRazorpayProvider implements BillingProvider {
     return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
   }
 
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
+  async ensurePlanRegistered(plan: PricedPlan): Promise<ProviderPlanRef> {
     const period = plan.interval === 'YEAR' ? 'yearly' : 'monthly';
-    // Razorpay needs amount in the smallest currency unit (paise for INR,
-    // cents for USD), same as ours, so no conversion.
     const created = await this.withTimeout(
       this.client.plans.create({
         period,
         interval: 1,
         item: {
           name: plan.name,
-          amount: plan.amount,
+          amount: toProviderAmount(plan.currency, plan.amount),
           currency: plan.currency,
         },
         notes: { rekey_plan_id: plan.id, rekey_slug: plan.slug },
@@ -172,9 +172,7 @@ export class RealRazorpayProvider implements BillingProvider {
       // `checkout-discount.ts` normally refuses first, this is the backstop.
       throw discountUnsupported(this.name, 'recurring');
     }
-    const meta = (input.plan.metadata as Record<string, unknown> | null) ?? {};
-    const rzpMeta = (meta.razorpay as { planId?: string } | undefined) ?? {};
-    let rzpPlanId = rzpMeta.planId;
+    let rzpPlanId = providerRegistration(input.plan, 'razorpay').planId;
     if (!rzpPlanId) {
       rzpPlanId = (await this.ensurePlanRegistered(input.plan)).providerPlanId;
     }
@@ -208,7 +206,7 @@ export class RealRazorpayProvider implements BillingProvider {
     const create = this.client.orders.create as (body: unknown) => Promise<unknown>;
     const order = (await this.withTimeout(
       create({
-        amount: input.plan.amount - (input.discount?.amount ?? 0),
+        amount: toProviderAmount(input.plan.currency, input.plan.amount - (input.discount?.amount ?? 0)),
         currency: input.plan.currency,
         receipt: `rk_${randomUUID().replace(/-/g, '').slice(0, 32)}`,
         notes: {
@@ -257,7 +255,10 @@ export class RealRazorpayProvider implements BillingProvider {
       id: typeof payment.id === 'string' ? payment.id : '',
       status: typeof payment.status === 'string' ? payment.status : '',
       orderId: typeof payment.order_id === 'string' ? payment.order_id : null,
-      amount: typeof payment.amount === 'number' ? payment.amount : -1,
+      amount:
+        typeof payment.amount === 'number' && typeof payment.currency === 'string'
+          ? fromProviderAmount(payment.currency, payment.amount)
+          : -1,
       currency: typeof payment.currency === 'string' ? payment.currency.toUpperCase() : '',
     };
   }
@@ -268,7 +269,7 @@ export class RealRazorpayProvider implements BillingProvider {
    */
   async capturePayment(providerPaymentId: string, amount: number, currency: string): Promise<void> {
     try {
-      await this.withTimeout(this.client.payments.capture(providerPaymentId, amount, currency), 'payments.capture');
+      await this.withTimeout(this.client.payments.capture(providerPaymentId, toProviderAmount(currency, amount), currency), 'payments.capture');
     } catch (e) {
       const text = (e as { error?: { description?: string } })?.error?.description ?? '';
       if (/already been captured/i.test(text)) return;
@@ -293,7 +294,7 @@ export class RealRazorpayProvider implements BillingProvider {
     const create = this.client.paymentLink.create as (body: unknown) => Promise<unknown>;
     const link = (await this.withTimeout(
       create({
-        amount: input.plan.amount - (input.discount?.amount ?? 0),
+        amount: toProviderAmount(input.plan.currency, input.plan.amount - (input.discount?.amount ?? 0)),
         currency: input.plan.currency,
         accept_partial: false,
         description: input.plan.name,
@@ -343,13 +344,13 @@ export class RealRazorpayProvider implements BillingProvider {
     // key must vary per request. Switch to the header if the SDK grows a
     // per-call option; until then `receipt` is what this SDK can actually
     // carry, and it does stop a double refund.
+    const wireAmount = input.amount === undefined ? undefined : toProviderAmount(input.currency ?? '', input.amount);
     let refund: { id?: string; amount?: number; currency?: string; status?: string };
     try {
       refund = (await this.withTimeout(
         this.client.payments.refund(input.providerPaymentId, {
-          // Absent = Razorpay refunds the full remaining amount. Amounts are
-          // already in the smallest unit on both sides, so no conversion.
-          ...(input.amount !== undefined && { amount: input.amount }),
+          // Absent = Razorpay refunds the full remaining amount.
+          ...(wireAmount !== undefined && { amount: wireAmount }),
           receipt: input.idempotencyKey.slice(0, 40),
           ...(input.reason && { notes: { rekey_reason: input.reason.slice(0, 255) } }),
         }),
@@ -383,10 +384,11 @@ export class RealRazorpayProvider implements BillingProvider {
         fix: 'Check the payment in the Razorpay dashboard. A payment that was never captured, or whose source cannot take the money back (some UPI and NRE accounts), has to be settled with the buyer another way.',
       });
     }
+    const refundCurrency = (refund.currency ?? input.currency ?? 'INR').toUpperCase();
     return {
       refundId: refund.id ?? input.idempotencyKey,
-      amount: refund.amount ?? input.amount ?? 0,
-      currency: (refund.currency ?? input.currency ?? 'INR').toUpperCase(),
+      amount: refund.amount === undefined ? (input.amount ?? 0) : fromProviderAmount(refundCurrency, refund.amount),
+      currency: refundCurrency,
       // `processed` is the only terminal success. `pending` is the usual
       // answer here and the webhook carries the real one.
       status: refund.status === 'processed' ? 'succeeded' : 'pending',

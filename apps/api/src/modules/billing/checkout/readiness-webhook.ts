@@ -1,12 +1,17 @@
 /**
- * Readiness check 3, the provider's webhook: registered, and delivering
- * events verified with the current credentials.
+ * Readiness check 3, the provider's webhook: it exists, by the provider's own
+ * answer where it can be asked and by delivered events where it cannot.
  */
 
+import type { Application } from '@prisma/client';
 import type { CheckoutReadinessCheck } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { env } from '../../../config/env.js';
 import { hasWebhookConfigured, type BillingMode, type BillingProviderName } from '../credentials.service.js';
+import { providerError } from '../../../lib/provider-errors.js';
+import { getProviderForApplication } from '../providers/index.js';
+import type { WebhookInspection } from '../providers/types.js';
+import { providerWebhookUrl } from '../webhook-registration.js';
 import { razorpayOrderPaidCheck, razorpayWebhookFix } from './razorpay-readiness.js';
 import { label, modeWord, pass, type Kind } from './readiness-shared.js';
 
@@ -59,12 +64,88 @@ export async function latestVerifiedWebhook(
 }
 
 /**
- * Check 3: a webhook is registered and, in live mode, has delivered a verified
- * event. `kinds` is what the Application sells, which decides whether
- * Razorpay's `order.paid` must have been seen.
+ * What the provider said about this Application's webhook: its own answer,
+ * `unreachable` when it could not be asked, or null when the provider has no
+ * API to read a webhook (Razorpay) or none is stored yet.
+ */
+export type WebhookLookup = WebhookInspection | { state: 'unreachable'; reason: string } | null;
+
+/**
+ * Ask the provider whether the stored webhook exists for this Application.
+ * One provider API call, so it runs in the panel's preflight and never on a
+ * checkout.
  *
  * @example
- * const check = await webhookCheck(appId, 'razorpay', 'live', creds, new Set(['one_time']));
+ * const lookup = await lookUpWebhook(app, 'paypal', creds);
+ */
+export async function lookUpWebhook(app: Application, provider: BillingProviderName, creds: unknown): Promise<WebhookLookup> {
+  if (!hasWebhookConfigured(provider, creds)) return null;
+  try {
+    const instance = await getProviderForApplication(app, provider);
+    if (!instance.inspectWebhook) return null;
+    return await instance.inspectWebhook(providerWebhookUrl(provider, app.slug));
+  } catch (error) {
+    const refusal = providerError({ provider, operation: 'the webhook lookup', audience: 'operator', error });
+    return { state: 'unreachable', reason: refusal.message };
+  }
+}
+
+function webhookPanelPath(provider: BillingProviderName): string {
+  return `Panel → Application → Billing → Setup → Providers → ${label(provider)}`;
+}
+
+function unregistered(provider: BillingProviderName): Check {
+  const where = webhookPanelPath(provider);
+  return {
+    id: 'webhook',
+    provider,
+    status: 'FAIL',
+    message: `No ${label(provider)} webhook is registered, and purchases complete only from the provider's webhook.`,
+    fix: provider === 'razorpay' ? razorpayWebhookFix(where) : `Register the webhook in ${where} (Auto-configure, or paste its id in Edit).`,
+  };
+}
+
+/**
+ * Check 3 on a checkout: a webhook is stored for this provider. Reads only
+ * the credentials already loaded, so a quiet month never turns buyers away.
+ *
+ * @example
+ * const failed = webhookStoredCheck('paypal', creds);
+ */
+export function webhookStoredCheck(provider: BillingProviderName, creds: unknown): Check {
+  if (!hasWebhookConfigured(provider, creds)) return unregistered(provider);
+  return pass('webhook', provider, `A ${label(provider)} webhook is registered.`);
+}
+
+/** The provider answered, and the webhook it holds cannot complete purchases. */
+function brokenAtProvider(provider: BillingProviderName, mode: BillingMode, lookup: Exclude<WebhookInspection, { state: 'registered' }>): Check {
+  const name = label(provider);
+  const message = {
+    missing: `${name} has no webhook for this Application on the account these ${modeWord(mode)} credentials belong to. The one saved here is from another account or the other mode.`,
+    wrong_url: `The saved ${name} webhook delivers to ${'url' in lookup ? lookup.url : 'another address'}, not to this Application.`,
+    disabled: `${name} has switched this Application's webhook off.`,
+    missing_events: `The ${name} webhook is not subscribed to ${'events' in lookup ? lookup.events.join(', ') : 'every event'}, so some purchases would never complete.`,
+  }[lookup.state];
+  return {
+    id: 'webhook',
+    provider,
+    status: 'FAIL',
+    message,
+    fix: `Press Reconfigure next to the webhook in ${webhookPanelPath(provider)}. Rekey registers it again with the saved credentials.`,
+  };
+}
+
+/**
+ * Check 3 in the preflight: the webhook exists. The provider's own answer
+ * decides it where the provider can be asked. Where it cannot (Razorpay, or
+ * an outage), a delivered event is the evidence, and its absence is a WARN:
+ * a first sale must not be a precondition for taking one. `kinds` is what the
+ * Application sells, which decides whether Razorpay's `order.paid` must have
+ * been seen.
+ *
+ * @example
+ * const lookup = await lookUpWebhook(app, 'paypal', creds);
+ * const check = await webhookCheck(app.id, 'paypal', 'live', creds, new Set(['one_time']), lookup);
  */
 export async function webhookCheck(
   applicationId: string,
@@ -72,29 +153,32 @@ export async function webhookCheck(
   mode: BillingMode,
   creds: unknown,
   kinds: ReadonlySet<Kind>,
+  lookup: WebhookLookup = null,
 ): Promise<Check> {
-  const where = `Panel → Application → Billing → Setup → Providers → ${label(provider)}`;
-  if (!hasWebhookConfigured(provider, creds)) {
+  const where = webhookPanelPath(provider);
+  if (!hasWebhookConfigured(provider, creds)) return unregistered(provider);
+  if (lookup?.state === 'registered') {
+    return pass('webhook', provider, `${label(provider)} holds this Application's webhook, with every event the checkout needs.`);
+  }
+  if (lookup !== null && lookup.state !== 'unreachable') return brokenAtProvider(provider, mode, lookup);
+
+  const { receivedAt: latest, lookbackDays } = await latestVerifiedWebhook(applicationId, provider, mode);
+  if (latest === null && lookup?.state === 'unreachable') {
     return {
       id: 'webhook',
       provider,
-      status: 'FAIL',
-      message: `No ${label(provider)} webhook is registered, and purchases complete only from the provider's webhook.`,
-      fix: provider === 'razorpay' ? razorpayWebhookFix(where) : `Register the webhook in ${where} (Auto-configure, or paste its id in Edit).`,
+      status: 'WARN',
+      message: `Rekey could not confirm the webhook with ${label(provider)}. ${lookup.reason}`,
+      fix: `Check the ${modeWord(mode)} credentials in ${where}, then run the checks again.`,
     };
   }
-  const { receivedAt: latest, lookbackDays } = await latestVerifiedWebhook(applicationId, provider, mode);
-  const firstPurchase =
-    mode === 'live'
-      ? `complete one checkout on the provider's page so an event arrives`
-      : `complete one sandbox checkout (on the provider's page or on the Rekey page) so an event arrives`;
   if (latest === null) {
     return {
       id: 'webhook',
       provider,
-      status: mode === 'live' ? 'FAIL' : 'WARN',
-      message: `${label(provider)} has not delivered a webhook verified with these ${modeWord(mode)} credentials in the last ${lookbackDays} days, or since they were last saved.`,
-      fix: `Check the webhook in ${where}, then ${firstPurchase}.`,
+      status: 'WARN',
+      message: `A ${label(provider)} webhook secret is saved, and ${label(provider)} has not delivered an event verified with it in the last ${lookbackDays} days, or since it was last saved. ${label(provider)} has no API for Rekey to confirm the webhook another way.`,
+      fix: `Check the webhook in ${where}. This clears on the first ${modeWord(mode)} event ${label(provider)} delivers.`,
     };
   }
   if (latest.getTime() < Date.now() - WEBHOOK_STALE_DAYS * DAY_MS) {

@@ -49,6 +49,7 @@ import { NO_SCOPES, UNRESTRICTED, type Scope } from '../../lib/operator-scopes.j
 import { isWorkspaceAdmin } from '../../lib/access-context.js';
 import { prisma } from '../../lib/prisma.js';
 import { mrrByCurrency } from '../billing/mrr.js';
+import { refundedTotalOf } from '../billing/refund-eligibility.js';
 import { withActorEmails } from '../../lib/security-events.js';
 import {
   accessContextFromTool,
@@ -160,6 +161,9 @@ export interface OperatorToolAnnotations {
   openWorldHint?: boolean;
 }
 
+/** How every tool that takes or returns money states its unit. */
+export const MINOR_UNITS = 'integer, minor units of the currency (cents for USD, whole yen for JPY)';
+
 const NO_ARGS = {
   type: 'object' as const,
   properties: {},
@@ -174,6 +178,15 @@ function clampLimit(raw: unknown, def = 25): number {
   const n = typeof raw === 'number' ? raw : raw === undefined ? def : Number(raw);
   if (!Number.isFinite(n)) return def;
   return Math.min(Math.max(1, Math.floor(n)), 200);
+}
+
+/**
+ * A subscription's own price, or null when it has none. Its plan's price is
+ * never reported in its place: that may not be what the buyer pays.
+ */
+function ownPrice(subscription: { currency: string | null; unitAmount: number | null }): { currency: string; amount: number } | null {
+  if (subscription.currency === null || subscription.unitAmount === null) return null;
+  return { currency: subscription.currency.toUpperCase(), amount: subscription.unitAmount };
 }
 
 /**
@@ -249,9 +262,10 @@ export const operatorTools: OperatorTool[] = [
     description:
       "Top-level rollup for the Applications the authenticated operator can " +
       'read in their active workspace: application count, end-user count, ' +
-      'organization count, active subscriptions and, with billing:read, MRR (in minor currency ' +
-      'units, e.g. cents) per currency: ACTIVE subscriptions on recurring plans, yearly plans divided by 12, ' +
-      'the same figure as each Billing Overview.',
+      'organization count, active subscriptions and, with billing:read, MRR per currency ' +
+      `(\`mrrMinor\`: ${MINOR_UNITS}): ACTIVE subscriptions on recurring plans, yearly plans divided by 12, ` +
+      'the same figure as each Billing Overview. `currencies` has one entry per currency; amounts in ' +
+      'different currencies are never added together and there is no single total.',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
       // Grant-scoped: a MEMBER with one APP_VIEWER grant used to get counts and
@@ -270,7 +284,7 @@ export const operatorTools: OperatorTool[] = [
           organizationCount: 0,
           activeSubscriptions: 0,
           // Same projection as the populated path: zero is still an amount.
-          ...(held.has('billing:read') ? { mrrMinor: 0, currencies: [] } : {}),
+          ...(held.has('billing:read') ? { currencies: [] } : {}),
         };
       }
       const [endUserCount, orgCount, activeSubscriptions, perCurrency] = await Promise.all([
@@ -279,8 +293,6 @@ export const operatorTools: OperatorTool[] = [
         prisma.subscription.count({ where: { applicationId: { in: appIds }, status: 'ACTIVE' } }),
         held.has('billing:read') ? mrrByCurrency(appIds) : Promise.resolve([]),
       ]);
-      // Summed across currencies for single-currency clients; `currencies` is the honest split.
-      const mrrMinor = perCurrency.reduce((a, c) => a + c.mrrMinor, 0);
       return {
         tenantId: ctx.tenantId,
         applicationCount: apps.length,
@@ -291,8 +303,11 @@ export const operatorTools: OperatorTool[] = [
         // tool, `billing:read` gets the amounts, omitted, never zeroed.
         ...(held.has('billing:read')
           ? {
-              mrrMinor,
-              currencies: perCurrency.map((c) => ({ currency: c.currency, mrrMinor: c.mrrMinor })),
+              currencies: perCurrency.map((c) => ({
+                currency: c.currency,
+                mrrMinor: c.mrrMinor,
+                activeSubscriptions: c.activeSubscriptions,
+              })),
             }
           : {}),
       };
@@ -392,7 +407,11 @@ export const operatorTools: OperatorTool[] = [
     description:
       'Recent Payment rows across the Applications the operator can read, by default ' +
       'the last 25, max 200. Filter optionally by `status` (SUCCEEDED / FAILED / ' +
-      "PENDING / REFUNDED / PARTIALLY_REFUNDED). Each row reports its Application's environment.",
+      "PENDING / REFUNDED / PARTIALLY_REFUNDED). Each row reports its Application's environment. " +
+      `\`amount\` and \`refundedAmount\` are each an ${MINOR_UNITS}; ` +
+      '`refundedAmount` is the sum of the refunds that have not failed (list_payment_refunds lists them). ' +
+      '`verification` is `verified` for a charge Rekey matched and applied, and `unverified` for one it recorded ' +
+      'and did not apply, which is not revenue until an operator applies it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -421,8 +440,11 @@ export const operatorTools: OperatorTool[] = [
           id: r.id,
           applicationSlug: r.application.slug,
           endUserId: r.endUserId,
-          amountMinor: r.amount,
-          currency: r.currency,
+          subscriptionId: r.subscriptionId,
+          amount: r.amount,
+          currency: r.currency.toUpperCase(),
+          refundedAmount: refundedTotalOf(r),
+          verification: r.verification === 'VERIFIED' ? ('verified' as const) : ('unverified' as const),
           status: r.status,
           environment: r.application.environment,
           createdAt: r.createdAt.toISOString(),
@@ -436,7 +458,10 @@ export const operatorTools: OperatorTool[] = [
       'Recent Subscription rows across the workspace, by default the last 25, max ' +
       '200. Filter optionally by `status` (PENDING / ACTIVE / PAST_DUE / CANCELED / EXPIRED). ' +
       "Each row reports its Application's environment and its id (use the id with " +
-      'cancel_subscription).',
+      'cancel_subscription). `price` is what that subscription itself costs, `{ currency, amount }` ' +
+      `with \`amount\` an ${MINOR_UNITS}. ` +
+      "It can differ from its plan's default price when the plan is sold in several currencies, and " +
+      "is null for a subscription with no price of its own: the plan's is never reported in its place.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -465,7 +490,7 @@ export const operatorTools: OperatorTool[] = [
         take: limit,
         include: {
           application: { select: { slug: true, environment: true } },
-          plan: { select: { slug: true, name: true, amount: true, currency: true, interval: true } },
+          plan: { select: { slug: true, name: true, interval: true } },
         },
       });
       return {
@@ -477,8 +502,7 @@ export const operatorTools: OperatorTool[] = [
           planName: r.plan.name,
           status: r.status,
           environment: r.application.environment,
-          amountMinor: r.plan.amount,
-          currency: r.plan.currency,
+          price: ownPrice(r),
           interval: r.plan.interval,
           currentPeriodEnd: r.currentPeriodEnd?.toISOString() ?? null,
           createdAt: r.createdAt.toISOString(),
@@ -674,7 +698,9 @@ export const operatorTools: OperatorTool[] = [
     description:
       'Look up one end-user in an application by email OR id. Returns profile, role, ' +
       "verification state, the Application's environment, and their current subscription " +
-      '(if any). Provide `applicationId` plus exactly one of `email` or `endUserId`. ' +
+      `(if any) with its own \`price\`: \`{ currency, amount }\`, \`amount\` an ${MINOR_UNITS}, ` +
+      'or null when the subscription has no price of its own. ' +
+      'Provide `applicationId` plus exactly one of `email` or `endUserId`. ' +
       'Read-only; no password or token data.',
     inputSchema: {
       type: 'object',
@@ -756,6 +782,7 @@ export const operatorTools: OperatorTool[] = [
                     status: subscription.status,
                     planSlug: subscription.plan?.slug ?? null,
                     planName: subscription.plan?.name ?? null,
+                    price: ownPrice(subscription),
                   }
                 : null,
             }

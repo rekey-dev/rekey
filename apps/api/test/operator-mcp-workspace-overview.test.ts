@@ -15,6 +15,7 @@ import { rollupApplication } from '../src/modules/analytics/rollup/job.js';
 import { countQueries } from './query-counter.js';
 import { seedUsers } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { pricedAt } from './subscription-price-fixture.js';
 
 const tool = (name: string) => allOperatorTools.find((t) => t.name === name)!;
 
@@ -41,37 +42,54 @@ describe('operator MCP workspace overview', () => {
     const yearly = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'y', name: 'Y', amount: 1200, currency: 'usd', interval: 'YEAR' } });
     const usage = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'u', name: 'U', amount: 5000, currency: 'usd', interval: 'MONTH', kind: 'USAGE' } });
     const n = 10_005;
+    const monthlyPrice = await pricedAt(monthly.id, 'USD', 100);
     await prisma.$executeRaw`
       INSERT INTO "end_users" ("id", "application_id", "email", "created_at", "updated_at")
       SELECT 'mrr_' || g, ${w.appId}, 'mrr' || g || '@example.com', now(), now() FROM generate_series(1, ${n}) g`;
     await prisma.$executeRaw`
-      INSERT INTO "subscriptions" ("id", "application_id", "end_user_id", "plan_id", "status", "created_at", "updated_at")
-      SELECT 'sub_' || g, ${w.appId}, 'mrr_' || g, ${monthly.id}, 'ACTIVE', now(), now() FROM generate_series(1, ${n}) g`;
-    await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: 'mrr_1', planId: yearly.id, status: 'ACTIVE' } });
+      INSERT INTO "subscriptions" ("id", "application_id", "end_user_id", "plan_id", "status", "currency", "unit_amount", "plan_price_id", "created_at", "updated_at")
+      SELECT 'sub_' || g, ${w.appId}, 'mrr_' || g, ${monthly.id}, 'ACTIVE', 'USD', 100, ${monthlyPrice.planPriceId}, now(), now() FROM generate_series(1, ${n}) g`;
+    await prisma.subscription.create({
+      data: { applicationId: w.appId, endUserId: 'mrr_1', planId: yearly.id, status: 'ACTIVE', ...(await pricedAt(yearly.id, 'USD', 1200)) },
+    });
     await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: 'mrr_2', planId: usage.id, status: 'ACTIVE' } });
+    // ACTIVE on a plan that costs 900 a month, with no price of its own: in no currency's MRR.
+    const unpricedPlan = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'n', name: 'N', amount: 900, currency: 'usd', interval: 'MONTH' } });
+    await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: 'mrr_4', planId: unpricedPlan.id, status: 'ACTIVE' } });
 
     const overview = (await tool('get_workspace_overview').handler(await ctxFor(w, 'OWNER'), {})) as {
-      mrrMinor: number;
       activeSubscriptions: number;
-      currencies: Array<{ currency: string; mrrMinor: number }>;
+      currencies: Array<{ currency: string; mrrMinor: number; activeSubscriptions: number }>;
     };
     const expected = n * 100 + 100;
-    expect(overview.mrrMinor).toBe(expected);
-    expect(overview.currencies).toEqual([{ currency: 'USD', mrrMinor: expected }]);
-    expect(overview.activeSubscriptions).toBe(n + 2);
+    expect(overview.currencies).toEqual([{ currency: 'USD', mrrMinor: expected, activeSubscriptions: n + 1 }]);
+    expect(overview).not.toHaveProperty('mrrMinor');
+    expect(overview).not.toHaveProperty('mrrCurrency');
+
+    expect(overview.activeSubscriptions).toBe(n + 3);
     const billing = await w.inject({ method: 'GET', url: `/api/v1/tenant/applications/${w.appId}/billing/stats`, headers: bearer(w.ownerToken) });
-    expect(billing.json().data).toMatchObject({ mrrCents: expected, mrrCurrency: 'USD', mixedCurrencies: false });
+    expect(billing.json().data.mrr).toEqual([{ currency: 'USD', mrrCents: expected, activeSubscriptions: n + 1 }]);
+
+    // A second currency is listed beside the first and never added to it.
+    const eur = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'e', name: 'E', amount: 700, currency: 'EUR', interval: 'MONTH' } });
+    await prisma.subscription.create({
+      data: { applicationId: w.appId, endUserId: 'mrr_3', planId: eur.id, status: 'ACTIVE', ...(await pricedAt(eur.id, 'EUR', 700)) },
+    });
+    const mixed = (await tool('get_workspace_overview').handler(await ctxFor(w, 'OWNER'), {})) as typeof overview;
+    expect(mixed.currencies).toEqual([
+      { currency: 'USD', mrrMinor: expected, activeSubscriptions: n + 1 },
+      { currency: 'EUR', mrrMinor: 700, activeSubscriptions: 1 },
+    ]);
   }, 60_000);
 
   it('amounts need billing:read, whatever the grant preset says', async () => {
     const w = await operatorWorld(app, 'APP_VIEWER');
     const withBilling = (await tool('get_workspace_overview').handler(await ctxFor(w, 'MEMBER'), {})) as Record<string, unknown>;
-    expect(withBilling).toHaveProperty('mrrMinor');
+    expect(withBilling).toHaveProperty('currencies');
     const without = (await tool('get_workspace_overview').handler(
       await ctxFor(w, 'MEMBER', new Set<Scope>(['overview:read'])),
       {},
     )) as Record<string, unknown>;
-    expect(without).not.toHaveProperty('mrrMinor');
     expect(without).not.toHaveProperty('currencies');
     expect(without).toHaveProperty('activeSubscriptions');
   });

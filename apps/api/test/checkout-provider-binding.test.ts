@@ -90,11 +90,11 @@ describe('a subscription binds its buyer to one payment provider', () => {
   async function twoPlans(): Promise<{ basic: string; pro: string }> {
     const basic = await post<{ slug: string }>(
       `/api/v1/admin/applications/${applicationId}/plans`,
-      { slug: 'basic', name: 'Basic', amount: 900 },
+      { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 900 } },
     );
     const pro = await post<{ slug: string }>(
       `/api/v1/admin/applications/${applicationId}/plans`,
-      { slug: 'pro', name: 'Pro', amount: 2900 },
+      { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2900 } },
     );
     return { basic: basic.slug, pro: pro.slug };
   }

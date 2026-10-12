@@ -128,6 +128,6 @@ export function assertNoReservedMetadataKey(metadata: Record<string, unknown>): 
     statusCode: 400,
     code: 'METADATA_KEY_RESERVED',
     message: `The metadata key "${OIDC_METADATA_NAMESPACE}" is reserved and cannot be set from an end-user session or a publishable key.`,
-    fix: `"${OIDC_METADATA_NAMESPACE}" holds the OIDC identity claims this Application asserts about the user (name, preferred_username, picture), so only the operator may write it — use PATCH /api/v1/tenant/applications/:id/end-users/:endUserId, or a secret key. Store your own profile fields under any other key.`,
+    fix: `"${OIDC_METADATA_NAMESPACE}" holds the OIDC identity claims this Application asserts about the user (name, preferred_username, picture), so only the operator may write it. Use PATCH /api/v1/tenant/applications/:id/end-users/:endUserId, or a secret key. Store your own profile fields under any other key.`,
   });
 }

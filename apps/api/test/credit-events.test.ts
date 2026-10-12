@@ -186,7 +186,7 @@ describe('Credit webhooks', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: op(),
-      payload: { slug: 'metered', name: 'Metered', amount: 0, kind: 'SUBSCRIPTION' },
+      payload: { slug: 'metered', name: 'Metered', kind: 'SUBSCRIPTION' },
     });
     await app.inject({
       method: 'PUT',

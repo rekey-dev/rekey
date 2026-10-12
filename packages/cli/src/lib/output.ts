@@ -15,14 +15,15 @@ export interface OutputContext {
   adminKey: string | undefined;
   /** An Application secret key, for the commands that act as one Application (`lists`). */
   secretKey: string | undefined;
-  /** An operator personal access token, for the commands that read as a workspace member (`analytics`). */
+  /** An operator personal access token, for the commands that act as a workspace member. */
   operatorToken?: string | undefined;
 }
 
 /**
- * Read globals (`--json`, `--api-url`, `--admin-key`, `--secret-key`) from any
- * subcommand. A flag wins over its environment variable (`REKEY_URL`,
- * `SUPER_ADMIN_KEY`, `REKEY_SECRET`).
+ * Read globals (`--json`, `--api-url`, `--admin-key`, `--secret-key`,
+ * `--operator-token`) from any subcommand. A flag wins over its environment
+ * variable (`REKEY_URL`, `SUPER_ADMIN_KEY`, `REKEY_SECRET`,
+ * `REKEY_OPERATOR_TOKEN`).
  *
  * @example
  * const ctx = readGlobalOpts(this);

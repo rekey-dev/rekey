@@ -20,11 +20,11 @@ import { licensesService } from './licenses.service.js';
 
 const TENANT_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or TENANT_SESSION_INVALID — ' +
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or TENANT_SESSION_INVALID: ' +
     'the token is invalid, expired, or the operator account no longer exists.',
   403:
-    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
-    "TENANT_ROLE_INSUFFICIENT / APP_ACCESS_DENIED — the operator's grant on this Application " +
+    'TENANT_MEMBERSHIP_REVOKED: the operator is no longer a member of this workspace; or ' +
+    "TENANT_ROLE_INSUFFICIENT / APP_ACCESS_DENIED: the operator's grant on this Application " +
     'does not allow this.',
 } as const;
 
@@ -55,10 +55,10 @@ export async function tenantLicenseActivationRoutes(app: FastifyInstance): Promi
         response: {
           200: okPage(ref('LicenseActivation'), "A page of the license's activations."),
           ...errs({
-            400: 'VALIDATION_ERROR — a query parameter is out of range.',
+            400: 'VALIDATION_ERROR: a query parameter is out of range.',
             401: TENANT_ERRORS[401],
             403: TENANT_ERRORS[403],
-            404: 'APPLICATION_NOT_FOUND; or LICENSE_NOT_FOUND — no license with that id on this Application.',
+            404: 'APPLICATION_NOT_FOUND; or LICENSE_NOT_FOUND: no license with that id on this Application.',
           }),
         },
       },
@@ -112,7 +112,7 @@ export async function tenantLicenseActivationRoutes(app: FastifyInstance): Promi
           ...errs({
             401: TENANT_ERRORS[401],
             403: TENANT_ERRORS[403],
-            404: 'APPLICATION_NOT_FOUND; or LICENSE_ACTIVATION_NOT_FOUND — no such activation on that license in this Application.',
+            404: 'APPLICATION_NOT_FOUND; or LICENSE_ACTIVATION_NOT_FOUND: no such activation on that license in this Application.',
           }),
         },
       },

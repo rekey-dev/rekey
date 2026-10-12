@@ -33,14 +33,31 @@
  * death, leaves a plan nobody can buy, which is the failure worth having.
  */
 
-import { Prisma, type Plan, type PlanInterval, type PlanKind, type LicenseKind, type Application } from '@prisma/client';
+import { type Prisma, type Plan, type PlanInterval, type PlanKind, type PlanLocalPrices, type LicenseKind, type Application } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { providerError } from '../../lib/provider-errors.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { credentialsNotConfigured, getProviderForApplication } from '../billing/providers/index.js';
 import { billingCredentialsService } from '../billing/credentials.service.js';
+import { pricedPlan } from '../billing/priced-plan.js';
 import { planNotRegisteredError } from './plan-registration.js';
+import { reportingCurrency } from '../billing/reporting-currency.js';
+import {
+  METERED_PLAN_COLUMNS,
+  WITH_DEFAULT_PRICE,
+  createPlanWithDefaultPrice,
+  defaultPriceColumns,
+  updatePlanAndDefaultPrice,
+  withDefaultPrice,
+  withDefaultPrices,
+  type DefaultPriceChange,
+  type PlanWithDefaultPrice,
+} from './default-price.js';
+import { recordPriceArchived, recordPriceSet } from './plan-prices.service.js';
+import { assertPriceAmount, priceCurrency } from './price-rules.js';
+import { recordLocalPricesChange } from './local-prices.js';
+import { hasProviderRegistration } from './price-amount-rule.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 
@@ -54,23 +71,6 @@ const PROVIDER_METADATA_KEYS = ['stripe', 'paypal', 'razorpay'] as const;
 
 /** How much of a provider's refusal we keep on the row. */
 const REGISTRATION_ERROR_MAX = 500;
-
-/**
- * True once ANY provider has minted a price/plan object for this row.
- *
- * This is the gate on editing price fields. A Stripe Price, and its PayPal and
- * Razorpay analogues, is immutable once created, so an `amount` change on a
- * registered plan would make our row disagree with what the buyer is actually
- * charged. Before registration there is no such object to disagree with, which
- * is exactly why a plan that FAILED registration may still be re-priced.
- */
-export function hasProviderRegistration(plan: Pick<Plan, 'metadata'>): boolean {
-  const meta = (plan.metadata ?? {}) as Record<string, unknown>;
-  return PROVIDER_METADATA_KEYS.some((key) => {
-    const entry = meta[key];
-    return typeof entry === 'object' && entry !== null && Object.keys(entry).length > 0;
-  });
-}
 
 /**
  * Shallow-merge an operator's metadata patch over what's stored, dropping the
@@ -192,8 +192,8 @@ export interface CreatePlanInput {
   applicationId: string;
   slug: string;
   name: string;
-  amount: number;        // smallest currency unit
-  currency?: string;     // ISO 4217
+  /** The default price, in the minor unit of its currency. Left out, the plan has no flat price. */
+  price?: { currency: string; amount: number };
   interval?: PlanInterval;
   kind?: PlanKind;
   // LICENSE-kind config, required when kind = LICENSE.
@@ -202,7 +202,6 @@ export interface CreatePlanInput {
   licenseDurationDays?: number;
   // USAGE-kind config, required when kind = USAGE.
   meterSlug?: string;
-  pricePerUnitCents?: number;
   // CREDIT-kind config, required when kind = CREDIT.
   creditsAmount?: number;
   /**
@@ -218,6 +217,8 @@ export interface CreatePlanInput {
    */
   trialDays?: number;
   metadata?: Record<string, unknown>;
+  /** The operator creating the plan, for the billing log. */
+  actor?: { operatorId: string };
 }
 
 /** The filter `listForApplication` and `countForApplication` share. */
@@ -247,26 +248,27 @@ export const plansService = {
     applicationId: string,
     includeInactive = false,
     opts?: { take?: number; skip?: number },
-  ): Promise<Plan[]> {
-    return prisma.plan.findMany({
+  ): Promise<PlanWithDefaultPrice[]> {
+    const plans = await prisma.plan.findMany({
       where: planListWhere(applicationId, includeInactive),
-      orderBy: [{ interval: 'asc' }, { amount: 'asc' }],
+      // Free plans first, then by default price. A plan with no flat price
+      // that is not free (metered at 0) sorts after the priced ones.
+      orderBy: [{ interval: 'asc' }, { isFree: 'desc' }, { defaultPrice: { amount: 'asc' } }, { createdAt: 'asc' }],
+      include: WITH_DEFAULT_PRICE,
       ...(opts?.take !== undefined ? { take: opts.take } : {}),
       ...(opts?.skip !== undefined ? { skip: opts.skip } : {}),
     });
+    return withDefaultPrices(plans);
   },
 
-  /**
-   * Total Plans matching `listForApplication`'s filter, ignoring take/skip.
-   * Shares the filter builder so the count cannot describe a different list.
-   */
   async countForApplication(applicationId: string, includeInactive = false): Promise<number> {
     return prisma.plan.count({ where: planListWhere(applicationId, includeInactive) });
   },
 
-  async getBySlug(applicationId: string, slug: string): Promise<Plan> {
+  async getBySlug(applicationId: string, slug: string): Promise<PlanWithDefaultPrice> {
     const plan = await prisma.plan.findUnique({
       where: { applicationId_slug: { applicationId, slug } },
+      include: WITH_DEFAULT_PRICE,
     });
     if (!plan) {
       throw new RekeyError({
@@ -276,10 +278,10 @@ export const plansService = {
         fix: `Check the slug against the plans that exist. GET /api/v1/billing/plans lists the ones on sale; the operator sees every plan in Panel → Application → Plans (/applications/${applicationId}/plans) or with GET /api/v1/tenant/applications/${applicationId}/plans, and creates one with POST there.`,
       });
     }
-    return plan;
+    return withDefaultPrice(plan);
   },
 
-  async create(input: CreatePlanInput): Promise<Plan> {
+  async create(input: CreatePlanInput): Promise<PlanWithDefaultPrice> {
     if (!SLUG_RE.test(input.slug)) {
       throw new RekeyError({
         statusCode: 400,
@@ -288,14 +290,10 @@ export const plansService = {
         fix: 'Use lowercase letters, digits, underscores, and hyphens. Must start and end with alphanumerics. Max 40 chars.',
       });
     }
-    if (input.amount < 0) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PLAN_AMOUNT_INVALID',
-        message: 'Plan amount must be >= 0 (smallest currency unit, e.g. cents).',
-        fix: 'Send the price in cents (or paise/sen/etc.), never as a decimal float.',
-      });
-    }
+    // The same rules an additional price is held to.
+    const price =
+      input.price === undefined ? null : { currency: priceCurrency(input.price.currency), amount: input.price.amount };
+    if (price !== null) assertPriceAmount(price.currency, price.amount);
 
     const kind: PlanKind = input.kind ?? 'SUBSCRIPTION';
 
@@ -328,12 +326,12 @@ export const plansService = {
       }
     }
     if (kind === 'USAGE') {
-      if (!input.meterSlug || input.pricePerUnitCents === undefined) {
+      if (!input.meterSlug) {
         throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_USAGE_CONFIG_REQUIRED',
-          message: 'USAGE-kind plans need `meterSlug` + `pricePerUnitCents`.',
-          fix: 'Bind to an existing usage meter and set the per-unit price (in cents).',
+          message: 'USAGE-kind plans need `meterSlug`.',
+          fix: 'Send `meterSlug`, the slug of a usage meter that already exists in this Application.',
         });
       }
       // Validate the meter exists in the same Application's catalogue.
@@ -402,12 +400,13 @@ export const plansService = {
       'stripe',
     );
 
-    let plan: Plan;
+    let plan: PlanWithDefaultPrice;
     try {
-      plan = await prisma.plan.create({
-        data: {
+      plan = await prisma.$transaction(async (tx) => {
+        const created = await createPlanWithDefaultPrice({
           applicationId: input.applicationId,
           slug: input.slug,
+          ...(kind === 'CREDIT' && { localPrices: 'TRUSTED' as const }),
           // Write-ahead: a plan awaiting a provider round-trip is inserted
           // un-purchasable and promoted afterwards, so no window exists in
           // which it is on sale without a price behind it. See the file header.
@@ -415,15 +414,14 @@ export const plansService = {
             ? { active: false, registrationStatus: 'PENDING' as const }
             : { registrationStatus: 'NOT_REQUIRED' as const }),
           name: input.name,
-          amount: input.amount,
-          currency: input.currency ?? 'USD',
+          ...defaultPriceColumns(price),
+          ...(kind === 'USAGE' && METERED_PLAN_COLUMNS),
           interval: input.interval ?? 'MONTH',
           kind,
           ...(input.licenseKind !== undefined && { licenseKind: input.licenseKind }),
           ...(input.licenseSeatsAllowed !== undefined && { licenseSeatsAllowed: input.licenseSeatsAllowed }),
           ...(input.licenseDurationDays !== undefined && { licenseDurationDays: input.licenseDurationDays }),
           ...(input.meterSlug !== undefined && { meterSlug: input.meterSlug }),
-          ...(input.pricePerUnitCents !== undefined && { pricePerUnitCents: input.pricePerUnitCents }),
           ...(input.creditsAmount !== undefined && { creditsAmount: input.creditsAmount }),
           trialDays,
           // Provider-reserved keys stripped HERE, not by the callers.
@@ -444,7 +442,9 @@ export const plansService = {
           // `create_plan` tool, which advertises `metadata` and validates
           // nothing. Fixed at the single write rather than at each caller.
           metadata: stripProviderMetadata(input.metadata) as never,
-        },
+        }, tx);
+        await recordDefaultPriceChange(tx, created, { before: null, after: created.defaultPrice, retired: null }, input.actor);
+        return created;
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
@@ -508,7 +508,7 @@ export const plansService = {
    * on purpose keeps its `active` flag: this is a registration operation, not a
    * publish button.
    */
-  async registerWithProvider(applicationId: string, slug: string): Promise<Plan> {
+  async registerWithProvider(applicationId: string, slug: string): Promise<PlanWithDefaultPrice> {
     const application = await applicationsService.get(applicationId);
     const plan = await this.getBySlug(applicationId, slug);
 
@@ -524,20 +524,19 @@ export const plansService = {
    * would publish it to the pricing page for a buyer to hit a dead checkout.
    * The refusal names the repair.
    */
-  async setActive(applicationId: string, slug: string, active: boolean): Promise<Plan> {
+  async setActive(applicationId: string, slug: string, active: boolean): Promise<PlanWithDefaultPrice> {
     const plan = await this.getBySlug(applicationId, slug);
     if (active) assertActivatable(applicationId, plan);
-    return prisma.plan.update({ where: { id: plan.id }, data: { active } });
+    return updatePlanAndDefaultPrice(plan.id, { active });
   },
 
   /**
    * Edit a plan's ENTITLEMENTS in place, the things it grants, which live
    * entirely on the Rekey side and don't touch the provider-registered Price:
-   * display name, LICENSE seats/duration, CREDIT amount, and free-form metadata
-   * (feature flags etc.).
+   * display name, LICENSE seats/duration, CREDIT amount, free-form metadata
+   * (feature flags etc.), and its rule for local prices.
    *
-   * Price fields (`amount`, `currency`, `interval`, `pricePerUnitCents`) are
-   * DELIBERATELY not editable: a Stripe Price (and its PayPal/Razorpay analogs)
+   * The price and `interval` are DELIBERATELY not editable: a Stripe Price (and its PayPal/Razorpay analogs)
    * is immutable once created, so changing the price means archiving this plan
    * (`setActive(false)`) and creating a replacement. This method never
    * re-registers with the provider.
@@ -554,17 +553,19 @@ export const plansService = {
       licenseSeatsAllowed?: number | null;
       licenseDurationDays?: number | null;
       creditsAmount?: number | null;
+      localPrices?: PlanLocalPrices;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<Plan> {
+    actor?: { operatorId: string },
+  ): Promise<PlanWithDefaultPrice> {
     const plan = await this.getBySlug(applicationId, slug);
 
     const metadata =
       patch.metadata !== undefined ? mergeMetadata(plan, patch.metadata) : undefined;
 
-    return prisma.plan.update({
-      where: { id: plan.id },
-      data: {
+    return updatePlanAndDefaultPrice(
+      plan.id,
+      {
         ...(patch.name !== undefined && { name: patch.name }),
         ...(patch.licenseSeatsAllowed !== undefined && {
           licenseSeatsAllowed: patch.licenseSeatsAllowed,
@@ -573,9 +574,11 @@ export const plansService = {
           licenseDurationDays: patch.licenseDurationDays,
         }),
         ...(patch.creditsAmount !== undefined && { creditsAmount: patch.creditsAmount }),
+        ...(patch.localPrices !== undefined && { localPrices: patch.localPrices }),
         ...(metadata !== undefined && { metadata: metadata as object }),
       },
-    });
+      (tx, updated, _change, previous) => recordLocalPricesChange(tx, updated, previous, actor),
+    );
   },
 
   /**
@@ -590,7 +593,7 @@ export const plansService = {
    *
    * ## When the price may move
    *
-   * Only while `hasProviderRegistration(plan)` is false, i.e. no provider has
+   * Only while `hasProviderRegistration(plan)` (`price-amount-rule.ts`) is false, i.e. no provider has
    * minted a price object for this row yet. That is not a loosening of the old
    * rule, it is the same rule stated honestly: `amount`/`currency`/`interval`
    * were frozen because a Stripe Price is immutable once created and an edit
@@ -606,8 +609,8 @@ export const plansService = {
     patch: {
       active?: boolean;
       name?: string;
-      amount?: number;
-      currency?: string;
+      /** The default price. Null makes the plan free. */
+      price?: { currency: string; amount: number } | null;
       interval?: PlanInterval;
       /**
        * Free-trial length in days. `0` CLEARS the trial (stored as null), which
@@ -617,9 +620,12 @@ export const plansService = {
        * the immutable Price object.
        */
       trialDays?: number;
+      /** Whether a buyer's country may select one of this plan's other prices. */
+      localPrices?: PlanLocalPrices;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<Plan> {
+    actor?: { operatorId: string },
+  ): Promise<PlanWithDefaultPrice> {
     const plan = await this.getBySlug(applicationId, slug);
     // Same rule as create, applied to the row's ACTUAL kind rather than the
     // patch's, since `kind` is not editable here.
@@ -656,8 +662,7 @@ export const plansService = {
     }
     if (patch.active === true) assertActivatable(applicationId, plan);
 
-    const pricePatched =
-      patch.amount !== undefined || patch.currency !== undefined || patch.interval !== undefined;
+    const pricePatched = patch.price !== undefined || patch.interval !== undefined;
     if (pricePatched && hasProviderRegistration(plan)) {
       throw new RekeyError({
         statusCode: 409,
@@ -666,32 +671,74 @@ export const plansService = {
         fix: 'A provider price object is immutable once created. Retire this plan (PATCH with {"active": false}) and create a replacement at the new price, under a DIFFERENT slug: archiving does not release the old one, because your integration passes it to checkout and reads it back off a subscription. Price edits are only accepted on a plan that has never registered.',
       });
     }
-    if (patch.amount !== undefined && patch.amount < 0) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PLAN_AMOUNT_INVALID',
-        message: 'Plan amount must be >= 0 (smallest currency unit, e.g. cents).',
-        fix: 'Send the price in cents (or paise/sen/etc.), never as a decimal float.',
+    const nextPrice =
+      patch.price === undefined || patch.price === null
+        ? null
+        : { currency: priceCurrency(patch.price.currency), amount: patch.price.amount };
+    if (nextPrice !== null) assertPriceAmount(nextPrice.currency, nextPrice.amount);
+    if (patch.price !== undefined) {
+      const clash = await prisma.planPrice.findFirst({
+        where: {
+          planId: plan.id,
+          archivedAt: null,
+          ...(plan.defaultPriceId !== null && { id: { not: plan.defaultPriceId } }),
+          ...(nextPrice !== null && { currency: nextPrice.currency }),
+        },
+        select: { currency: true },
       });
+      if (clash) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'PLAN_PRICE_IS_DEFAULT',
+          message:
+            nextPrice === null
+              ? `Plan "${slug}" has a price in ${clash.currency}, and a free plan cannot carry prices in other currencies.`
+              : `Plan "${slug}" already has an additional price in ${clash.currency}, so ${clash.currency} cannot also be its default currency.`,
+          fix: `Delete that price first with DELETE /api/v1/tenant/applications/${applicationId}/plans/${slug}/prices/${clash.currency}, then repeat this change.`,
+        });
+      }
     }
 
     const metadata =
       patch.metadata !== undefined ? mergeMetadata(plan, patch.metadata) : undefined;
 
-    return prisma.plan.update({
-      where: { id: plan.id },
-      data: {
+    return updatePlanAndDefaultPrice(
+      plan.id,
+      {
         ...(patch.active !== undefined && { active: patch.active }),
         ...(patch.name !== undefined && { name: patch.name }),
-        ...(patch.amount !== undefined && { amount: patch.amount }),
-        ...(patch.currency !== undefined && { currency: patch.currency.toUpperCase() }),
+        ...(patch.price !== undefined && defaultPriceColumns(nextPrice)),
         ...(patch.interval !== undefined && { interval: patch.interval }),
         ...(nextTrialDays !== undefined && { trialDays: nextTrialDays }),
+        ...(patch.localPrices !== undefined && { localPrices: patch.localPrices }),
         ...(metadata !== undefined && { metadata: metadata as object }),
       },
-    });
+      async (tx, updated, change, previous) => {
+        await recordDefaultPriceChange(tx, updated, change, actor);
+        await recordLocalPricesChange(tx, updated, previous, actor);
+      },
+    );
   },
 };
+
+/**
+ * The billing log's record of what a plan write did to the default price: the
+ * price it now sells at, and the one it stopped selling at.
+ */
+async function recordDefaultPriceChange(
+  tx: Prisma.TransactionClient,
+  plan: PlanWithDefaultPrice,
+  change: DefaultPriceChange,
+  actor: { operatorId: string } | undefined,
+): Promise<void> {
+  const { before, after, retired } = change;
+  if (before !== null && retired !== null) await recordPriceArchived(tx, plan, before, retired, actor);
+  if (after === null) return;
+  const sameRow = before !== null && before.id === after.id;
+  if (sameRow && before.amount === after.amount) return;
+  // A default price in a new currency is a new price, not the old one edited.
+  await recordPriceSet(tx, plan, sameRow ? before : null, after, actor);
+}
 
 /**
  * Refuse to publish a plan the provider has never acknowledged. Guards every
@@ -733,35 +780,33 @@ function registrationErrorText(e: unknown): string {
  */
 async function registerAndSettle(
   application: Application,
-  plan: Plan,
+  plan: PlanWithDefaultPrice,
   opts: { justCreated?: boolean } = {},
-): Promise<Plan> {
+): Promise<PlanWithDefaultPrice> {
   const blocked = plan.registrationStatus === 'PENDING' || plan.registrationStatus === 'FAILED';
 
   // Back to PENDING before a retry, so a row cannot read FAILED while a
   // registration for it is in flight.
   let current = plan;
   if (plan.registrationStatus === 'FAILED') {
-    current = await prisma.plan.update({
-      where: { id: plan.id },
-      data: { active: false, registrationStatus: 'PENDING', registrationError: null },
+    current = await updatePlanAndDefaultPrice(plan.id, {
+      active: false,
+      registrationStatus: 'PENDING',
+      registrationError: null,
     });
   }
 
   const provider = await getProviderForApplication(application, 'stripe');
   let providerPlanId: string;
   try {
-    providerPlanId = (await provider.ensurePlanRegistered(current)).providerPlanId;
+    providerPlanId = (await provider.ensurePlanRegistered(pricedPlan(current, null, reportingCurrency(application)))).providerPlanId;
   } catch (e) {
     if (blocked) {
       try {
-        await prisma.plan.update({
-          where: { id: current.id },
-          data: {
-            active: false,
-            registrationStatus: 'FAILED',
-            registrationError: registrationErrorText(e),
-          },
+        await updatePlanAndDefaultPrice(current.id, {
+          active: false,
+          registrationStatus: 'FAILED',
+          registrationError: registrationErrorText(e),
         });
       } catch {
         // Best-effort annotation only. The row is already PENDING + inactive,
@@ -802,16 +847,13 @@ async function registerAndSettle(
     where: { applicationId_provider: { applicationId: application.id, provider: 'stripe' } },
     select: { mode: true },
   });
-  return prisma.plan.update({
-    where: { id: current.id },
-    data: {
-      metadata: {
-        ...(current.metadata as object),
-        stripe: { priceId: providerPlanId, mode: credentials?.mode === 'live' ? 'live' : 'test' },
-      } as never,
-      registrationStatus: 'REGISTERED',
-      registrationError: null,
-      ...(blocked && { active: true }),
-    },
+  return updatePlanAndDefaultPrice(current.id, {
+    metadata: {
+      ...(current.metadata as object),
+      stripe: { priceId: providerPlanId, mode: credentials?.mode === 'live' ? 'live' : 'test' },
+    } as never,
+    registrationStatus: 'REGISTERED',
+    registrationError: null,
+    ...(blocked && { active: true }),
   });
 }

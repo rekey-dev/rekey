@@ -59,7 +59,7 @@ describe('billing refusals name the right thing', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
       headers: auth(),
-      payload: { slug: 'pro', name: 'Pro', amount: 2000, kind: 'SUBSCRIPTION' },
+      payload: { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 2000 }, kind: 'SUBSCRIPTION' },
     });
     if (r.statusCode !== 201) throw new Error(`plan ${r.statusCode}: ${r.body}`);
     const su = await app.inject({

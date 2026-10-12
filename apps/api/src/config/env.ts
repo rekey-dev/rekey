@@ -576,7 +576,7 @@ if (env.NODE_ENV === 'production' && !env.ENCRYPTION_KEY) {
   // data-at-rest exposure. Better to refuse to start than to quietly store
   // credentials in the clear; operators see the error immediately and fix it.
   throw new Error(
-    '[SECURITY] ENCRYPTION_KEY is required in production — refusing to boot. ' +
+    '[SECURITY] ENCRYPTION_KEY is required in production. Refusing to boot. ' +
       'Without it, provider credentials and tokens are stored in plaintext at rest. ' +
       'Generate one with: openssl rand -hex 32',
   );
@@ -608,9 +608,9 @@ if (
     /^(.)\1{63}$/.test(env.ENCRYPTION_KEY))
 ) {
   throw new Error(
-    '[SECURITY] ENCRYPTION_KEY is a publicly known value — refusing to boot. ' +
+    '[SECURITY] ENCRYPTION_KEY is a publicly known value. Refusing to boot. ' +
       'This key was published as a docker-compose default before 2.0.0-rc.1, so it ' +
-      'protects nothing. Generate a real one with: openssl rand -hex 32 — and note ' +
+      'protects nothing. Generate a real one with: openssl rand -hex 32. Note ' +
       'that anything already encrypted with the old key must be re-encrypted, since ' +
       'rotating the key alone leaves stored credentials unreadable. ' +
       'Treat any provider credentials stored under it as compromised and rotate them ' +
@@ -627,7 +627,7 @@ if (
   // no mail transport). In production it is an account-takeover handout: the
   // operator endpoints that return them are unauthenticated by necessity.
   throw new Error(
-    '[SECURITY] REKEY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production — refusing to boot. ' +
+    '[SECURITY] REKEY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production. Refusing to boot. ' +
       'It returns raw password-reset and magic-link tokens in API responses. Unset it and configure email transport.',
   );
 }

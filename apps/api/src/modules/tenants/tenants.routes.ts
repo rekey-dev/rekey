@@ -23,10 +23,10 @@ import {
  */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 /** `TenantLimitsView`, the ceilings plus what's currently counted against them. */
@@ -97,7 +97,7 @@ function parseLimitsOrThrow(value: unknown): TenantLimits {
     statusCode: 400,
     code: "INVALID_TENANT_LIMITS",
     message: `Limits body is not valid: ${parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(root)"} — ${i.message}`)
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("; ")}`,
     fix:
       "Send an object using only these keys: `maxActiveEndUsers` and `maxProductionApps` " +
@@ -130,7 +130,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: okPage(ref("Tenant"), "A page of workspaces."),
           ...errs({
-            400: "BAD_REQUEST — `limit` or `offset` is outside the declared range.",
+            400: "BAD_REQUEST: `limit` or `offset` is outside the declared range.",
             ...SUPER_ADMIN_ERRORS,
           }),
         },
@@ -162,7 +162,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           200: ok(ref("Tenant"), "The tenant."),
           ...errs({
             ...SUPER_ADMIN_ERRORS,
-            404: "TENANT_NOT_FOUND — no tenant with that id.",
+            404: "TENANT_NOT_FOUND: no tenant with that id.",
           }),
         },
       },
@@ -202,8 +202,8 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           201: ok(ref("Tenant"), "The created tenant."),
           ...errs({
             400:
-              "BAD_REQUEST — `name` or `ownerEmail` failed schema validation; or " +
-              "INVALID_TENANT_LIMITS — `limits` has an unknown key or an invalid value.",
+              "BAD_REQUEST: `name` or `ownerEmail` failed schema validation; or " +
+              "INVALID_TENANT_LIMITS: `limits` has an unknown key or an invalid value.",
             ...SUPER_ADMIN_ERRORS,
           }),
         },
@@ -290,9 +290,9 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
             "The membership. `created` is false when it already existed.",
           ),
           ...errs({
-            400: "BAD_REQUEST — `email` or `role` failed schema validation.",
+            400: "BAD_REQUEST: `email` or `role` failed schema validation.",
             404:
-              "TENANT_NOT_FOUND — no such workspace; or OPERATOR_NOT_FOUND — no operator with " +
+              "TENANT_NOT_FOUND: no such workspace; or OPERATOR_NOT_FOUND: no operator with " +
               "that email. This route grants access to an existing operator; it never creates one.",
             ...SUPER_ADMIN_ERRORS,
           }),
@@ -355,7 +355,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...SUPER_ADMIN_ERRORS,
-            404: "TENANT_NOT_FOUND — no tenant with that id.",
+            404: "TENANT_NOT_FOUND: no tenant with that id.",
           }),
         },
       },
@@ -433,10 +433,10 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              "BAD_REQUEST — `maxActiveEndUsers` or `maxProductionApps` failed schema " +
-              "validation; or INVALID_TENANT_LIMITS — the body has an unknown key.",
+              "BAD_REQUEST: `maxActiveEndUsers` or `maxProductionApps` failed schema " +
+              "validation; or INVALID_TENANT_LIMITS: the body has an unknown key.",
             ...SUPER_ADMIN_ERRORS,
-            404: "TENANT_NOT_FOUND — no tenant with that id.",
+            404: "TENANT_NOT_FOUND: no tenant with that id.",
           }),
         },
       },

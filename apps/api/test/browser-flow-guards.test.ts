@@ -25,6 +25,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import * as OTPAuth from 'otpauth';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -417,17 +418,19 @@ describe('browser-reachable end-user self-service flows', () => {
 
   describe('POST /billing/coupons/validate', () => {
     beforeEach(async () => {
+      // The quote answers as the checkout would, and a checkout needs a provider.
+      await configureSandboxStripe(ctx.applicationId);
       await app.inject({
         method: 'POST',
         url: `/api/v1/admin/applications/${ctx.applicationId}/plans`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { slug: 'pro_monthly', name: 'Pro', amount: 999 },
+        payload: { slug: 'pro_monthly', name: 'Pro', price: { currency: 'USD', amount: 999 } },
       });
       await app.inject({
         method: 'POST',
         url: `/api/v1/admin/applications/${ctx.applicationId}/coupons`,
         headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { code: 'fifteen', discountType: 'PERCENT', amountOff: 1500 },
+        payload: { code: 'fifteen', discountType: 'PERCENT', basisPoints: 1500 },
       });
     });
 
@@ -438,7 +441,7 @@ describe('browser-reachable end-user self-service flows', () => {
       });
       expect(res.statusCode).toBe(200);
       const data = res.json().data as { discountAmount: number };
-      expect(data.discountAmount).toBe(149);
+      expect(data.discountAmount).toBe(150); // 15% of 9.99, rounded up toward the buyer
     });
 
     it('401 USER_TOKEN_MISSING with a publishable key and no user token', async () => {

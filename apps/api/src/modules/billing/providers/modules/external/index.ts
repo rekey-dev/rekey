@@ -53,6 +53,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { sellableCurrencies } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../../../lib/error.js';
 import type {
   AppRef,
@@ -103,6 +104,8 @@ const ActivatedData = z.object({
     plan: z.string().min(1).max(40),
     currentPeriodEnd: isoDate.nullable().optional(),
     trialEndsAt: isoDate.nullable().optional(),
+    /** The currency the subscription is billed in, when the plan is sold in more than one. */
+    currency: z.string().length(3).optional(),
   }),
   subscriber: SubscriberSchema,
 });
@@ -127,6 +130,8 @@ const PaymentData = z.object({
     amount: z.number().int().min(0),
     currency: z.string().length(3),
     description: z.string().max(500).nullable().optional(),
+    /** On `payment.refunded`: the sender's id for this refund. A refund id is recorded once, whatever event carries it. */
+    refundId: ExternalId.optional(),
   }),
 });
 
@@ -315,6 +320,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
             currentPeriodEnd: d.subscription.currentPeriodEnd,
           }),
           ...(d.subscription.trialEndsAt !== undefined && { trialEndsAt: d.subscription.trialEndsAt }),
+          ...(d.subscription.currency !== undefined && { currency: d.subscription.currency.toUpperCase() }),
           ...(env.occurredAt !== undefined && { occurredAt: env.occurredAt }),
           raw,
         },
@@ -424,6 +430,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerEventId,
           applicationId,
           providerPaymentId: payment.id,
+          ...(payment.refundId !== undefined && { providerRefundId: payment.refundId }),
           providerSubscriptionId: payment.subscriptionId,
           amount: payment.amount,
           currency: payment.currency.toUpperCase(),
@@ -447,6 +454,9 @@ export const externalModule: ProviderModule = {
     docsUrl: 'https://github.com/rekey-dev/rekey/blob/main/docs/external-billing.md',
     // Never routed to, so there is nothing to pre-fill.
     defaultCountries: [],
+    supportedCurrencies: 'all-sellable',
+    // The sale happened in the other system, in whatever currency it sells.
+    preselectedCurrencies: sellableCurrencies(),
     priority: 1000,
   },
   capabilities: {
@@ -499,7 +509,7 @@ export const externalModule: ProviderModule = {
       placeholder: 'https://billing.example.com/rekey/subscriptions',
       help:
         'A GET endpoint your billing system hosts, listing the subscriptions it has sold. Rekey ' +
-        'reads it to import a book of business it never saw — the event feed only covers what ' +
+        'reads it to import a book of business it never saw. The event feed only covers what ' +
         'happens after you connect. The exact contract is in docs/external-billing-pull.md.',
       pattern: {
         prefix: 'https://',

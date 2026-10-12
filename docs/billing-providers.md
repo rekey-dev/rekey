@@ -24,6 +24,7 @@ handling, and the panel's configuration form.
 A module lives at `apps/api/src/modules/billing/providers/modules/<name>/` and
 default-exports a `ProviderModule`:
 
+<!-- snippet: no-check `ProviderModule` is a type inside the API, not exported by a package -->
 ```ts
 const mollie: ProviderModule = {
   name: 'mollie',
@@ -31,6 +32,8 @@ const mollie: ProviderModule = {
     label: 'Mollie',
     docsUrl: 'https://docs.mollie.com/…',
     defaultCountries: ['NL', 'BE', 'DE'],   // feeds the geo router
+    supportedCurrencies: ['EUR', 'GBP', 'USD'],  // every currency the processor can charge
+    preselectedCurrencies: ['EUR'],              // what a new account starts with; never empty
     priority: 50,
   },
   capabilities: {
@@ -94,6 +97,43 @@ entitlements, outbound webhooks to the operator's own endpoints. If your
 processor has no native "period renewed" event (PayPal doesn't), set
 `periodRotationEvents: false` and emit `subscription.period_advanced` from
 whatever signal it does have.
+
+## Currencies and amounts
+
+A module states which currencies its processor can charge, and converts
+amounts at its own edge.
+
+- `display.supportedCurrencies` is the list the processor publishes, or
+  `'all-sellable'` for every currency a price may be in. An operator chooses
+  an account's currencies from it, and saving a code outside it is refused
+  with `BILLING_PROVIDER_CURRENCY_NOT_OFFERED`. Routing never sends a price to
+  a provider that does not list its currency. Keep three-decimal currencies
+  out: a price cannot be in one.
+- `display.preselectedCurrencies` is what an account can usually charge
+  without further setup. An account saved without a currency list starts with
+  it, and the panel ticks it for a new account. It must not be empty: a test
+  fails for a module that preselects nothing, because an account saved
+  without a list would then be used for no checkout.
+- An account's stored list being empty means none: the provider is not used
+  for any checkout. Only an operator sending an empty list stores one.
+
+Rekey stores every amount as an integer at the ISO 4217 exponent. Processors
+do not all follow ISO, so each module owns its wire scale: one function that
+turns a stored amount into what the processor's API takes, and one that turns
+what the processor reports back into a stored amount. See `stripe-money.ts`,
+`paypal-money.ts` and `razorpay-money.ts` beside the modules. Two rules hold
+for all three, and yours should keep them:
+
+- **Refuse, never round.** An amount the processor cannot take exactly throws
+  `BILLING_AMOUNT_NOT_CHARGEABLE` (the `amountNotChargeable` helper) and
+  nothing is sent.
+- **A webhook amount never throws.** A figure read off a webhook that is not a
+  whole number of stored units is handed on as not-a-number, which the
+  applier does not apply. A throw there would answer 500 and the processor
+  would redeliver the same body.
+
+[currencies.md](currencies.md#how-an-amount-is-sent-to-each-provider) lists
+what the three built-in modules do.
 
 ## What you don't write
 

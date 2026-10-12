@@ -120,7 +120,7 @@ describe('self-serve free tier', () => {
   it('gives a new signup their included credits with no provider configured', async () => {
     // The reported case, end to end.
     const slug = await makePlan(
-      { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+      { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
       { kind: 'CREDIT', quantity: 500 },
     );
     await nominate(slug);
@@ -156,7 +156,7 @@ describe('self-serve free tier', () => {
 
   it('is idempotent: a second call changes nothing and re-grants nothing', async () => {
     const slug = await makePlan(
-      { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+      { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
       { kind: 'CREDIT', quantity: 500 },
     );
     await nominate(slug);
@@ -176,7 +176,7 @@ describe('self-serve free tier', () => {
   });
 
   it('refuses a nominated plan that charges an amount', async () => {
-    const slug = await makePlan({ slug: 'paid', name: 'Paid', amount: 1000, kind: 'SUBSCRIPTION' });
+    const slug = await makePlan({ slug: 'paid', name: 'Paid', price: { currency: 'USD', amount: 1000 }, kind: 'SUBSCRIPTION' });
     await nominate(slug);
     const res = await subscribe(await signUp());
     expect(res.statusCode).toBe(409);
@@ -195,10 +195,8 @@ describe('self-serve free tier', () => {
     const slug = await makePlan({
       slug: 'metered',
       name: 'Metered',
-      amount: 0,
       kind: 'USAGE',
       meterSlug: 'calls',
-      pricePerUnitCents: 5,
     });
     await nominate(slug);
     const res = await subscribe(await signUp());
@@ -207,7 +205,7 @@ describe('self-serve free tier', () => {
   });
 
   it('refuses when the Application nominates no free tier', async () => {
-    await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' });
+    await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' });
     await nominate(null);
     const res = await subscribe(await signUp());
     expect(res.statusCode).toBe(404);
@@ -218,11 +216,11 @@ describe('self-serve free tier', () => {
     // The guard is nomination, not price: a second zero-amount plan carrying a
     // richer entitlement must not be self-activatable just because it is free.
     const free = await makePlan(
-      { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+      { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
       { kind: 'CREDIT', quantity: 10 },
     );
     await makePlan(
-      { slug: 'generous', name: 'Generous', amount: 0, kind: 'SUBSCRIPTION' },
+      { slug: 'generous', name: 'Generous', kind: 'SUBSCRIPTION' },
       { kind: 'CREDIT', quantity: 100_000 },
     );
     await nominate(free);
@@ -235,7 +233,7 @@ describe('self-serve free tier', () => {
   });
 
   it('needs the buyer, not just the Application key', async () => {
-    const slug = await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' });
+    const slug = await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' });
     await nominate(slug);
     // No user token: the actor has to be the beneficiary.
     const res = await app.inject({
@@ -294,7 +292,7 @@ describe('self-serve free tier', () => {
 
     it('refuses the second beneficiary, so cancel and create an org no longer mints credits', async () => {
       await nominate(
-        await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+        await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
       );
       await enableOrgs();
       const userToken = await signUp();
@@ -321,7 +319,7 @@ describe('self-serve free tier', () => {
 
     it('refuses the personal account after an organization took the claim', async () => {
       await nominate(
-        await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+        await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
       );
       await enableOrgs();
       const userToken = await signUp();
@@ -338,7 +336,7 @@ describe('self-serve free tier', () => {
     it('treats a LICENSE free plan the same way: one licence, not one per org', async () => {
       await nominate(
         await makePlan(
-          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
           { kind: 'LICENSE', licenseKind: 'SEATS', quantity: 3 },
         ),
       );
@@ -362,7 +360,7 @@ describe('self-serve free tier', () => {
 
     it('lets the same beneficiary cancel and come back without a second grant', async () => {
       await nominate(
-        await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+        await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
       );
       await enableOrgs();
       const userToken = await signUp();
@@ -390,7 +388,7 @@ describe('self-serve free tier', () => {
     it('leaves a FEATURE-only free plan activatable for several organizations', async () => {
       await nominate(
         await makePlan(
-          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
           { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
         ),
       );
@@ -433,7 +431,7 @@ describe('self-serve free tier', () => {
     it('puts a second organization on a FEATURE-only free tier without answering with the first one\'s subscription', async () => {
       await nominate(
         await makePlan(
-          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
           { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
         ),
       );
@@ -461,7 +459,7 @@ describe('self-serve free tier', () => {
     it('never hands one of eight concurrent FEATURE-only activations another organization\'s subscription', async () => {
       await nominate(
         await makePlan(
-          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
           { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
         ),
       );
@@ -484,7 +482,7 @@ describe('self-serve free tier', () => {
       async function freeWithQuota(): Promise<void> {
         await nominate(
           await makePlan(
-            { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+            { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
             { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
           ),
         );
@@ -594,7 +592,7 @@ describe('self-serve free tier', () => {
           if (kind === 'FEATURE') await freeWithQuota();
           else {
             await nominate(
-              await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+              await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
             );
           }
           await enableOrgs();
@@ -622,7 +620,7 @@ describe('self-serve free tier', () => {
       it('caps a claimed organization at zero on a priced free row with no included units, never unmetered', async () => {
         await nominate(
           await makePlan(
-            { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+            { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
             { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
           ),
         );
@@ -652,7 +650,7 @@ describe('self-serve free tier', () => {
         const orgId = await createOrg(userToken);
         expect((await subscribe(userToken, { organizationId: orgId })).statusCode).toBe(201);
         await makePlan(
-          { slug: 'free2', name: 'Free 2', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free2', name: 'Free 2', kind: 'SUBSCRIPTION' },
           { kind: 'FEATURE', key: 'second', valueType: 'BOOL', value: 'true' },
         );
         await nominate('free2');
@@ -671,7 +669,7 @@ describe('self-serve free tier', () => {
         const orgId = await createOrg(userToken);
         expect((await subscribe(userToken, { organizationId: orgId })).statusCode).toBe(201);
         await makePlan(
-          { slug: 'free2', name: 'Free 2', amount: 0, kind: 'SUBSCRIPTION' },
+          { slug: 'free2', name: 'Free 2', kind: 'SUBSCRIPTION' },
           { kind: 'FEATURE', key: 'second', valueType: 'BOOL', value: 'true' },
         );
         await prisma.subscription.updateMany({ where: { applicationId: appId }, data: { status: 'CANCELED' } });
@@ -683,7 +681,7 @@ describe('self-serve free tier', () => {
 
       it('still ranks a paid subscription over the free one for a claimed organization', async () => {
         await freeWithQuota();
-        await makePlan({ slug: 'pro', name: 'Pro', amount: 0, kind: 'SUBSCRIPTION' });
+        await makePlan({ slug: 'pro', name: 'Pro', kind: 'SUBSCRIPTION' });
         await prisma.plan.update({ where: { applicationId_slug: { applicationId: appId, slug: 'pro' } }, data: { amount: 2900 } });
         await enableOrgs();
         await billPerOrganization();
@@ -710,7 +708,7 @@ describe('self-serve free tier', () => {
 
     it('lets exactly one of eight concurrent claims for different organizations through', async () => {
       await nominate(
-        await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+        await makePlan({ slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
       );
       await enableOrgs();
       const userToken = await signUp();

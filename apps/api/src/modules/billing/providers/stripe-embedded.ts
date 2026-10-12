@@ -10,6 +10,7 @@
 import type Stripe from 'stripe';
 import { STRIPE_RETURN_PARAM } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../lib/error.js';
+import { fromProviderAmount } from './stripe-money.js';
 import { paymentPurchase, stripePriceIdFor, subscriptionPurchase, type PurchaseParams } from './stripe-session-params.js';
 import type { CheckoutSessionInput, EmbeddedCheckoutInput, ProviderCheckoutSessionSnapshot } from './types.js';
 
@@ -104,7 +105,10 @@ export async function retrieveCheckoutSnapshot(
     status: session.status ?? 'unknown',
     paymentStatus: session.payment_status,
     clientReferenceId: session.client_reference_id,
-    amountTotal: session.amount_total,
+    amountTotal:
+      session.amount_total === null || session.currency === null
+        ? session.amount_total
+        : fromProviderAmount(session.currency, session.amount_total),
     currency: session.currency === null ? null : session.currency.toUpperCase(),
     url: session.url,
     metadata: {

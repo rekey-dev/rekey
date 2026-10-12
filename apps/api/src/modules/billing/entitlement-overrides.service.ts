@@ -283,7 +283,7 @@ function mergePatch(
     if (!OVERRIDE_KEY_RE.test(key)) {
       throw invalid(
         `"${key}" is not a valid override key.`,
-        'Use `KIND:key`, where KIND is FEATURE, CREDIT, LICENSE or USAGE — for example `FEATURE:max_production_apps`. A key outside that shape is stored but never matches an entitlement, so it would sell nothing.',
+        'Use `KIND:key`, where KIND is FEATURE, CREDIT, LICENSE or USAGE: for example `FEATURE:max_production_apps`. A key outside that shape is stored but never matches an entitlement, so it would sell nothing.',
       );
     }
 
@@ -303,8 +303,8 @@ function mergePatch(
     // store precisely the silent no-op every other rule here exists to refuse.
     if (key.length === kind.length + 1 && !planRows.has(key)) {
       throw invalid(
-        `"${key}" names no entitlement — the part after the colon is empty.`,
-        'An empty key matches only the single entitlement synthesized for a legacy plan that carries no explicit rows. On any other plan, name the entitlement — for example `FEATURE:max_production_apps`.',
+        `"${key}" names no entitlement. The part after the colon is empty.`,
+        'An empty key matches only the single entitlement synthesized for a legacy plan that carries no explicit rows. On any other plan, name the entitlement, for example `FEATURE:max_production_apps`.',
       );
     }
 
@@ -467,7 +467,7 @@ function assertFitsValueType(
     if (!ok) {
       throw invalid(
         `"${key}" is a BOOL entitlement, so its value must be true or false.`,
-        'Only the exact string "true" reads as true at resolve time — anything else, including "yes" or 1, resolves to false. Send a JSON boolean.',
+        'Only the exact string "true" reads as true at resolve time. Anything else, including "yes" or 1, resolves to false. Send a JSON boolean.',
       );
     }
     return;

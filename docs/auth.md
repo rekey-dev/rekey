@@ -192,6 +192,7 @@ sign-in page can call it directly. A secret key works too and needs `auth:read`.
 The response carries `Cache-Control: private, max-age=60`, so a change in the
 panel can take up to a minute to show.
 
+<!-- snippet: no-check several files or alternatives shown in one block, so names are declared twice -->
 ```ts
 // Server, @rekey.dev/node
 const { providers } = await rekey.auth.listOAuthProviders();
@@ -412,6 +413,7 @@ GET /api/v1/auth/me?include=entitlements,device
 X-Rekey-User-Token: <access token>
 ```
 
+<!-- snippet: no-check a fragment from inside a function body, shown without the function -->
 ```ts
 const me = await rekey.auth.getCurrentUser(accessToken, { include: ['entitlements', 'device'] });
 if (!me.entitlements.features.reports) return forbidden();
@@ -426,6 +428,7 @@ value adds one top-level property of the same name:
 | `subscription` | The current subscription, or `null` | `GET /billing/subscription` for the billing subject (below) |
 | `device` | The device the token's `dev` claim names, or `null` when the session is not device-bound | `GET /users/me/devices`, that one row |
 | `organization` | The active organization with the caller's `role` and `baseRole`, or `null` | `GET /users/me/organizations/:id` |
+| `support` | `{ active, capabilities, scope, since, updatedAt }` for the session's own device, or `{ active: false, capabilities: [] }`. See [support-mode.md](support-mode.md) | `GET /users/:id/support?deviceId=` |
 | `licenses` | `{ items, truncated }`: the caller's licences, newest first, first 100 (the active organization's too, in an org-billed Application); `truncated` is true when there are more | `GET /users/me/licenses` for the billing subject (below) |
 
 What to rely on:
@@ -641,6 +644,8 @@ Operators manage end-users from the panel (or the `/api/v1/tenant/applications/:
 
 Impersonation is bounded twice over. It is **revocable**: `POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end` stamps `endedAt` on every open audit row for that user and invalidates the tokens they issued on the spot (`IMPERSONATION_SESSION_ENDED`), for any operator, not just the one who started it. And it **cannot change credentials or mint a session**: password change, MFA setup/disable, passkey enrolment/removal, linking or unlinking an OAuth provider, the MCP session handoff, and the two routes that re-mint a token pair (`POST /users/me/organizations/:id/switch` and `POST /users/me/organizations/clear-active-organization`) answer 403 `IMPERSONATION_ACTION_FORBIDDEN` for an impersonated session. Each of those would outlive the five-minute token: a re-minted pair is an ordinary 30-day session with no `imp` claim, which would keep working after the impersonation ended. Everything else the user can do (reads, billing, organization membership, profile edits) is unchanged.
 
+An operator can also put an account into support mode, which turns on capabilities your app reads until the operator ends it. See [support-mode.md](support-mode.md).
+
 ### Banning an end-user
 
 ```
@@ -687,6 +692,7 @@ The full per-model cascade guarantee (delete / anonymize / retain) lives in **[d
 
 Each Application has an `authConfig`:
 
+<!-- snippet: no-check a shape written out for reading, not a program -->
 ```ts
 {
   // Open-ended strings, not a closed union — 'passkey' is valid too, and a
@@ -766,6 +772,7 @@ A refused sign-up answers **403 `SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED`**. The message
 
 ## SDK usage
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // 1. user signs up via your form, server posts to Rekey
 const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
@@ -794,6 +801,7 @@ user, or an OAuth callback that created the user. It is false for every other
 sign-in (including an OAuth identity linked to an existing account), MFA
 completion, refresh and organization switch.
 
+<!-- snippet: no-check a fragment from inside a function body, shown without the function -->
 ```ts
 // Node, any framework
 const result = await rekey.auth.signIn({ email, password });
@@ -806,6 +814,7 @@ const outcome = await rekey.auth.completeOAuth('google', code);
 if (!outcome.mfaRequired && outcome.isNewUser) return redirect('/onboarding');
 ```
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // Next.js server actions (@rekey.dev/nextjs/server)
 const session = await signUp({ email, password });

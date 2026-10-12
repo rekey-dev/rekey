@@ -130,18 +130,18 @@ const TestSendBody = z.object({
 /** Every route here sits behind `requireTenantSession` (plugin `onRequest` hook). */
 const TENANT_SESSION_ERRORS = {
   401:
-    'TENANT_SESSION_MISSING — no `Authorization: Bearer <accessToken>` header; or ' +
-    'TENANT_SESSION_INVALID — the token is invalid, expired, or the operator account no ' +
+    'TENANT_SESSION_MISSING: no `Authorization: Bearer <accessToken>` header; or ' +
+    'TENANT_SESSION_INVALID: the token is invalid, expired, or the operator account no ' +
     'longer exists.',
-  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+  429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
 } as const;
 
 /** Errors from `ensureAppAccess(req, id, 'read')`. */
 const APP_READ_ERRORS = {
   ...TENANT_SESSION_ERRORS,
-  403: 'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace.',
+  403: 'TENANT_MEMBERSHIP_REVOKED: you are no longer a member of this workspace.',
   404:
-    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'APPLICATION_NOT_FOUND: no Application with that id in this workspace (also returned, ' +
     'without disclosing existence, when a MEMBER holds no grant on it).',
 };
 
@@ -149,18 +149,18 @@ const APP_READ_ERRORS = {
 const APP_WRITE_ERRORS = {
   ...TENANT_SESSION_ERRORS,
   403:
-    'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace; or ' +
-    'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (no application grants anywhere) cannot ' +
-    'write; or APP_ACCESS_DENIED — your application grant role does not allow this action ' +
+    'TENANT_MEMBERSHIP_REVOKED: you are no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT: a legacy MEMBER (no application grants anywhere) cannot ' +
+    'write; or APP_ACCESS_DENIED: your application grant role does not allow this action ' +
     '(requires APP_ADMIN).',
   404:
-    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'APPLICATION_NOT_FOUND: no Application with that id in this workspace (also returned, ' +
     'without disclosing existence, when a MEMBER holds no grant on it).',
 };
 
 /** `EMAIL_EVENT_UNKNOWN`, folded into the same 404 status as `APPLICATION_NOT_FOUND`. */
 const EMAIL_EVENT_UNKNOWN_DESC =
-  'EMAIL_EVENT_UNKNOWN — `eventKey` is not in the event registry (see GET .../email-templates).';
+  'EMAIL_EVENT_UNKNOWN: `eventKey` is not in the event registry (see GET .../email-templates).';
 
 /** One suppressed address, as the routes return it. */
 const EMAIL_SUPPRESSION = {
@@ -364,7 +364,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...APP_WRITE_ERRORS,
             404: `${APP_WRITE_ERRORS[404]}; or ${EMAIL_EVENT_UNKNOWN_DESC}`,
-            409: 'EMAIL_EVENT_REQUIRED_BY_AUTH_CONFIG — a live auth method depends on this email.',
+            409: 'EMAIL_EVENT_REQUIRED_BY_AUTH_CONFIG: a live auth method depends on this email.',
           }),
         },
       },
@@ -665,7 +665,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body does not match the discriminated `resend`/`smtp` ' +
+              'VALIDATION_ERROR: the body does not match the discriminated `resend`/`smtp` ' +
               'credential shape for the given (or defaulted) `provider`.',
             ...APP_WRITE_ERRORS,
           }),
@@ -977,7 +977,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
             'The saved template row (id + eventKey only).',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `subject`, `bodyHtml`, or `bodyText` failed schema validation.',
+            400: 'VALIDATION_ERROR: `subject`, `bodyHtml`, or `bodyText` failed schema validation.',
             ...APP_WRITE_ERRORS,
             404: `${APP_WRITE_ERRORS[404]}; or ${EMAIL_EVENT_UNKNOWN_DESC}`,
           }),
@@ -1121,11 +1121,11 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
             'The test send outcome.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `to` is missing or not a valid email.',
+            400: 'VALIDATION_ERROR: `to` is missing or not a valid email.',
             ...APP_WRITE_ERRORS,
             404: `${APP_WRITE_ERRORS[404]}; or ${EMAIL_EVENT_UNKNOWN_DESC}`,
             409:
-              'EMAIL_ADDRESS_SUPPRESSED — that address is on this Application’s suppression ' +
+              'EMAIL_ADDRESS_SUPPRESSED: that address is on this Application’s suppression ' +
               'list. A test send deliberately bypasses the master switch and the per-event ' +
               'switch, but never the suppression list: mailing a hard-bounced or complaining ' +
               'address again is how a sending domain gets blocked.',

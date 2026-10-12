@@ -28,14 +28,21 @@ import {
 } from '../applications/application-list.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
 import { assertMayMintScopes } from '../api-keys/elevated-scopes.js';
-import { serializePlans } from '../plans/plan-dto.js';
+import { serializePlans, withPrices } from '../plans/plan-dto.js';
 import { plansService } from '../plans/plans.service.js';
-import { couponsService } from '../coupons/coupons.service.js';
+import { PLAN_PRICE_JSON_SCHEMA, PlanPriceBody, assertNoRemovedPlanFields } from '../plans/plan-body.js';
+import { PLAN_LOCAL_PRICES, PLAN_LOCAL_PRICES_DESCRIPTION, PlanLocalPricesBody } from '../plans/local-prices.js';
+import { couponsTenantRoutes } from '../coupons/coupons.tenant.routes.js';
 import {
   billingCredentialsService,
   type BillingProviderName,
 } from '../billing/credentials.service.js';
-import { registerProviderWebhook } from '../billing/webhook-registration.js';
+import {
+  refreshWebhookAfterEdit,
+  registerProviderWebhook,
+  webhookStateBeforeEdit,
+  type WebhookRefresh,
+} from '../billing/webhook-registration.js';
 import {
   providerNameSchema,
   registryNames,
@@ -44,15 +51,18 @@ import {
   providerDescriptor,
 } from '../billing/providers/registry.js';
 import { billingStatsService } from '../billing/stats.service.js';
+import { subscriptionOwnPrice } from '../billing/subscription-price.js';
 import { unappliedPaymentsService } from '../billing/unapplied-payments.service.js';
 import { oauthService } from '../oauth/oauth.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { creditsService } from '../credits/credits.service.js';
+import { logCreditsGranted } from '../billing/money-events.js';
 import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { TENANT_PAYMENT_JSON_SCHEMA, TENANT_PAYMENT_SELECT, toTenantPayments } from '../billing/tenant-payments.js';
 import { listApiRequests } from '../../lib/request-log.js';
-import { CouponDiscountType, type LicenseKind } from '@prisma/client';
+import type { LicenseKind } from '@prisma/client';
 import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema, ONBOARDING_STATUSES, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema, onboardingStatus } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
@@ -74,6 +84,7 @@ import {
   ensureAppAccess,
   appAccessScope,
   redactApplicationForBilling,
+  withBillingDefaults,
   stripApplicationSecrets,
   type AppAccess,
 } from '../../lib/app-access.js';
@@ -87,7 +98,10 @@ import { refreshCorsOrigins } from '../../lib/cors-origins.js';
 import { mcpIssuer } from '../mcp/oauth.service.js';
 import { portalBaseOrigin } from '../../lib/portal-origins.js';
 import { eraseEndUser } from './end-user-erasure.service.js';
-import { withoutBanReason } from '../end-user-bans/end-user-bans.service.js';
+import { lockEndUser, withoutBanReason } from '../end-user-bans/end-user-bans.service.js';
+import { operatorActorOf } from '../end-user-bans/end-user-bans.routes.js';
+import { closeOpenCaseIn, operatorSupportActor } from '../support-cases/support-case-writes.js';
+import { lockDevices } from '../devices/devices.service.js';
 import { billingService } from '../billing/billing.service.js';
 import { subscriptionGrantsService } from '../billing/grant.service.js';
 import { isApplyStale, subscriptionImportService } from '../billing/import.service.js';
@@ -105,12 +119,13 @@ import {
 } from '../../lib/refresh-tokens.js';
 import { authService, deliverVerificationEmail } from '../auth/auth.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
-import { moneyAmount, positiveBoundedInt } from '../../lib/bounded-int.js';
+import { positiveBoundedInt } from '../../lib/bounded-int.js';
 import { ok, okPage, okArray, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 import { endUserListOrder } from '../end-users/list-order.js';
 import { mayReadRawIps, operatorIpProjection } from '../../lib/ip-mask.js';
 import { END_USER_LIST_FILTER_JSON_SCHEMA, EndUserListFilterQuery, endUserListWhere } from '../end-users/list-filters.js';
+import { billingEventsForExport, eraseEndUserFromBillingLog } from '../billing-log/index.js';
 
 const ImportRunBody = z.object({
   provider: z.string().min(1).max(40),
@@ -241,6 +256,7 @@ const GrantSubscriptionBody = z.object({
   organizationId: z.string().min(1).max(64).optional(),
   currentPeriodEnd: z.string().datetime().optional(),
   note: z.string().max(500).optional(),
+  currency: z.string().length(3).optional(),
 });
 
 /**
@@ -647,7 +663,6 @@ const OverridePatchBody = z.record(
 );
 const KeyIdParam = z.object({ id: z.string().min(1), keyId: z.string().min(1) });
 const PlanSlugParam = z.object({ id: z.string().min(1), slug: z.string().min(1) });
-const CouponCodeParam = z.object({ id: z.string().min(1), code: z.string().min(1) });
 
 const CreateAppBody = z.object({
   name: z.string().min(1).max(120),
@@ -666,15 +681,13 @@ const CreateKeyBody = z.object({
 const CreatePlanBody = z.object({
   slug: z.string().min(1).max(40),
   name: z.string().min(1).max(120),
-  amount: moneyAmount(),
-  currency: z.string().length(3).optional(),
+  price: PlanPriceBody.optional(),
   interval: z.enum(['MONTH', 'YEAR']).optional(),
   kind: z.enum(['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT']).optional(),
   licenseKind: z.enum(['PERPETUAL', 'TIMED', 'SEATS']).optional(),
   licenseSeatsAllowed: positiveBoundedInt().optional(),
   licenseDurationDays: positiveBoundedInt().optional(),
   meterSlug: z.string().min(1).max(40).optional(),
-  pricePerUnitCents: moneyAmount().optional(),
   creditsAmount: positiveBoundedInt().optional(),
   // Free trial length. Bounded at a year: a "trial" longer than that is a free
   // plan wearing a trial's name, and the bound stops a typo (365000) becoming
@@ -695,7 +708,7 @@ const CreatePlanBody = z.object({
  * with no repair at all: the slug was taken, so it could not be re-created, and
  * nothing on it could be corrected.
  *
- * Price fields are accepted HERE and refused in the service when the plan is
+ * `price` and `interval` are accepted HERE and refused in the service when the plan is
  * already registered (`PLAN_PRICE_IMMUTABLE`), the rule depends on stored
  * state, so it cannot live in a body schema.
  */
@@ -703,30 +716,17 @@ const UpdatePlanBody = z
   .object({
     active: z.boolean().optional(),
     name: z.string().min(1).max(120).optional(),
-    amount: z.number().int().min(0).optional(),
-    currency: z.string().length(3).optional(),
+    price: PlanPriceBody.nullable().optional(),
     interval: z.enum(['MONTH', 'YEAR']).optional(),
     // 0 removes the trial; null would need a different encoding through the
     // JSON schema, and "no trial" and "zero days of trial" are the same thing.
     trialDays: z.number().int().min(0).max(365).optional(),
+    localPrices: PlanLocalPricesBody.optional(),
     metadata: z.record(z.unknown()).optional(),
   })
   .refine((b) => Object.values(b).some((v) => v !== undefined), {
     message: 'Send at least one field to change.',
   });
-
-const CreateCouponBody = z.object({
-  code: z.string().min(1).max(40),
-  discountType: z.enum(['PERCENT', 'AMOUNT']),
-  amountOff: moneyAmount(),
-  currency: z.string().length(3).optional(),
-  planSlugs: z.array(z.string().min(1).max(40)).optional(),
-  startsAt: z.string().datetime().optional(),
-  endsAt: z.string().datetime().optional(),
-  maxRedemptions: positiveBoundedInt().optional(),
-  maxRedemptionsPerUser: positiveBoundedInt().optional(),
-});
-const CouponActiveBody = z.object({ active: z.boolean() });
 
 /** Mounted under /api/v1/tenant/applications. */
 
@@ -874,7 +874,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             const level = levelFor(a.id);
             const scopes = effectiveApplicationScopes(ctx, level);
             const summary = summaryFor(a.id);
-            const row = { ...a, access: { level, scopes: [...scopes].sort() }, ...(summary && { summary }) };
+            const row = { ...withBillingDefaults(a), access: { level, scopes: [...scopes].sort() }, ...(summary && { summary }) };
             return stripApplicationSecrets(
               scopes.has('auth-config:read') ? row : redactApplicationForBilling(row),
             );
@@ -921,7 +921,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'Slug availability. Never discloses which tenant owns a taken slug.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `slug` missing or outside 1-40 chars.',
+            400: 'VALIDATION_ERROR: `slug` missing or outside 1-40 chars.',
             ...TENANT_SESSION_ERRORS,
           }),
         },
@@ -1032,7 +1032,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // on the API side) so the panel shows the externally-reachable host, not
       // its own in-cluster REKEY_URL (e.g. http://api:3030).
       const data = {
-        ...application,
+        ...withBillingDefaults(application),
         mcpUrl: mcpIssuer(application.slug),
         portalBaseUrl: portalBaseOrigin(),
         // The capabilities the panel renders from. Computed from what the gate
@@ -1248,14 +1248,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           201: ok(ref('Application'), 'The created application.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — a field failed schema validation; or ' +
-              'APPLICATION_SLUG_INVALID — the slug is not URL-safe.',
+              'VALIDATION_ERROR: a field failed schema validation; or ' +
+              'APPLICATION_SLUG_INVALID: the slug is not URL-safe.',
             ...OWNER_ADMIN_ONLY_ERRORS,
             403:
               OWNER_ADMIN_ONLY_ERRORS[403] +
-              ' Or TENANT_QUOTA_EXCEEDED — creating a PRODUCTION application would exceed ' +
+              ' Or TENANT_QUOTA_EXCEEDED: creating a PRODUCTION application would exceed ' +
               "the workspace's `maxProductionApps`.",
-            409: 'APPLICATION_SLUG_TAKEN — another application already uses that slug (slugs are unique deployment-wide).',
+            409: 'APPLICATION_SLUG_TAKEN: another application already uses that slug (slugs are unique deployment-wide).',
           }),
         },
       },
@@ -1272,7 +1272,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       });
       return reply
         .status(201)
-        .send({ success: true, data: stripApplicationSecrets(created) });
+        .send({ success: true, data: stripApplicationSecrets(withBillingDefaults(created)) });
     },
   );
 
@@ -1313,11 +1313,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             ...OWNER_ONLY_ERRORS,
             403:
               OWNER_ONLY_ERRORS[403] +
-              ' Or TENANT_QUOTA_EXCEEDED — the workspace is already running its ' +
+              ' Or TENANT_QUOTA_EXCEEDED: the workspace is already running its ' +
               '`maxProductionApps` limit. Disabling a production application frees its slot.',
             409:
-              'ALREADY_PROMOTED — the application is already in the production environment; or ' +
-              'APPLICATION_DISABLED — the application is disabled and must be enabled before ' +
+              'ALREADY_PROMOTED: the application is already in the production environment; or ' +
+              'APPLICATION_DISABLED: the application is disabled and must be enabled before ' +
               'it can be promoted.',
           }),
         },
@@ -1335,7 +1335,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         metadata: { slug: promoted.slug },
       });
-      return { success: true, data: stripApplicationSecrets(promoted) };
+      return { success: true, data: stripApplicationSecrets(withBillingDefaults(promoted)) };
     },
   );
 
@@ -1379,7 +1379,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
         response: {
           200: ok(ref('Application'), 'The disabled application.'),
-          ...errs({ 400: 'VALIDATION_ERROR — `reason` failed schema validation.', ...OWNER_ONLY_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `reason` failed schema validation.', ...OWNER_ONLY_ERRORS }),
         },
       },
     },
@@ -1401,7 +1401,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         // incident; the security log records THAT one was given, not what it said.
         metadata: { slug: disabled.slug, reasonGiven: body.reason !== undefined },
       });
-      return { success: true, data: stripApplicationSecrets(disabled) };
+      return { success: true, data: stripApplicationSecrets(withBillingDefaults(disabled)) };
     },
   );
 
@@ -1435,7 +1435,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             ...OWNER_ONLY_ERRORS,
             403:
               OWNER_ONLY_ERRORS[403] +
-              ' Or TENANT_QUOTA_EXCEEDED — re-enabling this production application would ' +
+              ' Or TENANT_QUOTA_EXCEEDED: re-enabling this production application would ' +
               "exceed the workspace's `maxProductionApps`.",
           }),
         },
@@ -1453,7 +1453,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         metadata: { slug: enabled.slug },
       });
-      return { success: true, data: stripApplicationSecrets(enabled) };
+      return { success: true, data: stripApplicationSecrets(withBillingDefaults(enabled)) };
     },
   );
 
@@ -1560,14 +1560,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'ENTITLEMENT_OVERRIDE_INVALID — a key is malformed, a quantity-kind key names an ' +
+              'ENTITLEMENT_OVERRIDE_INVALID: a key is malformed, a quantity-kind key names an ' +
               'entitlement the plan does not carry, a value would be discarded at resolve ' +
               'time, or a quantity names a licence that has no seats (only a SEATS licence ' +
-              'has a seat count). The `fix` names which. Or VALIDATION_ERROR — the body is empty.',
+              'has a seat count). The `fix` names which. Or VALIDATION_ERROR: the body is empty.',
             ...APP_BILLING_WRITE_ERRORS,
             404:
               APP_BILLING_WRITE_ERRORS[404] +
-              ' Or SUBSCRIPTION_NOT_FOUND — no subscription with that id on this application.',
+              ' Or SUBSCRIPTION_NOT_FOUND: no subscription with that id on this application.',
           }),
         },
       },
@@ -1693,13 +1693,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       schema: {
         tags: ['Tenant · Applications'],
         security: [{ tenantSession: [] }],
-        summary: 'Toggle billing for an Application',
+        summary: 'Change the billing settings of an Application',
         description:
           'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.\n\n' +
-          'Master switch. When disabled, the public billing API (checkout, ' +
+          '`enabled` is the master switch. When disabled, the public billing API (checkout, ' +
           'subscriptions, coupons) returns 403 BILLING_DISABLED and the panel hides ' +
-          'the Billing group. Default off for new apps.',
+          'the Billing group. Default off for new apps.\n\n' +
+          'A change to `localPrices` or `onUnavailableCurrency` is written to the billing log as ' +
+          '`settings.local_prices_changed` or `settings.unavailable_currency_changed`, with the value ' +
+          'before and after. Sending the value a setting already has changes nothing and logs nothing.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -1707,6 +1710,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             enabled: { type: 'boolean' },
             dunningEnabled: { type: 'boolean', description: 'Failed-payment recovery: reminders (day 0/3/7) + day-14 auto-cancel for PAST_DUE subscriptions. Off by default; opt in per app.' },
             billingSubject: { type: 'string', enum: ['user', 'org'], description: 'Bill the individual end-user or their organization (owner+beneficiary).' },
+            localPrices: {
+              type: 'string',
+              enum: ['trusted', 'any'],
+              description:
+                "Which buyers a plan's local-currency price is offered to. `trusted` (the " +
+                'default) needs a country a secret key declared or a trusted proxy vouched for. ' +
+                '`any` also accepts a country the browser states, which lets a buyer choose ' +
+                'their price.',
+            },
+            onUnavailableCurrency: {
+              type: 'string',
+              enum: ['fallback', 'refuse'],
+              description:
+                'What a checkout does when the server names a `currency` no provider it can use is ' +
+                'able to charge, for a request that sends no `onUnavailableCurrency` of its own. ' +
+                "`fallback` (the default) charges the plan's default price and logs it. `refuse` " +
+                'answers BILLING_NO_PROVIDER_FOR_CURRENCY. A request that sends its own value wins. ' +
+                "It changes nothing else: a local price selected by the buyer's country always falls " +
+                'back, a subscriber is never moved off the currency they pay in, and a default price ' +
+                'nobody can charge is refused either way.',
+            },
             trialPolicy: {
               type: 'string',
               enum: ['once_per_application', 'once_per_plan', 'unlimited'],
@@ -1721,8 +1745,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               type: 'string',
               nullable: true,
               description:
-                'Free-tier fallback. Slug of an active plan costing nothing (`amount` 0, no ' +
-                '`pricePerUnitCents`) whose FEATURE flags and included ' +
+                'Free-tier fallback. Slug of an active plan costing nothing (`isFree` true) ' +
+                'whose FEATURE flags and included ' +
                 'usage quota apply on top of what a subscription grants: withheld for a key a ' +
                 'per-subscription entitlement override names, and otherwise able only to raise ' +
                 'a value, never to replace one. A SUBSCRIPTION or USAGE plan suppresses it ' +
@@ -1737,13 +1761,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'VALIDATION_ERROR — an unknown key or a field failed schema validation; or ' +
-              'DEFAULT_PLAN_NOT_FOUND — `defaultPlanSlug` does not match an active plan on this Application.',
+              'VALIDATION_ERROR: an unknown key or a field failed schema validation; or ' +
+              'DEFAULT_PLAN_NOT_FOUND: `defaultPlanSlug` does not match an active plan on this Application.',
             ...APP_WRITE_ERRORS,
             409:
               'BILLING_SUBJECT_CHANGE_BLOCKED: live subscriptions would be stranded by the new ' +
               '`billingSubject`; or BILLING_FREE_PLAN_NOT_FREE: `defaultPlanSlug` names a plan ' +
-              'with a nonzero `amount` or a `pricePerUnitCents`.',
+              'that is not free (`isFree` false: it has a price, or it is a USAGE plan).',
           }),
         },
       },
@@ -1764,6 +1788,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           dunningEnabled: z.boolean().optional(),
           billingSubject: z.enum(['user', 'org']).optional(),
           trialPolicy: z.enum(['once_per_application', 'once_per_plan', 'unlimited']).optional(),
+          localPrices: z.enum(['trusted', 'any']).optional(),
+          onUnavailableCurrency: z.enum(['fallback', 'refuse']).optional(),
           defaultPlanSlug: z.string().min(1).nullable().optional(),
         })
         .strict()
@@ -1803,7 +1829,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               statusCode: 409,
               code: 'BILLING_SUBJECT_CHANGE_BLOCKED',
               message: `${stranded} live ${kind} subscription${stranded === 1 ? '' : 's'} would be stranded by changing the billing subject.`,
-              fix: `Cancel or migrate the ${stranded} ${kind} subscription${stranded === 1 ? '' : 's'} first — they are listed under Billing → Payments and the end-user pages. The subject can be changed freely once none are live.`,
+              fix: `Cancel or migrate the ${stranded} ${kind} subscription${stranded === 1 ? '' : 's'} first. They are listed under Billing → Payments and the end-user pages. The subject can be changed freely once none are live.`,
             });
           }
         }
@@ -1811,6 +1837,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const updated = await applicationsService.updateBillingConfig({
         applicationId: id,
         patch: body,
+        operatorId: req.tenantUser!.id,
       });
       void recordSecurityEvent({
         type: 'app.billing_toggled',
@@ -1821,7 +1848,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         // Audit every field the operator actually changed, the route now
         // patches enabled / dunningEnabled / billingSubject / trialPolicy /
-        // defaultPlanSlug.
+        // localPrices / onUnavailableCurrency / defaultPlanSlug.
         metadata: { changed: Object.keys(body), ...body },
       });
       return { success: true, data: { billingConfig: updated.billingConfig } };
@@ -1897,10 +1924,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'API_KEY_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
-              'API_KEY_LIMIT_REACHED — the Application already has 25 active keys; or ' +
+              'API_KEY_EXPIRY_IN_PAST: `expiresAt` is not in the future; or ' +
+              'API_KEY_LIMIT_REACHED: the Application already has 25 active keys; or ' +
               'API_KEY_SCOPE_UNKNOWN: `scopes` names a scope no route enforces; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -1934,7 +1961,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           apiKey: result.apiKey,
           rawKey: result.rawKey,
           warning:
-            'Store this rawKey now — it is shown exactly once and cannot be recovered. Treat it like a database password.',
+            'Store this rawKey now. It is shown exactly once and cannot be recovered. Treat it like a database password.',
         },
       });
     },
@@ -1960,7 +1987,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           200: ok(ref('ApiKey'), 'The revoked key.'),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'API_KEY_NOT_FOUND — no key with that id on this Application; or ' + APP_WRITE_ERRORS[404],
+            404: 'API_KEY_NOT_FOUND: no key with that id on this Application; or ' + APP_WRITE_ERRORS[404],
           }),
         },
       },
@@ -1998,11 +2025,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Each plan carries a `checkout` object saying whether a buyer would actually get a ' +
           'checkout for it. A plan created before this Application had provider credentials was ' +
           'never registered and has no price behind it, and connecting the provider afterwards ' +
-          'does not repair it, `checkout.blockers` names the provider and the repair.',
+          'does not repair it, `checkout.blockers` names the provider and the repair.\n\n' +
+          'Each entry of `prices` says whether its amount can still be changed (`amountEditable`, ' +
+          'by the rule the routes that change an amount refuse with) and who is on it ' +
+          '(`liveSubscriptions`, `openCheckouts`: a price with either above 0 cannot be removed).',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           200: okPage(ref('Plan'), 'A page of Plans (active and inactive), newest first.'),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -2033,23 +2063,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Create a Plan',
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
-          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
+          '`price` is the plan\'s default price. Leave it out for a free plan, or for a USAGE ' +
+          'plan with no base fee. Prices in other currencies are added afterwards with ' +
+          '`PUT .../plans/{slug}/prices/{currency}`. The top-level `amount`, `currency` and ' +
+          '`pricePerUnitCents` were removed: a body that sends one is refused with ' +
+          '`BILLING_FIELD_REMOVED`.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
-          required: ['slug', 'name', 'amount'],
+          required: ['slug', 'name'],
           properties: {
             slug: { type: 'string', minLength: 1, maxLength: 40 },
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            amount: { type: 'integer', minimum: 0, maximum: 2147483647 },
-            currency: { type: 'string', minLength: 3, maxLength: 3 },
+            price: {
+              ...PLAN_PRICE_JSON_SCHEMA,
+              description: "The plan's default price. Left out, the plan has no flat price.",
+            },
             interval: { type: 'string', enum: ['MONTH', 'YEAR'] },
             kind: { type: 'string', enum: ['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT'] },
             licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
             licenseSeatsAllowed: { type: 'integer', minimum: 1, maximum: 2147483647 },
             licenseDurationDays: { type: 'integer', minimum: 1, maximum: 2147483647 },
             meterSlug: { type: 'string', minLength: 1, maxLength: 40 },
-            pricePerUnitCents: { type: 'integer', minimum: 0, maximum: 2147483647 },
             creditsAmount: { type: 'integer', minimum: 1, maximum: 2147483647 },
             trialDays: {
               type: 'integer',
@@ -2068,15 +2104,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           201: ok(ref('Plan'), 'The created plan.'),
           ...errs({
             400:
-              'PLAN_SLUG_INVALID — the slug is not URL-safe; or PLAN_AMOUNT_INVALID — `amount` ' +
-              'is negative; or PLAN_LICENSE_KIND_REQUIRED / PLAN_LICENSE_DURATION_REQUIRED / ' +
-              'PLAN_LICENSE_SEATS_REQUIRED — a LICENSE-kind plan is missing a required field; or ' +
-              'PLAN_USAGE_CONFIG_REQUIRED / PLAN_USAGE_METER_UNKNOWN — a USAGE-kind plan is ' +
-              'missing `meterSlug`/`pricePerUnitCents` or the meter does not exist; or ' +
-              'PLAN_CREDITS_AMOUNT_REQUIRED — a CREDIT-kind plan is missing `creditsAmount`; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'PLAN_SLUG_INVALID: the slug is not URL-safe; or BILLING_FIELD_REMOVED: the body ' +
+              'sends `amount`, `currency` or `pricePerUnitCents` at the top level; or ' +
+              'PLAN_PRICE_CURRENCY_INVALID / PLAN_PRICE_CURRENCY_UNSUPPORTED / ' +
+              'PLAN_PRICE_AMOUNT_INVALID: `price` names a currency or an amount a price cannot ' +
+              'have; or PLAN_LICENSE_KIND_REQUIRED / PLAN_LICENSE_DURATION_REQUIRED / ' +
+              'PLAN_LICENSE_SEATS_REQUIRED: a LICENSE-kind plan is missing a required field; or ' +
+              'PLAN_USAGE_CONFIG_REQUIRED / PLAN_USAGE_METER_UNKNOWN: a USAGE-kind plan is ' +
+              'missing `meterSlug` or the meter does not exist; or ' +
+              'PLAN_CREDITS_AMOUNT_REQUIRED: a CREDIT-kind plan is missing `creditsAmount`; or ' +
+              'VALIDATION_ERROR: a field failed schema validation.',
             ...APP_BILLING_WRITE_ERRORS,
-            409: 'PLAN_SLUG_TAKEN — another plan on this Application already uses that slug.',
+            409: 'PLAN_SLUG_TAKEN: another plan on this Application already uses that slug.',
           }),
         },
       },
@@ -2084,23 +2123,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req, reply) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'billing-write');
+      assertNoRemovedPlanFields(req.body, 'create');
       const body = CreatePlanBody.parse(req.body);
       const plan = await plansService.create({
         applicationId: id,
         slug: body.slug,
         name: body.name,
-        amount: body.amount,
-        ...(body.currency !== undefined && { currency: body.currency }),
+        ...(body.price !== undefined && { price: body.price }),
         ...(body.interval !== undefined && { interval: body.interval }),
         ...(body.kind !== undefined && { kind: body.kind }),
         ...(body.licenseKind !== undefined && { licenseKind: body.licenseKind }),
         ...(body.licenseSeatsAllowed !== undefined && { licenseSeatsAllowed: body.licenseSeatsAllowed }),
         ...(body.licenseDurationDays !== undefined && { licenseDurationDays: body.licenseDurationDays }),
         ...(body.meterSlug !== undefined && { meterSlug: body.meterSlug }),
-        ...(body.pricePerUnitCents !== undefined && { pricePerUnitCents: body.pricePerUnitCents }),
         ...(body.creditsAmount !== undefined && { creditsAmount: body.creditsAmount }),
         ...(body.trialDays !== undefined && { trialDays: body.trialDays }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
+        actor: { operatorId: req.tenantUser!.id },
       });
       // Pricing is money. A plan/coupon change with no trail means nobody can
       // answer "who moved this price, and when" during a billing dispute.
@@ -2111,9 +2150,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: id,
         ...requestContext(req),
-        metadata: { slug: plan.slug, name: plan.name, amount: plan.amount, currency: plan.currency, interval: plan.interval, kind: plan.kind },
+        metadata: {
+          slug: plan.slug,
+          name: plan.name,
+          price: plan.defaultPrice === null ? null : { currency: plan.defaultPrice.currency, amount: plan.defaultPrice.amount },
+          interval: plan.interval,
+          kind: plan.kind,
+        },
       });
-      return reply.status(201).send({ success: true, data: plan });
+      return reply.status(201).send({ success: true, data: await withPrices(plan) });
     },
   );
 
@@ -2128,11 +2173,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
           'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
-          'Send any subset of the fields. `amount`, `currency` and `interval` are only accepted ' +
+          'Send any subset of the fields. `price` and `interval` are only accepted ' +
           'while the plan has **not** been registered with a payment provider, a provider price ' +
           'object is immutable once minted, so a registered plan answers `PLAN_PRICE_IMMUTABLE` ' +
           'and must be retired and replaced instead. This is the repair path for a plan whose ' +
-          'registration was refused: correct it here, then `POST .../plans/{slug}/register`.\n\n' +
+          'registration was refused: correct it here, then `POST .../plans/{slug}/register`. ' +
+          'The top-level `amount`, `currency` and `pricePerUnitCents` were removed: a body that ' +
+          'sends one is refused with `BILLING_FIELD_REMOVED`.\n\n' +
+          '`localPrices` can change at any time, registered or not. A change is written to the ' +
+          'billing log as `plan.local_prices_changed`, with the value before and after; sending ' +
+          'the value the plan already has writes nothing.\n\n' +
           '`active: true` is refused with `PLAN_NOT_REGISTERED_WITH_PROVIDER` for a plan that has ' +
           'no provider price, publishing one puts a dead checkout on the pricing page.',
         params: {
@@ -2145,16 +2195,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: {
             active: { type: 'boolean' },
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            amount: {
-              type: 'integer',
-              minimum: 0,
-              description: 'Smallest currency unit. Unregistered plans only.',
-            },
-            currency: {
-              type: 'string',
-              minLength: 3,
-              maxLength: 3,
-              description: 'ISO 4217. Unregistered plans only.',
+            price: {
+              ...PLAN_PRICE_JSON_SCHEMA,
+              nullable: true,
+              description:
+                "The plan's default price. Null makes the plan free, which is refused with " +
+                'PLAN_PRICE_IS_DEFAULT while it has prices in other currencies. Unregistered plans only.',
             },
             interval: {
               type: 'string',
@@ -2171,14 +2217,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 'registration, unlike price: the trial is applied per checkout session ' +
                 'rather than baked into the immutable Price object. SUBSCRIPTION plans only.',
             },
+            localPrices: { type: 'string', enum: [...PLAN_LOCAL_PRICES], description: PLAN_LOCAL_PRICES_DESCRIPTION },
             metadata: { type: 'object', additionalProperties: true },
           },
         },
         response: {
-          200: ok(ref('Plan'), 'The plan, with `active` updated.'),
+          200: ok(ref('Plan'), 'The plan as it now stands.'),
           ...errs({
+            400:
+              'BAD_REQUEST: a field has the wrong type, or a value outside what its schema allows ' +
+              '(`interval`, `localPrices`); or VALIDATION_ERROR: no field was sent, or `price` ' +
+              'carries a key it does not take; or ' +
+              'BILLING_FIELD_REMOVED: the body sends `amount`, `currency` or `pricePerUnitCents` ' +
+              'at the top level; or PLAN_PRICE_CURRENCY_INVALID / PLAN_PRICE_CURRENCY_UNSUPPORTED / ' +
+              'PLAN_PRICE_AMOUNT_INVALID: `price` names a currency or an amount a price cannot have.',
             ...APP_BILLING_WRITE_ERRORS,
-            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+            404: 'PLAN_NOT_FOUND: no plan with that slug on this Application.',
+            409:
+              'PLAN_PRICE_IMMUTABLE: `price` or `interval` was sent for a plan a provider has ' +
+              'registered; or PLAN_PRICE_IS_DEFAULT: the new default currency is one the plan ' +
+              'already has an additional price in, or `price` is null while the plan has ' +
+              'additional prices; or PLAN_NOT_REGISTERED_WITH_PROVIDER: `active: true` on a plan ' +
+              'with no provider price.',
           }),
         },
       },
@@ -2186,18 +2246,19 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id, slug } = PlanSlugParam.parse(req.params);
       await ensureAppAccess(req, id, 'billing-write');
+      assertNoRemovedPlanFields(req.body, 'update');
       const body = UpdatePlanBody.parse(req.body);
       const updated = await plansService.update(id, slug, {
         ...(body.active !== undefined && { active: body.active }),
         ...(body.name !== undefined && { name: body.name }),
-        ...(body.amount !== undefined && { amount: body.amount }),
-        ...(body.currency !== undefined && { currency: body.currency }),
+        ...(body.price !== undefined && { price: body.price }),
         ...(body.interval !== undefined && { interval: body.interval }),
         // Never forwarded before, so `UpdatePlanBody` validated a field that
         // was then discarded one line later. 0 clears the trial.
         ...(body.trialDays !== undefined && { trialDays: body.trialDays }),
+        ...(body.localPrices !== undefined && { localPrices: body.localPrices }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
-      });
+      }, { operatorId: req.tenantUser!.id });
       void recordSecurityEvent({
         type: 'app.plan_updated',
         actorType: 'operator',
@@ -2209,7 +2270,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         // fields moved, not just that "a plan was updated".
         metadata: { slug, changed: Object.keys(body).sort(), ...(body.active !== undefined && { active: body.active }) },
       });
-      return { success: true, data: updated };
+      return { success: true, data: await withPrices(updated) };
     },
   );
 
@@ -2241,14 +2302,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               'succeeded, unchanged if it was already REGISTERED or NOT_REQUIRED.',
           ),
           ...errs({
-            400: 'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no stripe credentials configured.',
+            400: 'BILLING_CREDENTIALS_NOT_CONFIGURED: this Application has no stripe credentials configured.',
             ...APP_BILLING_WRITE_ERRORS,
             404:
-              'PLAN_NOT_FOUND — no plan with that slug on this Application; or ' +
+              'PLAN_NOT_FOUND: no plan with that slug on this Application; or ' +
               APP_BILLING_WRITE_ERRORS[404],
-            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
             502:
-              'BILLING_PROVIDER_ERROR — stripe rejected the registration attempt (only reachable ' +
+              'BILLING_PROVIDER_ERROR: stripe rejected the registration attempt (only reachable ' +
               'while the plan was PENDING/FAILED). The plan\'s registrationStatus is now FAILED ' +
               "with the provider's message attached (`registrationError`), and it stays off sale.",
           }),
@@ -2268,7 +2329,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         metadata: { slug, registrationStatus: plan.registrationStatus, active: plan.active },
       });
-      return { success: true, data: plan };
+      return { success: true, data: await withPrices(plan) };
     },
   );
 
@@ -2314,7 +2375,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+            404: 'PLAN_NOT_FOUND: no plan with that slug on this Application.',
           }),
         },
       },
@@ -2392,9 +2453,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The upserted entitlement (id/kind/key).',
           ),
           ...errs({
-            400: 'PLAN_ENTITLEMENT_INVALID — the field combination required for this `kind` is incomplete or invalid.',
+            400: 'PLAN_ENTITLEMENT_INVALID: the field combination required for this `kind` is incomplete or invalid.',
             ...APP_BILLING_WRITE_ERRORS,
-            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+            404: 'PLAN_NOT_FOUND: no plan with that slug on this Application.',
           }),
         },
       },
@@ -2467,8 +2528,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...errs({
             ...APP_BILLING_WRITE_ERRORS,
             404:
-              'PLAN_NOT_FOUND — no plan with that slug on this Application; or ' +
-              'PLAN_ENTITLEMENT_NOT_FOUND — no entitlement with that id on this plan.',
+              'PLAN_NOT_FOUND: no plan with that slug on this Application; or ' +
+              'PLAN_ENTITLEMENT_NOT_FOUND: no entitlement with that id on this plan.',
           }),
         },
       },
@@ -2493,178 +2554,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
   );
 
-  // ---------- Coupons ----------
-
-  app.get(
-    '/:id/coupons',
-    {
-      config: { access: { scope: 'billing:read' } },
-      schema: {
-        tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
-        summary: 'List Coupons (with redemption stats)',
-        description:
-          'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
-          'Each coupon carries `redemptionCount` and `totalDiscountIssued` (smallest ' +
-          'currency unit) aggregated from the redemptions table.',
-        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
-        response: {
-          200: okPage(
-            {
-              allOf: [
-                ref('Coupon'),
-                {
-                  type: 'object',
-                  properties: {
-                    redemptionCount: { type: 'integer' },
-                    totalDiscountIssued: {
-                      type: 'integer',
-                      description: 'Smallest currency unit, summed across redemptions.',
-                    },
-                  },
-                  required: ['redemptionCount', 'totalDiscountIssued'],
-                },
-              ],
-            },
-            'A page of coupons (active and inactive), each with redemption stats.',
-          ),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
-        },
-      },
-    },
-    async (req) => {
-      const { id } = AppParam.parse(req.params);
-      await ensureAppAccess(req, id, 'read');
-      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const [items, total] = await Promise.all([
-        couponsService.listWithStats(id, true, { take, skip }),
-        couponsService.count(id, true),
-      ]);
-      return { success: true, data: paged(items, total, take, skip) };
-    },
-  );
-
-  app.post(
-    '/:id/coupons',
-    {
-      // Generic Idempotency-Key header support (scoped to the workspace).
-      config: { access: { scope: 'billing:write' }, idempotency: true },
-      schema: {
-        tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
-        summary: 'Create a Coupon',
-        description:
-          'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
-          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
-        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-        body: {
-          type: 'object',
-          required: ['code', 'discountType', 'amountOff'],
-          properties: {
-            code: { type: 'string', minLength: 1, maxLength: 40 },
-            discountType: { type: 'string', enum: ['PERCENT', 'AMOUNT'] },
-            amountOff: { type: 'integer', minimum: 0, maximum: 2147483647 },
-            currency: { type: 'string', minLength: 3, maxLength: 3 },
-            planSlugs: { type: 'array', items: { type: 'string' } },
-            startsAt: { type: 'string', format: 'date-time' },
-            endsAt: { type: 'string', format: 'date-time' },
-            maxRedemptions: { type: 'integer', minimum: 1, maximum: 2147483647 },
-            maxRedemptionsPerUser: { type: 'integer', minimum: 1, maximum: 2147483647 },
-          },
-        },
-        response: {
-          201: ok(ref('Coupon'), 'The created coupon.'),
-          ...errs({
-            400:
-              'COUPON_CODE_INVALID — the code is not 1-40 alphanumerics/underscores/hyphens; or ' +
-              'COUPON_AMOUNT_INVALID — `amountOff` is negative, or a PERCENT discount exceeds ' +
-              '10000 basis points (100%); or COUPON_CURRENCY_REQUIRED: an AMOUNT coupon was ' +
-              'sent without `currency`; or COUPON_CURRENCY_INVALID: `currency` is not an ISO 4217 code; or VALIDATION_ERROR — a field failed schema validation.',
-            ...APP_BILLING_WRITE_ERRORS,
-            409: 'COUPON_CODE_TAKEN — another coupon on this Application already uses that code.',
-          }),
-        },
-      },
-    },
-    async (req, reply) => {
-      const { id } = AppParam.parse(req.params);
-      await ensureAppAccess(req, id, 'billing-write');
-      const body = CreateCouponBody.parse(req.body);
-      const coupon = await couponsService.create({
-        applicationId: id,
-        code: body.code,
-        discountType: body.discountType as CouponDiscountType,
-        amountOff: body.amountOff,
-        ...(body.currency !== undefined && { currency: body.currency }),
-        ...(body.planSlugs !== undefined && { planSlugs: body.planSlugs }),
-        ...(body.startsAt !== undefined && { startsAt: new Date(body.startsAt) }),
-        ...(body.endsAt !== undefined && { endsAt: new Date(body.endsAt) }),
-        ...(body.maxRedemptions !== undefined && { maxRedemptions: body.maxRedemptions }),
-        ...(body.maxRedemptionsPerUser !== undefined && {
-          maxRedemptionsPerUser: body.maxRedemptionsPerUser,
-        }),
-      });
-      void recordSecurityEvent({
-        type: 'app.coupon_created',
-        actorType: 'operator',
-        actorId: req.tenantUser!.id,
-        tenantId: req.tenantId!,
-        applicationId: id,
-        ...requestContext(req),
-        metadata: { code: coupon.code, discountType: coupon.discountType, amountOff: coupon.amountOff, currency: coupon.currency },
-      });
-      return reply.status(201).send({ success: true, data: coupon });
-    },
-  );
-
-  app.patch(
-    '/:id/coupons/:code',
-    {
-      config: { access: { scope: 'billing:write' } },
-      schema: {
-        tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
-        summary: 'Toggle a Coupon\'s active flag',
-        description:
-          'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
-          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
-        params: {
-          type: 'object',
-          properties: { id: { type: 'string' }, code: { type: 'string' } },
-          required: ['id', 'code'],
-        },
-        body: {
-          type: 'object',
-          required: ['active'],
-          properties: { active: { type: 'boolean' } },
-        },
-        response: {
-          200: ok(ref('Coupon'), 'The coupon, with `active` updated.'),
-          ...errs({
-            ...APP_BILLING_WRITE_ERRORS,
-            404: 'COUPON_NOT_FOUND — no coupon with that code on this Application.',
-          }),
-        },
-      },
-    },
-    async (req) => {
-      const { id, code } = CouponCodeParam.parse(req.params);
-      await ensureAppAccess(req, id, 'billing-write');
-      const body = CouponActiveBody.parse(req.body);
-      const updated = await couponsService.setActive(id, code, body.active);
-      void recordSecurityEvent({
-        type: 'app.coupon_updated',
-        actorType: 'operator',
-        actorId: req.tenantUser!.id,
-        tenantId: req.tenantId!,
-        applicationId: id,
-        ...requestContext(req),
-        metadata: { code, active: body.active },
-      });
-      return { success: true, data: updated };
-    },
-  );
+  await app.register(couponsTenantRoutes);
 
   // ---------- Billing credentials (BYO, per-provider) ----------
   //
@@ -2716,6 +2606,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                       label: { type: 'string' },
                       docsUrl: { type: 'string', format: 'uri' },
                       defaultCountries: { type: 'array', items: { type: 'string' } },
+                      supportedCurrencies: {
+                        description: "Every currency this provider can charge, or 'all-sellable' for every currency a price may be in.",
+                        oneOf: [
+                          { type: 'array', items: { type: 'string' } },
+                          { type: 'string', enum: ['all-sellable'] },
+                        ],
+                      },
+                      preselectedCurrencies: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'What an account usually charges. A credential row saved without `currencies` starts with these. Never empty.',
+                      },
                       priority: { type: 'integer' },
                       capabilities: {
                         type: 'object',
@@ -2759,14 +2661,21 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                           enabled: { type: 'boolean' },
                           mode: { type: 'string', enum: ['test', 'live'] },
                           countries: { type: 'array', items: { type: 'string' } },
+                          currencies: { type: 'array', items: { type: 'string' }, description: 'Currencies this account can charge. Empty means none: the provider is not used for any checkout.' },
+                          unsupportedCurrencies: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description:
+                              'The stored currencies this provider cannot charge at all. Routing skips them. Remove them and save.',
+                          },
                           priority: { type: 'integer' },
                           webhookConfigured: { type: 'boolean' },
                         },
-                        required: ['enabled', 'mode', 'countries', 'priority', 'webhookConfigured'],
+                        required: ['enabled', 'mode', 'countries', 'unsupportedCurrencies', 'priority', 'webhookConfigured'],
                       },
                     },
                     required: [
-                      'name', 'label', 'docsUrl', 'defaultCountries', 'priority',
+                      'name', 'label', 'docsUrl', 'defaultCountries', 'supportedCurrencies', 'preselectedCurrencies', 'priority',
                       'capabilities', 'credentialFields', 'configured', 'status',
                     ],
                   },
@@ -2800,6 +2709,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                       enabled: row.enabled,
                       mode: row.mode,
                       countries: row.countries,
+                      currencies: row.currencies,
+                      unsupportedCurrencies: row.unsupportedCurrencies,
                       priority: row.priority,
                       webhookConfigured: row.webhookConfigured,
                     },
@@ -2834,10 +2745,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 enabled: { type: 'boolean' },
                 mode: { type: 'string', enum: ['test', 'live'] },
                 countries: { type: 'array', items: { type: 'string' } },
+                currencies: { type: 'array', items: { type: 'string' }, description: 'Currencies this account can charge. Empty means none: the provider is not used for any checkout.' },
+                unsupportedCurrencies: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'The stored currencies this provider cannot charge at all. Routing skips them. Remove them and save.',
+                },
                 priority: { type: 'integer' },
                 webhookConfigured: { type: 'boolean' },
               },
-              required: ['provider', 'configured', 'enabled', 'mode', 'countries', 'priority', 'webhookConfigured'],
+              required: ['provider', 'configured', 'enabled', 'mode', 'countries', 'unsupportedCurrencies', 'priority', 'webhookConfigured'],
             },
             // Bounded by construction: at most one row per registered provider (3 today).
             'Providers configured for this Application. Never includes credential values.',
@@ -2871,10 +2788,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               (n) =>
                 `  ${n} → { data: { ${getModule(n)!
                   .credentialSchema.map((f) => f.key)
-                  .join(', ')} }, countries?, priority?, enabled? }`,
+                  .join(', ')} }, countries?, currencies?, priority?, enabled? }`,
             )
             .join('\n') +
           '\n\n' +
+          '`currencies` is the list this account charges, from the provider\'s `supportedCurrencies`. ' +
+          'Left out when the provider is first saved, it starts as the provider\'s `preselectedCurrencies`; ' +
+          'left out on a later save, the stored list is kept. An empty list is stored as it is and ' +
+          'means none: the provider is not used for any checkout.\n\n' +
           'Credentials are AES-256-GCM encrypted at rest. There is no GET that returns plaintext.',
         params: {
           type: 'object',
@@ -2891,17 +2812,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               properties: {
                 configured: { type: 'boolean', enum: [true] },
                 provider: { type: 'string', enum: registryNames },
+                webhook: {
+                  type: 'string',
+                  enum: ['unchanged', 'reconfigured', 'failed'],
+                  description:
+                    'What happened to an already-registered webhook. `reconfigured`: the secrets or ' +
+                    'mode changed, so it was registered again with the new credentials. `failed`: ' +
+                    'that registration was refused, and the stored webhook is left as it was; call ' +
+                    'register-webhook once the credentials are right.',
+                },
               },
-              required: ['configured', 'provider'],
+              required: ['configured', 'provider', 'webhook'],
             },
             'Confirmation, credential values are never echoed back.',
           ),
           ...errs({
             400:
-              'BILLING_CREDENTIALS_INVALID — a required field is missing or fails the ' +
-              "provider's pattern rule; or BILLING_CREDENTIALS_MODE_CONTRADICTED — the key " +
+              'BILLING_CREDENTIALS_INVALID: a required field is missing or fails the ' +
+              "provider's pattern rule; or BILLING_CREDENTIALS_MODE_CONTRADICTED: the key " +
               'material states a mode that contradicts the submitted `mode`; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'BILLING_PROVIDER_CURRENCY_NOT_OFFERED: `currencies` names a code this provider cannot charge at all; or ' +
+              'VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -2923,6 +2854,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({
           data: credentialDataSchema(module),
           countries: z.array(z.string().length(2)).optional(),
+          currencies: z.array(z.string().regex(/^[A-Za-z]{3}$/)).max(200).optional(),
           priority: z.number().int().min(0).max(1000).optional(),
           enabled: z.boolean().optional(),
           mode: z.enum(['test', 'live']).optional(),
@@ -2930,10 +2862,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .parse(req.body);
       const opts: Parameters<typeof billingCredentialsService.upsertCredentials>[3] = {};
       if (body.countries !== undefined) opts.countries = body.countries;
+      if (body.currencies !== undefined) opts.currencies = body.currencies;
       if (body.priority !== undefined) opts.priority = body.priority;
       if (body.enabled !== undefined) opts.enabled = body.enabled;
       if (body.mode !== undefined) opts.mode = body.mode;
+      opts.operatorId = req.tenantUser!.id;
+      const application = await applicationsService.get(params.id, { tenantId: req.tenantId! });
+      const before = await webhookStateBeforeEdit(params.id, provider);
       await billingCredentialsService.upsertCredentials(params.id, provider, body.data, opts);
+      const webhook = await refreshWebhookAfterEdit(params.id, provider, application.slug, before, body.data);
 
       // Audit the credential mutation, provider secrets are highly sensitive.
       // Never log the secret material itself, only that it was set/rotated.
@@ -2944,10 +2881,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: params.id,
         ...requestContext(req),
-        metadata: { provider: params.provider, action: 'upsert' },
+        metadata: { provider: params.provider, action: 'upsert', webhook },
       });
 
-      return { success: true, data: { configured: true, provider: params.provider } };
+      return { success: true, data: { configured: true, provider: params.provider, webhook } };
     },
   );
 
@@ -2975,6 +2912,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: {
             enabled: { type: 'boolean' },
             countries: { type: 'array', items: { type: 'string', minLength: 2, maxLength: 2 } },
+            currencies: { type: 'array', items: { type: 'string', pattern: '^[A-Za-z]{3}$' }, description: 'Currencies this account can charge. Empty means none: the provider is not used for any checkout.' },
             priority: { type: 'integer', minimum: 0, maximum: 1000 },
             mode: { type: 'string', enum: ['test', 'live'] },
           },
@@ -2983,19 +2921,31 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           200: ok(
             {
               type: 'object',
-              properties: { provider: { type: 'string', enum: registryNames } },
-              required: ['provider'],
+              properties: {
+                provider: { type: 'string', enum: registryNames },
+                webhook: {
+                  type: 'string',
+                  enum: ['unchanged', 'reconfigured', 'failed'],
+                  description:
+                    'What happened to an already-registered webhook. `reconfigured`: the secrets or ' +
+                    'mode changed, so it was registered again with the new credentials. `failed`: ' +
+                    'that registration was refused, and the stored webhook is left as it was; call ' +
+                    'register-webhook once the credentials are right.',
+                },
+              },
+              required: ['provider', 'webhook'],
             },
             'Confirmation.',
           ),
           ...errs({
             400:
-              'BILLING_CREDENTIALS_MODE_CONTRADICTED — the stored key material states a mode ' +
-              'that contradicts the submitted `mode`; or VALIDATION_ERROR — a field failed schema validation.',
+              'BILLING_CREDENTIALS_MODE_CONTRADICTED: the stored key material states a mode ' +
+              'that contradicts the submitted `mode`; or BILLING_PROVIDER_CURRENCY_NOT_OFFERED: `currencies` ' +
+              'names a code this provider cannot charge at all; or VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
             404:
               APP_WRITE_ERRORS[404] +
-              ' Or BILLING_CREDENTIALS_NOT_CONFIGURED — `mode` was sent but no credentials are stored for this provider yet.',
+              ' Or BILLING_CREDENTIALS_NOT_CONFIGURED: `mode` was sent but no credentials are stored for this provider yet.',
           }),
         },
       },
@@ -3010,15 +2960,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({
           enabled: z.boolean().optional(),
           countries: z.array(z.string().length(2)).optional(),
+          currencies: z.array(z.string().regex(/^[A-Za-z]{3}$/)).max(200).optional(),
           priority: z.number().int().min(0).max(1000).optional(),
           mode: z.enum(['test', 'live']).optional(),
         })
         .parse(req.body);
+      // First, because it is the one edit here that can be refused for what
+      // was sent, and a refused request must not have applied half of itself.
+      if (body.currencies !== undefined) {
+        await billingCredentialsService.setCurrencies(params.id, provider, body.currencies, req.tenantUser!.id);
+      }
       if (body.enabled !== undefined) {
         await billingCredentialsService.setEnabled(params.id, provider, body.enabled);
       }
+      let webhook: WebhookRefresh = 'unchanged';
       if (body.mode !== undefined) {
+        const application = await applicationsService.get(params.id, { tenantId: req.tenantId! });
+        const before = await webhookStateBeforeEdit(params.id, provider);
         await billingCredentialsService.setMode(params.id, provider, body.mode);
+        webhook = await refreshWebhookAfterEdit(params.id, provider, application.slug, before);
       }
       if (body.countries !== undefined || body.priority !== undefined) {
         await billingCredentialsService.setRouting(
@@ -3035,9 +2995,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: params.id,
         ...requestContext(req),
-        metadata: { provider: params.provider, action: 'patch', changed: Object.keys(body) },
+        metadata: { provider: params.provider, action: 'patch', changed: Object.keys(body), webhook },
       });
-      return { success: true, data: { provider: params.provider } };
+      return { success: true, data: { provider: params.provider, webhook } };
     },
   );
 
@@ -3136,12 +3096,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'BILLING_WEBHOOK_BASE_NOT_PUBLIC — PUBLIC_WEBHOOK_BASE_URL/API_URL is not a ' +
-              'public URL; or BILLING_CREDENTIALS_NOT_CONFIGURED — save provider credentials ' +
-              'first; or BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED — this provider (Razorpay) has ' +
+              'BILLING_WEBHOOK_BASE_NOT_PUBLIC: PUBLIC_WEBHOOK_BASE_URL/API_URL is not a ' +
+              'public URL; or BILLING_CREDENTIALS_NOT_CONFIGURED: save provider credentials ' +
+              'first; or BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED: this provider (Razorpay) has ' +
               'no auto-register API.',
             ...APP_WRITE_ERRORS,
-            502: 'BILLING_WEBHOOK_REGISTRATION_FAILED — the provider API rejected the registration call.',
+            502: 'BILLING_WEBHOOK_REGISTRATION_FAILED: the provider API rejected the registration call.',
           }),
         },
       },
@@ -3202,7 +3162,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
             'A page of inbound provider webhook events, newest first.',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -3267,8 +3227,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
-          'Subscription counters (active, past-due, canceled/new in the last 30 days), MRR ' +
-          '(ACTIVE recurring SUBSCRIPTION plans, yearly normalized to monthly), 30-day payment ' +
+          'Subscription counters (active, past-due, canceled/new in the last 30 days, and ' +
+          '`unpricedLiveSubscriptions`: live subscriptions on a plan that has a flat price which ' +
+          'record no price of their own, zero on a healthy Application), MRR ' +
+          '(ACTIVE recurring SUBSCRIPTION plans, each subscription at its own price and one ' +
+          'with no price not counted, yearly normalized to monthly), 30-day payment ' +
           'volume + success/failure counts, and a 12-month UTC monthly revenue series. ' +
           'All amounts are in the smallest currency unit.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -3301,6 +3264,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Operator view of every Payment row, subscription invoices and one-time charges. ' +
           'Filter by `status` and a `from`/`to` createdAt window. Joined with the paying ' +
           "end-user's email where the payment is attributable to one. " +
+          'Each row says whether it is `refundable` through Rekey and, when it is not, the `refundBlockedReason`: ' +
+          'the judgement the refund route makes before it asks a provider. ' +
           'Sort with `?sort=createdAt|amount|status&order=asc|desc` (default createdAt desc).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: {
@@ -3316,33 +3281,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
         response: {
           200: okPage(
-            {
-              type: 'object',
-              properties: {
-                id: { type: 'string' },
-                endUserId: { type: 'string', nullable: true },
-                subscriptionId: { type: 'string', nullable: true },
-                amount: { type: 'integer' },
-                currency: { type: 'string' },
-                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
-                refundedAmount: {
-                  type: 'integer',
-                  description: 'Cumulative amount refunded so far, smallest currency unit.',
-                },
-                providerPaymentId: { type: 'string', nullable: true },
-                description: { type: 'string', nullable: true },
-                createdAt: { type: 'string', format: 'date-time' },
-                endUserEmail: {
-                  type: 'string',
-                  nullable: true,
-                  description: 'Joined from EndUser; null when the payment is not attributable to one.',
-                },
-              },
-              required: ['id', 'amount', 'currency', 'status', 'createdAt', 'endUserEmail'],
-            },
+            TENANT_PAYMENT_JSON_SCHEMA,
             'A page of payments, sorted per `?sort`/`?order` (default createdAt desc).',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -3380,18 +3322,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const [payments, total] = await Promise.all([
         prisma.payment.findMany({
           where,
-          select: {
-            id: true,
-            endUserId: true,
-            subscriptionId: true,
-            amount: true,
-            currency: true,
-            refundedAmount: true,
-            status: true,
-            providerPaymentId: true,
-            description: true,
-            createdAt: true,
-          },
+          select: TENANT_PAYMENT_SELECT,
           // Stable secondary order by id so pages never overlap/skip when many
           // rows share the same sort value (e.g. equal amounts).
           orderBy: [primaryOrder, { id: 'desc' }],
@@ -3400,29 +3331,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         }),
         prisma.payment.count({ where }),
       ]);
-      // Payment has no Prisma relation to EndUser (endUserId is a plain
-      // column), join the email with a second bounded query.
-      const userIds = [...new Set(payments.map((p) => p.endUserId).filter((v): v is string => v !== null))];
-      const users = userIds.length
-        ? await prisma.endUser.findMany({
-            where: { id: { in: userIds } },
-            select: { id: true, email: true },
-          })
-        : [];
-      const emailById = new Map(users.map((u) => [u.id, u.email]));
-      return {
-        success: true,
-        data: paged(
-          payments.map((p) => ({
-            ...p,
-            endUserEmail: p.endUserId ? (emailById.get(p.endUserId) ?? null) : null,
-            createdAt: p.createdAt.toISOString(),
-          })),
-          total,
-          take,
-          skip,
-        ),
-      };
+      return { success: true, data: paged(await toTenantPayments(id, payments), total, take, skip) };
     },
   );
 
@@ -3484,7 +3393,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
         response: {
           200: okPage(unappliedRowSchema, 'A page of unapplied payments, oldest first.'),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit`/`offset` out of range, or an invalid `status`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -3540,12 +3449,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           200: ok(unappliedRowSchema, 'The resolved case.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `amount` above what remains unrefunded.',
+            400: 'VALIDATION_ERROR: `amount` above what remains unrefunded.',
             409:
-              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — resolving twice would refund twice. ' +
-              'BILLING_REFUND_UNSUPPORTED / BILLING_PAYMENT_NOT_REFUNDABLE — no refund route for this charge. ' +
-              'BILLING_REFUND_WINDOW_CLOSED — the provider will not refund a charge this old. ' +
-              'BILLING_PAYMENT_ALREADY_REFUNDED — the provider says it is already fully refunded.',
+              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED: resolving twice would refund twice. ' +
+              'BILLING_REFUND_UNSUPPORTED / BILLING_PAYMENT_NOT_REFUNDABLE: no refund route for this charge. ' +
+              'BILLING_REFUND_WINDOW_CLOSED: the provider will not refund a charge this old. ' +
+              'BILLING_PAYMENT_ALREADY_REFUNDED: the provider says it is already fully refunded.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -3606,11 +3515,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           200: ok(unappliedRowSchema, 'The resolved case.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `days` missing or out of range.',
+            400: 'VALIDATION_ERROR: `days` missing or out of range.',
             409:
-              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — resolving twice would grant twice. ' +
-              'UNAPPLIED_PAYMENT_UNATTRIBUTED — Rekey does not know which customer paid. ' +
-              'UNAPPLIED_PAYMENT_NO_SUBSCRIPTION — that customer has nothing to extend.',
+              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED: resolving twice would grant twice. ' +
+              'UNAPPLIED_PAYMENT_UNATTRIBUTED: Rekey does not know which customer paid. ' +
+              'UNAPPLIED_PAYMENT_NO_SUBSCRIPTION: that customer has nothing to extend.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -3666,8 +3575,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           200: ok(unappliedRowSchema, 'The resolved case.'),
           ...errs({
-            400: 'VALIDATION_ERROR — `note` missing or empty.',
-            409: 'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — the case is not open.',
+            400: 'VALIDATION_ERROR: `note` missing or empty.',
+            409: 'UNAPPLIED_PAYMENT_ALREADY_RESOLVED: the case is not open.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -3742,7 +3651,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
             'A page of dunning cases, sorted per `?sort`/`?order` (default openedAt desc).',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -3861,7 +3770,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'Confirmation, clientSecret is never echoed back.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `provider` unsupported, or a field failed schema validation.',
+            400: 'VALIDATION_ERROR: `provider` unsupported, or a field failed schema validation.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -3930,7 +3839,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'Confirmation. Idempotent, removing an already-unconfigured provider still 200s.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `provider` unsupported.',
+            400: 'VALIDATION_ERROR: `provider` unsupported.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -4157,14 +4066,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           // return type doesn't preserve individual literals. This 409 is also hand-built in the
           // handler's catch block, bypassing the normal RekeyError path, it omits `requestId`
           // (present on every other error this API returns). See the final report.
-          409: errs({ 409: 'EMAIL_ALREADY_EXISTS — another end-user in this Application already uses that email.' })[409],
+          409: errs({ 409: 'EMAIL_ALREADY_EXISTS: another end-user in this Application already uses that email.' })[409],
           ...errs({
             400:
-              'METADATA_TOO_LARGE — `metadata` exceeds the size limit; or ' +
-              'END_USER_ROLE_UNKNOWN — `role` is not defined for this Application; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'METADATA_TOO_LARGE: `metadata` exceeds the size limit; or ' +
+              'END_USER_ROLE_UNKNOWN: `role` is not defined for this Application; or ' +
+              'VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
-            403: APP_WRITE_ERRORS[403] + ' Or TENANT_QUOTA_EXCEEDED — the workspace end-user limit is reached.',
+            403: APP_WRITE_ERRORS[403] + ' Or TENANT_QUOTA_EXCEEDED: the workspace end-user limit is reached.',
           }),
         },
       },
@@ -4337,7 +4246,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -4468,14 +4377,26 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                           slug: { type: 'string' },
                           name: { type: 'string' },
                           kind: { type: 'string' },
-                          amount: { type: 'integer' },
-                          currency: { type: 'string' },
                           interval: { type: 'string', nullable: true },
                         },
-                        required: ['slug', 'name', 'kind', 'amount', 'currency'],
+                        required: ['slug', 'name', 'kind'],
+                      },
+                      price: {
+                        type: 'object',
+                        nullable: true,
+                        description:
+                          'What this subscription costs: the price its checkout, grant or import ' +
+                          "fixed, which can be in another currency than the plan's default. Null " +
+                          "for a subscription with no price of its own; the plan's is never " +
+                          'reported in its place.',
+                        properties: {
+                          amount: { type: 'integer', description: 'Integer, minor units of `currency` (cents for USD, whole yen for JPY).' },
+                          currency: { type: 'string', description: 'ISO 4217 code.' },
+                        },
+                        required: ['amount', 'currency'],
                       },
                     },
-                    required: ['id', 'status', 'provider', 'createdAt', 'plan'],
+                    required: ['id', 'status', 'provider', 'createdAt', 'plan', 'price'],
                   },
                 },
                 payments: {
@@ -4526,7 +4447,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -4560,7 +4481,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             // needs to show the current state next to the form.
             entitlementOverrides: true,
             createdAt: true,
-            plan: { select: { slug: true, name: true, kind: true, amount: true, currency: true, interval: true } },
+            currency: true,
+            unitAmount: true,
+            plan: { select: { slug: true, name: true, kind: true, interval: true } },
           },
           orderBy: { createdAt: 'desc' },
           take: 100,
@@ -4600,8 +4523,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       return {
         success: true,
         data: {
-          subscriptions: subscriptions.map((s) => ({
+          subscriptions: subscriptions.map(({ currency, unitAmount, ...s }) => ({
             ...s,
+            price: subscriptionOwnPrice({ currency, unitAmount }),
             currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null,
             cancelAt: s.cancelAt?.toISOString() ?? null,
             canceledAt: s.canceledAt?.toISOString() ?? null,
@@ -4663,11 +4587,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'METADATA_TOO_LARGE — `metadata` exceeds the size limit; or ' +
-              'END_USER_ROLE_UNKNOWN — `role` is not defined for this Application; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'METADATA_TOO_LARGE: `metadata` exceeds the size limit; or ' +
+              'END_USER_ROLE_UNKNOWN: `role` is not defined for this Application; or ' +
+              'VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -4772,7 +4696,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'subscriptions, licenses, the credit ledger and usage. It is unrecoverable and it ' +
           'destroys the accounting record. An erasure (`?erasure=true`) tombstones the account and ' +
           '**retains** those rows, anonymized, it is what a data-subject request actually asks ' +
-          'for, and the one to reach for.',
+          'for, and the one to reach for. Both forms close an open support case (cause `erased`), ' +
+          "remove the operator's reason from every support case on the account and delete the cases' notes.",
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, euid: { type: 'string' } },
@@ -4817,10 +4742,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...errs({
             403:
               APP_WRITE_ERRORS[403] +
-              ' Or TENANT_ROLE_INSUFFICIENT — both forms require the workspace OWNER role (no grant unlocks either, and ADMIN does not).',
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+              ' Or TENANT_ROLE_INSUFFICIENT: both forms require the workspace OWNER role (no grant unlocks either, and ADMIN does not).',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
             401: APP_WRITE_ERRORS[401],
-            502: 'PROVIDER_CANCEL_FAILED — a plain delete (not erasure) is refused when the billing provider will not cancel the end-user\'s active subscription (avoids leaving a live charge behind).',
+            502: 'PROVIDER_CANCEL_FAILED: a plain delete (not erasure) is refused when the billing provider will not cancel the end-user\'s active subscription (avoids leaving a live charge behind).',
           }),
         },
       },
@@ -4977,12 +4902,37 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
       // `user.deleted` commits with the delete (see below).
       const deliveryIds = await prisma.$transaction(async (tx) => {
+        // Support cases outlive the row (they have no foreign key to it), so
+        // an open one would stay open with nobody able to end it, and would
+        // pin its capability names in the catalogue. Closed as erasure closes
+        // it, under the end-user lock a case is opened under, and the
+        // operators' free text about this person (reason and notes) goes with
+        // the account.
+        await lockEndUser(tx, params.id, params.euid);
+        // Before the case lock, as a release or block takes them, so the
+        // cascade onto this user's devices cannot deadlock with one.
+        await lockDevices(tx, params.id, params.euid);
+        const supportDeliveryIds = await closeOpenCaseIn(tx, {
+          applicationId: params.id,
+          endUserId: params.euid,
+          cause: 'erased',
+          actor: operatorSupportActor(operatorActorOf(req)),
+        });
+        await tx.supportCase.updateMany({
+          where: { applicationId: params.id, endUserId: params.euid, reason: { not: null } },
+          data: { reason: null },
+        });
+        await tx.supportCaseNote.deleteMany({ where: { applicationId: params.id, endUserId: params.euid } });
+        // The billing log has no foreign key to the end user, so its rows
+        // outlive this delete and would keep where the buyer was.
+        await eraseEndUserFromBillingLog(tx, { applicationId: params.id, endUserId: params.euid });
         await tx.endUser.delete({ where: { id: params.euid } });
-        return enqueueEvent(tx, {
+        const deletedDeliveryIds = await enqueueEvent(tx, {
           applicationId: params.id,
           type: 'user.deleted',
           data: { user: { id: params.euid } },
         });
+        return [...supportDeliveryIds, ...deletedDeliveryIds];
       });
 
       // Audit the operator mutation (durable: a deletion is a sensitive action).
@@ -5040,7 +4990,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -5106,9 +5056,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The ledger entry created and the resulting balance.',
           ),
           ...errs({
-            400: 'CREDITS_AMOUNT_INVALID — `amount` is zero, non-integer, or (for a debit) would overdraw the balance.',
+            400: 'CREDITS_AMOUNT_INVALID: `amount` is zero, non-integer, or (for a debit) would overdraw the balance.',
             ...APP_BILLING_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -5126,6 +5076,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         });
       }
       const body = GrantCreditsRequestSchema.parse(req.body);
+      const operatorId = req.tenantUser!.id;
       const result = await creditsService.grant({
         applicationId: params.id,
         endUserId: params.euid,
@@ -5134,6 +5085,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.idempotencyKey !== undefined && { idempotencyKey: body.idempotencyKey }),
         ...(body.description !== undefined && { description: body.description }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
+        // Credits added are a grant in the billing log. An entry that takes
+        // credits away is in the ledger and has no event of that name.
+        afterEntry: async (tx, entry) => {
+          if (entry.delta <= 0) return;
+          await logCreditsGranted(tx, entry, { source: 'operator', actor: { type: 'operator', id: operatorId }, log: req.log });
+        },
       });
       return reply.status(201).send({ success: true, data: result });
     },
@@ -5241,7 +5198,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           200: ok(IMPORT_RUN_WITH_ITEMS, 'The run, its tallies, and a page of its rows.'),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'IMPORT_RUN_NOT_FOUND — no such run on this Application.',
+            404: 'IMPORT_RUN_NOT_FOUND: no such run on this Application.',
           }),
         },
       },
@@ -5332,10 +5289,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'What the apply did.',
           ),
           ...errs({
-            400: 'IMPORT_CONFIRM_MISMATCH — `confirm` does not match the Application slug.',
+            400: 'IMPORT_CONFIRM_MISMATCH: `confirm` does not match the Application slug.',
             ...APP_BILLING_WRITE_ERRORS,
-            404: 'IMPORT_RUN_NOT_FOUND — no such run on this Application.',
-            409: 'IMPORT_RUN_NOT_READY — the run is not in a state that can be applied.',
+            404: 'IMPORT_RUN_NOT_FOUND: no such run on this Application.',
+            409: 'IMPORT_RUN_NOT_READY: the run is not in a state that can be applied.',
           }),
         },
       },
@@ -5514,8 +5471,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
-            410: 'END_USER_ERASED — that end-user is a tombstone.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
+            410: 'END_USER_ERASED: that end-user is a tombstone.',
           }),
         },
       },
@@ -5598,11 +5555,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
-            409: 'EMAIL_ALREADY_VERIFIED — nothing to verify.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
+            409: 'EMAIL_ALREADY_VERIFIED: nothing to verify.',
             403: APP_WRITE_ERRORS[403] + ' Or END_USER_BANNED: lift the ban first.',
-            410: 'END_USER_ERASED — that end-user is a tombstone.',
-            429: 'RATE_LIMITED — too many sends. Honour the `Retry-After` header.',
+            410: 'END_USER_ERASED: that end-user is a tombstone.',
+            429: 'RATE_LIMITED: too many sends. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -5695,11 +5652,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
-            409: 'END_USER_HAS_NO_PASSWORD — the account signs in with OAuth or a passkey; there is no password to reset.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
+            409: 'END_USER_HAS_NO_PASSWORD: the account signs in with OAuth or a passkey; there is no password to reset.',
             403: APP_WRITE_ERRORS[403] + ' Or END_USER_BANNED: lift the ban first.',
-            410: 'END_USER_ERASED — that end-user is a tombstone.',
-            429: 'RATE_LIMITED — too many sends. Honour the `Retry-After` header.',
+            410: 'END_USER_ERASED: that end-user is a tombstone.',
+            429: 'RATE_LIMITED: too many sends. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -5767,9 +5724,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           200: okPage(END_USER_SESSION, "A page of the end-user's live sessions, newest first."),
           ...errs({
-            400: 'VALIDATION_ERROR — a query parameter is out of range.',
+            400: 'VALIDATION_ERROR: a query parameter is out of range.',
             ...APP_READ_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -5813,7 +5770,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -5870,7 +5827,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
           }),
         },
       },
@@ -6011,6 +5968,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               description:
                 'Why this was granted. Kept on the row under `metadata.grant` and in the audit trail, a comped subscription with no stated reason is unauditable six months later.',
             },
+            currency: {
+              type: 'string',
+              minLength: 3,
+              maxLength: 3,
+              description:
+                "The currency the subscriber is billed in, ISO 4217. The subscription takes the plan's price in it, so MRR and `subscription.*` events report that price. The plan must have a price in it. Omit it and the subscription follows the plan's default price. A lapsed subscription takes the price named. A live one keeps its currency: naming another is refused with 409.",
+            },
           },
         },
         response: {
@@ -6018,24 +5982,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           201: ok(GRANT_RESULT, 'The subscription is now active.'),
           ...errs({
             400:
-              'BILLING_ORGANIZATION_REQUIRED — the Application bills per organization and none was ' +
-              'named; or SUBSCRIPTION_PERIOD_END_IN_PAST — `currentPeriodEnd` is not in the future.',
+              'BILLING_ORGANIZATION_REQUIRED: the Application bills per organization and none was ' +
+              'named; or SUBSCRIPTION_PERIOD_END_IN_PAST: `currentPeriodEnd` is not in the future; or ' +
+              'BILLING_PLAN_CURRENCY_UNAVAILABLE: the plan has no price in `currency`.',
             ...APP_BILLING_WRITE_ERRORS,
             403:
               APP_BILLING_WRITE_ERRORS[403] +
               ' TENANT_ROLE_INSUFFICIENT also covers a MEMBER holding `APP_BILLING` or `APP_ADMIN`: ' +
               'this route requires OWNER or ADMIN and no grant unlocks it.',
             404:
-              'END_USER_NOT_FOUND — no end-user with that id in this Application; or ' +
-              'PLAN_NOT_FOUND — no plan with that slug; or ORGANIZATION_NOT_FOUND — `organizationId` ' +
-              'names no organization in this Application; or TENANT_SUBSCRIPTION_GRANTS_DISABLED — ' +
+              'END_USER_NOT_FOUND: no end-user with that id in this Application; or ' +
+              'PLAN_NOT_FOUND: no plan with that slug; or ORGANIZATION_NOT_FOUND: `organizationId` ' +
+              'names no organization in this Application; or TENANT_SUBSCRIPTION_GRANTS_DISABLED: ' +
               'this deployment does not offer operator grants.',
             409:
               'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: the end-user already holds this plan live ' +
               'for a different billing subject (another organization, or their personal ' +
-              'account). A subscription to one plan is stored once per subscriber.',
+              'account). A subscription to one plan is stored once per subscriber. Or ' +
+              "BILLING_SUBSCRIPTION_CURRENCY_KEPT: the end-user's live subscription is in another " +
+              'currency than `currency`, and a grant does not change it. Or ' +
+              'BILLING_SUBSCRIPTION_PRICE_UNSETTLED: `currency` was named for a live subscription ' +
+              'that a checkout opened and that has no price recorded.',
             410:
-              'END_USER_ERASED — that end-user is a GDPR tombstone. Nothing can be granted to it, ' +
+              'END_USER_ERASED: that end-user is a GDPR tombstone. Nothing can be granted to it, ' +
               'and an erasure cannot be undone.',
           }),
         },
@@ -6069,6 +6038,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           currentPeriodEnd: new Date(body.currentPeriodEnd),
         }),
         ...(body.note !== undefined && { note: body.note }),
+        ...(body.currency !== undefined && { currency: body.currency }),
+        origin: { via: 'grant', actor: { type: 'operator', id: req.tenantUser!.id } },
       });
 
       // Only when this call did something. An idempotent no-op that wrote an
@@ -6142,9 +6113,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               ' TENANT_ROLE_INSUFFICIENT also covers a MEMBER holding `APP_BILLING` or `APP_ADMIN`: ' +
               'this route requires OWNER or ADMIN and no grant unlocks it.',
             404:
-              'SUBSCRIPTION_NOT_FOUND — no subscription with that id belonging to that end-user in ' +
+              'SUBSCRIPTION_NOT_FOUND: no subscription with that id belonging to that end-user in ' +
               'this Application.',
-            409: 'SUBSCRIPTION_MANAGED_EXTERNALLY — an inbound-only provider owns this subscription; cancel it there.',
+            409: 'SUBSCRIPTION_MANAGED_EXTERNALLY: an inbound-only provider owns this subscription; cancel it there.',
           }),
         },
       },
@@ -6185,6 +6156,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const atPeriodEnd = body.atPeriodEnd !== false;
       const updated = await billingService.cancelSubscriptionById(application, params.subId, {
         atPeriodEnd,
+        operatorId: req.tenantUser!.id,
       });
 
       void recordSecurityEvent({
@@ -6233,8 +6205,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Returns a downloadable JSON document: profile, OAuth identities, session metadata ' +
           '(no token material), MFA enrollment metadata (no secrets), passkey metadata, ' +
           'organization memberships, subscriptions, payments, licenses (key prefix only), ' +
-          'credit balance + ledger, usage records (capped, see `notes`), security events, and ' +
-          'impersonation audits. OWNER/ADMIN only.',
+          'credit balance + ledger, usage records (capped, see `notes`), security events, ' +
+          "impersonation audits, and support cases (without the operator's reason). OWNER/ADMIN only.",
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, euid: { type: 'string' } },
@@ -6259,8 +6231,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           },
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
-            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT: this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
           }),
         },
       },
@@ -6325,6 +6297,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         usageRecords,
         securityEvents,
         impersonations,
+        supportCases,
         lockState,
       ] = await Promise.all([
         prisma.oAuthIdentity.findMany({
@@ -6385,7 +6358,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             beneficiaryOrgId: true,
             metadata: true,
             createdAt: true,
-            plan: { select: { slug: true, name: true, kind: true, amount: true, currency: true, interval: true } },
+            currency: true,
+            unitAmount: true,
+            plan: { select: { slug: true, name: true, kind: true, interval: true } },
           },
           orderBy: { createdAt: 'desc' },
         }),
@@ -6498,21 +6473,38 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           select: { id: true, operatorUserId: true, reason: true, startedAt: true, endedAt: true, ip: true },
           orderBy: { startedAt: 'desc' },
         }),
+        // No `reason`: the operator's note about this person is the team's, as a ban's is.
+        prisma.supportCase.findMany({
+          where: { applicationId: params.id, endUserId: endUser.id },
+          select: {
+            id: true,
+            status: true,
+            capabilities: true,
+            scope: true,
+            deviceIds: true,
+            openedAt: true,
+            updatedAt: true,
+            closedAt: true,
+            closedCause: true,
+          },
+          orderBy: { openedAt: 'desc' },
+        }),
         endUserLockState(endUser.applicationId, endUser.email),
       ]);
 
       const notes = [
         'Sessions, payments, credit ledger, usage records and security events are capped at the ' +
           `most recent ${SESSIONS_CAP}, ${PAYMENTS_CAP}, ${LEDGER_CAP}, ${USAGE_CAP} and ${EVENTS_CAP} rows respectively (newest first).`,
+        `Billing events are capped at the most recent ${EVENTS_CAP}. The id of whoever acted is left out of each.`,
         'Credential material (password hashes, session token hashes, MFA secrets/backup codes, ' +
           'license key hashes, passkey public keys) is never included in exports.',
       ];
       if (usageRecords.length === USAGE_CAP) {
-        notes.push(`usageRecords hit the ${USAGE_CAP}-row cap — older rows exist but are not included.`);
+        notes.push(`usageRecords hit the ${USAGE_CAP}-row cap. Older rows exist but are not included.`);
       }
 
       const document = {
-        exportVersion: 1,
+        exportVersion: 2,
         exportedAt: new Date().toISOString(),
         applicationId: params.id,
         notes,
@@ -6554,8 +6546,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           role: m.role,
           createdAt: m.createdAt.toISOString(),
         })),
-        subscriptions: subscriptions.map((s) => ({
+        subscriptions: subscriptions.map(({ currency, unitAmount, ...s }) => ({
           ...s,
+          price: subscriptionOwnPrice({ currency, unitAmount }),
           currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null,
           cancelAt: s.cancelAt?.toISOString() ?? null,
           canceledAt: s.canceledAt?.toISOString() ?? null,
@@ -6603,6 +6596,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           startedAt: r.startedAt.toISOString(),
           endedAt: r.endedAt?.toISOString() ?? null,
         })),
+        supportCases: supportCases.map((c) => ({
+          ...c,
+          openedAt: c.openedAt.toISOString(),
+          updatedAt: c.updatedAt.toISOString(),
+          closedAt: c.closedAt?.toISOString() ?? null,
+        })),
+        billingEvents: await billingEventsForExport({ applicationId: params.id, endUserId: endUser.id, cap: EVENTS_CAP }),
         contacts: await contactsForExport(
           params.id,
           await personAddresses(prisma, params.id, endUser.id, endUser.email),
@@ -6700,9 +6700,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'A 5-minute impersonation access token (no refresh) plus the audit row id.',
           ),
           ...errs({
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
             401: APP_READ_ERRORS[401],
-            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it). Or END_USER_BANNED: lift the ban first.',
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT: this route requires the OWNER or ADMIN workspace role (no grant unlocks it). Or END_USER_BANNED: lift the ban first.',
             410: 'END_USER_ERASED: that end-user is a tombstone.',
           }),
         },
@@ -6821,9 +6821,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'Count of impersonation sessions ended. 0 when none were live (idempotent).',
           ),
           ...errs({
-            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
             401: APP_READ_ERRORS[401],
-            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT: this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
           }),
         },
       },
@@ -6966,7 +6966,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The rotated Application (new + previous publishable key, with the grace deadline).',
           ),
           ...errs({
-            409: 'PUBLIC_KEY_ROTATION_IN_GRACE — a previous key is still inside its grace window; pass `force: true` to drop it and rotate anyway.',
+            409: 'PUBLIC_KEY_ROTATION_IN_GRACE: a previous key is still inside its grace window; pass `force: true` to drop it and rotate anyway.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -7058,9 +7058,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The Application, patched portal configuration.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `portalDomain` is not a bare hostname, or a field failed schema validation.',
+            400: 'VALIDATION_ERROR: `portalDomain` is not a bare hostname, or a field failed schema validation.',
             ...APP_WRITE_ERRORS,
-            409: 'PORTAL_DOMAIN_TAKEN — another Application already uses that portal domain.',
+            409: 'PORTAL_DOMAIN_TAKEN: another Application already uses that portal domain.',
           }),
         },
       },
@@ -7155,7 +7155,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'A page of registered clients, newest first.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...APP_READ_ERRORS,
           }),
         },
@@ -7218,7 +7218,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'OAUTH_CLIENT_NOT_FOUND — no such client on this Application.',
+            404: 'OAUTH_CLIENT_NOT_FOUND: no such client on this Application.',
           }),
         },
       },
@@ -7325,7 +7325,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           200: ok(ref('AccessConfig'), 'The Application, patched IP allowlist / CORS origins.'),
           ...errs({
-            400: 'VALIDATION_ERROR — an entry is not a valid IP/CIDR or origin, or a field failed schema validation.',
+            400: 'VALIDATION_ERROR: an entry is not a valid IP/CIDR or origin, or a field failed schema validation.',
             ...APP_WRITE_ERRORS,
           }),
         },
@@ -7479,9 +7479,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The created role.',
           ),
           ...errs({
-            400: 'END_USER_ROLE_NAME_INVALID — the name is not lowercase letters/digits/hyphens/underscores (2-40 chars, edges alphanumeric).',
+            400: 'END_USER_ROLE_NAME_INVALID: the name is not lowercase letters/digits/hyphens/underscores (2-40 chars, edges alphanumeric).',
             ...APP_WRITE_ERRORS,
-            409: 'END_USER_ROLE_NAME_TAKEN — another role on this Application already uses that name.',
+            409: 'END_USER_ROLE_NAME_TAKEN: another role on this Application already uses that name.',
           }),
         },
       },
@@ -7541,7 +7541,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_ROLE_NOT_FOUND — no role with that name on this Application.',
+            404: 'END_USER_ROLE_NOT_FOUND: no role with that name on this Application.',
           }),
         },
       },
@@ -7596,12 +7596,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             400:
-              'END_USER_ROLE_IS_DEFAULT — cannot delete the Application\'s default role; or ' +
-              'END_USER_ROLE_IN_USE — end-users still hold this role and no `reassignTo` was given; or ' +
-              'END_USER_ROLE_REASSIGN_SELF — `reassignTo` names the role being deleted; or ' +
-              'END_USER_ROLE_REASSIGN_TARGET_UNKNOWN — `reassignTo` does not exist.',
+              'END_USER_ROLE_IS_DEFAULT: cannot delete the Application\'s default role; or ' +
+              'END_USER_ROLE_IN_USE: end-users still hold this role and no `reassignTo` was given; or ' +
+              'END_USER_ROLE_REASSIGN_SELF: `reassignTo` names the role being deleted; or ' +
+              'END_USER_ROLE_REASSIGN_TARGET_UNKNOWN: `reassignTo` does not exist.',
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_ROLE_NOT_FOUND — no role with that name on this Application.',
+            404: 'END_USER_ROLE_NOT_FOUND: no role with that name on this Application.',
           }),
         },
       },
@@ -8029,7 +8029,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           200: okPage(ref('License'), 'A page of licenses, newest first.'),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -8094,14 +8094,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           // hand-built, bypassing the normal RekeyError path, it omits `requestId`. See the
           // final report.
           404: errs({
-            404: 'END_USER_NOT_FOUND — `endUserId` does not belong to this Application. Or ' + APP_WRITE_ERRORS[404],
+            404: 'END_USER_NOT_FOUND: `endUserId` does not belong to this Application. Or ' + APP_WRITE_ERRORS[404],
           })[404],
           ...errs({
             400:
-              'LICENSE_EXPIRES_AT_REQUIRED — a TIMED license is missing `expiresAt`; or ' +
-              'LICENSE_SEATS_REQUIRED — a SEATS license is missing a valid `seatsAllowed`; or ' +
-              'METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit; or ' +
-              'VALIDATION_ERROR — a field failed schema validation.',
+              'LICENSE_EXPIRES_AT_REQUIRED: a TIMED license is missing `expiresAt`; or ' +
+              'LICENSE_SEATS_REQUIRED: a SEATS license is missing a valid `seatsAllowed`; or ' +
+              'METADATA_TOO_LARGE: `metadata` exceeds the 16KB limit; or ' +
+              'VALIDATION_ERROR: a field failed schema validation.',
             401: APP_WRITE_ERRORS[401],
             403: APP_WRITE_ERRORS[403],
           }),
@@ -8155,7 +8155,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           license: result.license,
           rawKey: result.rawKey,
           warning:
-            'Store this rawKey now — it is shown exactly once and cannot be recovered. The customer\'s software validates against POST /api/v1/licenses/verify.',
+            'Store this rawKey now. It is shown exactly once and cannot be recovered. The customer\'s software validates against POST /api/v1/licenses/verify.',
         },
       });
     },
@@ -8181,7 +8181,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           200: ok(ref('License'), 'The revoked license. Idempotent, revoking an already-revoked license 200s unchanged.'),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'LICENSE_NOT_FOUND — no license with that id on this Application.',
+            404: 'LICENSE_NOT_FOUND: no license with that id on this Application.',
           }),
         },
       },
@@ -8212,7 +8212,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           200: okPage(ref('UsageMeter'), 'A page of usage meters.'),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -8252,9 +8252,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         response: {
           201: ok(ref('UsageMeter'), 'The created usage meter.'),
           ...errs({
-            400: 'USAGE_METER_SLUG_INVALID — the slug is not lowercase alphanumerics + - / _; or VALIDATION_ERROR — a field failed schema validation.',
+            400: 'USAGE_METER_SLUG_INVALID: the slug is not lowercase alphanumerics + - / _; or VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
-            409: 'USAGE_METER_SLUG_TAKEN — another meter on this Application already uses that slug.',
+            409: 'USAGE_METER_SLUG_TAKEN: another meter on this Application already uses that slug.',
           }),
         },
       },
@@ -8310,7 +8310,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           200: ok(ref('UsageMeter'), 'The meter, with `active` and/or `creditsPerUnit` updated.'),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'USAGE_METER_NOT_FOUND — no meter with that slug on this Application.',
+            404: 'USAGE_METER_NOT_FOUND: no meter with that slug on this Application.',
           }),
         },
       },
@@ -8375,7 +8375,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'USAGE_METER_NOT_FOUND — no meter with that slug on this Application.',
+            404: 'USAGE_METER_NOT_FOUND: no meter with that slug on this Application.',
           }),
         },
       },
@@ -8429,7 +8429,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
             'A page of end-user organizations.',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+          ...errs({ 400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -8532,7 +8532,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+            404: 'ORGANIZATION_NOT_FOUND: no organization with that id on this Application.',
           }),
         },
       },
@@ -8598,7 +8598,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+            404: 'ORGANIZATION_NOT_FOUND: no organization with that id on this Application.',
           }),
         },
       },
@@ -8658,10 +8658,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The created organization.',
           ),
           ...errs({
-            400: 'ORGANIZATION_SLUG_INVALID — the slug is not 1-40 chars of [a-z0-9-]; or VALIDATION_ERROR — a field failed schema validation.',
+            400: 'ORGANIZATION_SLUG_INVALID: the slug is not 1-40 chars of [a-z0-9-]; or VALIDATION_ERROR: a field failed schema validation.',
             ...APP_WRITE_ERRORS,
-            404: 'END_USER_NOT_FOUND — `ownerEndUserId` does not belong to this Application.',
-            409: 'ORGANIZATION_SLUG_TAKEN — another organization on this Application already uses that slug.',
+            404: 'END_USER_NOT_FOUND: `ownerEndUserId` does not belong to this Application.',
+            409: 'ORGANIZATION_SLUG_TAKEN: another organization on this Application already uses that slug.',
           }),
         },
       },
@@ -8739,7 +8739,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+            404: 'ORGANIZATION_NOT_FOUND: no organization with that id on this Application.',
           }),
         },
       },
@@ -8830,9 +8830,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...errs({
             ...APP_WRITE_ERRORS,
             404:
-              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
-              'END_USER_NOT_FOUND — `endUserId` does not belong to this Application.',
-            409: 'ORGANIZATION_ALREADY_MEMBER — that end-user is already a member of this organization.',
+              'ORGANIZATION_NOT_FOUND: no organization with that id on this Application; or ' +
+              'END_USER_NOT_FOUND: `endUserId` does not belong to this Application.',
+            409: 'ORGANIZATION_ALREADY_MEMBER: that end-user is already a member of this organization.',
           }),
         },
       },
@@ -8908,8 +8908,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...errs({
             ...APP_WRITE_ERRORS,
             404:
-              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
-              'ORGANIZATION_MEMBER_NOT_FOUND — that end-user is not a member of this organization.',
+              'ORGANIZATION_NOT_FOUND: no organization with that id on this Application; or ' +
+              'ORGANIZATION_MEMBER_NOT_FOUND: that end-user is not a member of this organization.',
           }),
         },
       },
@@ -8970,7 +8970,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_WRITE_ERRORS,
-            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+            404: 'ORGANIZATION_NOT_FOUND: no organization with that id on this Application.',
           }),
         },
       },
@@ -8998,7 +8998,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       schema: {
         tags: ['Tenant · Organizations'],
         security: [{ tenantSession: [] }],
-        summary: 'Org billing summary — entitlements, shared credit pool, beneficiary subscriptions',
+        summary: 'Org billing summary: entitlements, shared credit pool, beneficiary subscriptions',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it. A MEMBER with no grant on this Application gets 404.',
@@ -9074,7 +9074,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ),
           ...errs({
             ...APP_READ_ERRORS,
-            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+            404: 'ORGANIZATION_NOT_FOUND: no organization with that id on this Application.',
           }),
         },
       },
@@ -9178,9 +9178,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...errs({
             ...APP_WRITE_ERRORS,
             404:
-              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
-              'LICENSE_NOT_FOUND — no such license pooled to this organization.',
-            409: 'LICENSE_REVOKED — cannot rotate the key of a revoked license.',
+              'ORGANIZATION_NOT_FOUND: no organization with that id on this Application; or ' +
+              'LICENSE_NOT_FOUND: no such license pooled to this organization.',
+            409: 'LICENSE_REVOKED: cannot rotate the key of a revoked license.',
           }),
         },
       },
@@ -9216,7 +9216,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           rawKey: result.rawKey,
           activationsReset: result.activationsReset,
           warning:
-            'Store this rawKey now — it is shown exactly once and cannot be recovered. Hand it to ' +
+            'Store this rawKey now. It is shown exactly once and cannot be recovered. Hand it to ' +
             "the organization; the team's machines validate against POST /api/v1/licenses/verify.",
         },
       };

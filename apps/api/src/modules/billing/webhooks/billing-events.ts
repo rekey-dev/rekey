@@ -41,7 +41,7 @@
  * change it is announcing.
  */
 
-import type { Subscription } from '@prisma/client';
+import type { Refund, Subscription } from '@prisma/client';
 import { entitlementsService, type ResolvedEntitlement } from '../entitlements.service.js';
 import { enqueueEvent, type WebhookDbClient } from '../../webhooks/webhook.service.js';
 
@@ -59,7 +59,7 @@ export type SubscriptionEventType =
   | 'subscription.trial_started'
   | 'subscription.trial_will_end';
 
-export type PaymentEventType = 'payment.succeeded' | 'payment.failed';
+export type PaymentEventType = 'payment.succeeded' | 'payment.failed' | 'payment.refunded';
 
 export type DunningEventType =
   | 'dunning.case_opened'
@@ -95,7 +95,7 @@ export async function enqueueSubscriptionEvent(
   const sub = await client.subscription.findUnique({
     where: { id: subscriptionId },
     include: {
-      plan: { select: { slug: true, name: true, amount: true, currency: true, interval: true, kind: true } },
+      plan: { select: { slug: true, name: true, interval: true, kind: true } },
     },
   });
   if (!sub) return []; // Deleted out from under us, nothing to announce.
@@ -117,8 +117,10 @@ export async function enqueueSubscriptionEvent(
         planSlug: sub.plan.slug,
         planName: sub.plan.name,
         planKind: sub.plan.kind,
-        amount: sub.plan.amount,
-        currency: sub.plan.currency,
+        // What this subscriber pays. A subscription on a plan with no flat
+        // price costs nothing and has no currency.
+        amount: sub.unitAmount ?? 0,
+        currency: sub.currency,
         interval: sub.plan.interval,
         ...(entitlements !== undefined && { entitlements }),
         currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
@@ -171,12 +173,16 @@ async function resolveEntitlementsOrOmit(
  * the money transaction it reads the payment that has not committed yet, which
  * is the whole point.
  *
+ * `payment.refunded` also carries `data.refund`, the one refund that was just
+ * recorded; `data.payment.refundedAmount` is the running total after it.
+ *
  * Returns the delivery-row ids to kick after the caller's commit.
  */
 export async function enqueuePaymentEvent(
   client: WebhookDbClient,
   type: PaymentEventType,
   paymentId: string,
+  refund?: Pick<Refund, 'id' | 'amount' | 'currency' | 'status' | 'providerRefundId' | 'createdAt'>,
 ): Promise<string[]> {
   const payment = await client.payment.findUnique({
     where: { id: paymentId },
@@ -195,10 +201,22 @@ export async function enqueuePaymentEvent(
         amount: payment.amount,
         currency: payment.currency,
         status: payment.status,
+        refundedAmount: payment.refundedAmount,
+        verification: payment.verification === 'VERIFIED' ? 'verified' : 'unverified',
         providerPaymentId: payment.providerPaymentId,
         description: payment.description,
         createdAt: payment.createdAt.toISOString(),
       },
+      ...(refund !== undefined && {
+        refund: {
+          id: refund.id,
+          amount: refund.amount,
+          currency: refund.currency,
+          status: refund.status.toLowerCase(),
+          providerRefundId: refund.providerRefundId,
+          createdAt: refund.createdAt.toISOString(),
+        },
+      }),
     },
   });
 }

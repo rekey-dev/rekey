@@ -128,3 +128,47 @@ describe('<ProviderPicker> — controlled mode', () => {
     expect((screen.getByRole('radio', { name: /razorpay/i }) as HTMLInputElement).checked).toBe(true);
   });
 });
+
+describe('<ProviderPicker>: routedProvider and currency', () => {
+  const WITH_CURRENCIES: ProviderOption[] = [
+    { provider: 'paypal', currencies: ['USD', 'EUR'] },
+    { provider: 'razorpay', currencies: ['INR'] },
+    { provider: 'stripe' },
+  ];
+
+  it('selects routedProvider by default, and defaultValue still wins over it', () => {
+    const { unmount } = render(<ProviderPicker providers={PROVIDERS} routedProvider="razorpay" />);
+    expect((screen.getByRole('radio', { name: /razorpay/i }) as HTMLInputElement).checked).toBe(true);
+    unmount();
+    render(<ProviderPicker providers={PROVIDERS} routedProvider="razorpay" defaultValue="paypal" />);
+    expect((screen.getByRole('radio', { name: /paypal/i }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('selects the first provider when routedProvider is null or not in the list', () => {
+    const { unmount } = render(<ProviderPicker providers={PROVIDERS} routedProvider={null} />);
+    expect((screen.getByRole('radio', { name: /stripe/i }) as HTMLInputElement).checked).toBe(true);
+    unmount();
+    render(<ProviderPicker providers={PROVIDERS} routedProvider="adyen" />);
+    expect((screen.getByRole('radio', { name: /stripe/i }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('with a currency, offers only the providers that can charge it', () => {
+    const { container } = render(
+      <form>
+        <ProviderPicker providers={WITH_CURRENCIES} currency="inr" routedProvider="paypal" />
+      </form>,
+    );
+    expect(screen.queryByRole('radio', { name: /paypal/i })).toBeNull();
+    expect(screen.getAllByRole('radio')).toHaveLength(2);
+    expect(new FormData(container.querySelector('form')!).get('provider')).toBe('razorpay');
+  });
+
+  it('never posts a controlled value the currency filtered out', () => {
+    const { container } = render(
+      <form>
+        <ProviderPicker providers={WITH_CURRENCIES} currency="INR" value="paypal" onChange={vi.fn()} />
+      </form>,
+    );
+    expect(new FormData(container.querySelector('form')!).get('provider')).toBe('razorpay');
+  });
+});

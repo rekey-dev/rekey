@@ -148,6 +148,15 @@ describe('Credits self-serve', () => {
         idempotencyKey: 'referral-42',
         ledgerEntryId: data.entryId,
       });
+
+      const logged = await prisma.billingEvent.findMany({ where: { applicationId: appId, type: 'credits.granted' } });
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatchObject({
+        actorType: 'SYSTEM',
+        actorId: keyRow.id,
+        endUserId: user.endUser.id,
+        data: { credits: 250, source: 'api_key', balanceAfter: 250 },
+      });
     });
 
     it('works alongside "*" when both are named on one key', async () => {
@@ -169,6 +178,7 @@ describe('Credits self-serve', () => {
       expect(
         await prisma.securityEvent.count({ where: { applicationId: appId, type: 'app.credits_granted_by_api_key' } }),
       ).toBe(1);
+      expect(await prisma.billingEvent.count({ where: { applicationId: appId, type: 'credits.granted' } })).toBe(1);
     });
 
     it('a grant key never matches a consume made under the same string', async () => {

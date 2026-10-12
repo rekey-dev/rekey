@@ -70,9 +70,20 @@ import { plansService } from '../plans/plans.service.js';
 import { entitlementsService } from './entitlements.service.js';
 import { enqueueActivation } from './trial-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
-import { BillingConfigSchema, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { isOneTimePlan } from './plan-kind.js';
 import { claimGrantedTrial, trialSubjectKey } from './trial-eligibility.service.js';
+import {
+  defaultPriceColumns, grantCurrencyUnavailable, planPriceIn, priceIfUnpriced, replacePrice } from './unpriced-subscription.js';
+import { withGrantedPrice } from './grant-live-price.js';
+import { organizationFreeRowUnderLock, recordOrganizationClaim, settleFreeTierClaim } from './free-tier-claims.js';
+import {
+  logSubscriptionActivated,
+  logSubscriptionGranted,
+  logSubscriptionImported,
+  type MoneyActor,
+  type Origin,
+} from './money-events.js';
 
 /**
  * Statuses that already mean "this subscriber is entitled". A grant against one
@@ -109,6 +120,32 @@ export interface GrantSubscriptionInput {
   /** Free-text reason, kept on the row and in the audit trail. */
   note?: string;
   /**
+   * The currency the subscriber is billed in, ISO 4217. The subscription takes
+   * the plan's price in it (the default price or an additional one), so MRR
+   * and events report what this subscriber pays. A plan with no price in it
+   * is refused with BILLING_PLAN_CURRENCY_UNAVAILABLE. Omitted, the row takes
+   * the plan's default price. A lapsed row takes
+   * the price named, replacing the one it lapsed at. A live row keeps its
+   * currency: naming another is refused with 409
+   * BILLING_SUBSCRIPTION_CURRENCY_KEPT. A live row with no price and no
+   * checkout behind it takes the price named, or the default when none is. A
+   * live row with no price that a checkout opened is left for its checkout:
+   * naming a currency for it is refused with 409
+   * BILLING_SUBSCRIPTION_PRICE_UNSETTLED.
+   */
+  currency?: string;
+  /**
+   * Who is granting and through what, for the billing log: an operator's
+   * grant, an import run, or an external billing system's activation.
+   * Omitted, it is an operator's grant with the operator unnamed.
+   */
+  origin?: {
+    via: 'grant' | 'import' | 'provider';
+    actor: MoneyActor;
+    importRunId?: string | null;
+    providerEventId?: string;
+  };
+  /**
    * Bind the row to an inbound-only provider instead of leaving it
    * provider-less.
    *
@@ -126,7 +163,8 @@ export interface GrantSubscriptionInput {
    * A value in the FUTURE is a trial, and it goes through the trial ledger
    * (`claimGrantedTrial`) under the Application's `trialPolicy`, exactly as a
    * checkout does: honoured, the row is written TRIALING for the same reason
-   * `applyCheckoutCompleted` does, so unpaid revenue is not reported as MRR;
+   * `applyCheckoutCompleted` does, so unpaid revenue is not reported as MRR,
+   * which counts ACTIVE subscriptions only;
    * refused, the subscription is still granted, ACTIVE and without the trial,
    * and the refusal is recorded under `metadata.refusedTrials`. Without this
    * an external sender or an import could hand one buyer a trial per event,
@@ -328,8 +366,8 @@ export const subscriptionGrantsService = {
    * mints ten thousand credits per activation; activation is idempotent per
    * subscriber and plan, but a grant for a NEW period after a cancellation
    * deliberately refills, so cancel-then-activate is an unbounded tap on exactly
-   * the plan shape a free tier uses. A USAGE plan at `amount: 0` with a
-   * `pricePerUnitCents` is free only in the headline.
+   * the plan shape a free tier uses. A USAGE plan with no base fee is free
+   * only in the headline.
    *
    * So the plan must be the one the operator NOMINATED as the free tier, and be
    * free on both axes. Nomination turns the guard from a property of the row
@@ -468,6 +506,27 @@ export const subscriptionGrantsService = {
     // longer sold is a routine, deliberate operator act, and refusing it would
     // force the operator to re-open the plan to the whole catalogue to do it.
     const plan = await plansService.getBySlug(applicationId, input.planSlug);
+    const named = input.currency === undefined ? null : await planPriceIn(plan, input.currency);
+    if (named !== null && named.price === null) {
+      throw grantCurrencyUnavailable(plan, input.currency!, named.sold);
+    }
+    const price = named?.price ?? null;
+    // A grant that names no currency takes the plan's default price. Null
+    // only for a plan with no flat price.
+    const priceTaken = price ?? defaultPriceColumns(plan);
+    const via = input.origin?.via ?? 'grant';
+    const origin: Origin = {
+      actor: input.origin?.actor ?? { type: 'operator' },
+      provider: input.providerBinding?.provider ?? null,
+      ...(input.origin?.providerEventId !== undefined && { providerEventId: input.origin.providerEventId }),
+    };
+    const priced = { cause: via, ...origin } as const;
+    /** The billing log's record of the grant, in the transaction that made it. */
+    const logGrant = async (tx: Prisma.TransactionClient, subscriptionId: string, trial: boolean): Promise<void> => {
+      if (via === 'provider') return logSubscriptionActivated(tx, subscriptionId, { via: 'provider', trial }, origin);
+      if (via === 'import') return logSubscriptionImported(tx, subscriptionId, input.origin?.importRunId ?? null, origin);
+      return logSubscriptionGranted(tx, subscriptionId, origin);
+    };
 
     const endUser = await resolveEndUser(applicationId, input);
 
@@ -563,7 +622,7 @@ export const subscriptionGrantsService = {
             }
             return { subscription: existing, activated: false, deliveryIds: [] as string[], heldForAnotherSubject: true as const };
           }
-          return { subscription: existing, activated: false, deliveryIds: [] as string[] };
+          return { subscription: await withGrantedPrice(tx, existing, plan, price, priced), activated: false, deliveryIds: [] as string[] };
         }
 
         // The ledger is consulted INSIDE the transaction that writes the row,
@@ -603,7 +662,7 @@ export const subscriptionGrantsService = {
         const data = {
           // TRIALING while somebody else's trial clock is running, ACTIVE
           // otherwise, the split `applyCheckoutCompleted` makes and for the
-          // same reason: `computeMrrCents` sums `plan.amount` over ACTIVE.
+          // same reason: MRR counts every ACTIVE subscription at its price.
           status: onTrial ? ('TRIALING' as const) : ('ACTIVE' as const),
           provider: input.providerBinding?.provider ?? null,
           providerSubId: input.providerBinding?.providerSubId ?? null,
@@ -647,10 +706,13 @@ export const subscriptionGrantsService = {
         };
 
         if (!existing) {
-          const inserted = await tx.subscription.create({ data: { ...key, ...data } });
+          const unpriced = await tx.subscription.create({ data: { ...key, ...data } });
+          if (priceTaken !== null) await priceIfUnpriced(unpriced.id, priceTaken, tx, priced);
+          const inserted = priceTaken === null ? unpriced : await tx.subscription.findUniqueOrThrow({ where: { id: unpriced.id } });
           const created = input.decorate ? await input.decorate(tx, inserted) : inserted;
           await bindTrial(created.id);
           await recordFreeTierClaim?.(created.id);
+          await logGrant(tx, created.id, onTrial);
           return {
             subscription: created,
             activated: true,
@@ -670,6 +732,12 @@ export const subscriptionGrantsService = {
           where: { id: existing.id, status: { notIn: [...ENTITLED] } },
           data,
         });
+        // Nobody is paying against a row that is not entitled, so a named
+        // price replaces whatever the lapsed row was last sold at. With none
+        // named the row keeps the price it had, and takes the default only if
+        // it had none.
+        if (count !== 0 && price !== null) await replacePrice(existing.id, price, tx, priced);
+        else if (count !== 0 && priceTaken !== null) await priceIfUnpriced(existing.id, priceTaken, tx, priced);
         const current = await tx.subscription.findUniqueOrThrow({ where: { id: existing.id } });
         const row = count !== 0 && input.decorate ? await input.decorate(tx, current) : current;
         if (count === 0) {
@@ -683,6 +751,7 @@ export const subscriptionGrantsService = {
         }
         await bindTrial(row.id);
         await recordFreeTierClaim?.(row.id);
+        await logGrant(tx, row.id, onTrial);
         return {
           subscription: row,
           activated: true,
@@ -735,121 +804,6 @@ export const subscriptionGrantsService = {
     return { subscription, activated: true, ...(trialRefused && { trialRefused }) };
   },
 };
-
-/**
- * Decide a free-tier claim, and return what records it once the activation is
- * written. Throws when the actor already claimed the plan for somebody else.
- *
- * The advisory lock is keyed on the claim's own identity, so concurrent
- * activations by one actor serialise here and the second reads the first's
- * committed row. The unique key on `free_tier_claims` is the backstop: were
- * the lock ever lost, the second insert fails P2002 and the whole activation
- * rolls back with it.
- *
- * Same beneficiary returns a recorder that writes nothing: the claim already
- * exists, and a reactivation for it issues nothing new because the credit
- * anchor (`'initial'` for an open-ended grant) and the per-pool licence lookup
- * in `entitlementsService.provision` both collide.
- */
-async function settleFreeTierClaim(
-  tx: Prisma.TransactionClient,
-  args: {
-    applicationId: string;
-    endUserId: string;
-    planId: string;
-    planSlug: string;
-    organizationId: string | null;
-  },
-): Promise<(subscriptionId: string) => Promise<void>> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`rekey:free-tier:${args.applicationId}:${args.endUserId}:${args.planId}`}, 0))`;
-  const prior = await tx.freeTierClaim.findUnique({
-    where: {
-      applicationId_endUserId_planId: {
-        applicationId: args.applicationId,
-        endUserId: args.endUserId,
-        planId: args.planId,
-      },
-    },
-    select: { organizationId: true },
-  });
-  if (prior) {
-    if (prior.organizationId !== args.organizationId) {
-      const holder = prior.organizationId ? 'an organization' : 'your personal account';
-      throw new RekeyError({
-        statusCode: 409,
-        code: 'BILLING_FREE_TIER_ALREADY_CLAIMED',
-        message:
-          `The free plan "${args.planSlug}" grants credits or a licence, and you already claimed it ` +
-          `for ${holder}. It can be claimed once per person.`,
-        fix:
-          'An operator can grant the plan to this beneficiary, or the buyer can purchase a plan for ' +
-          'it through POST /api/v1/billing/checkout. Reactivating it for the beneficiary that ' +
-          'already holds the claim is allowed.',
-      });
-    }
-    return async () => {};
-  }
-  return async (subscriptionId) => {
-    await tx.freeTierClaim.create({
-      data: {
-        applicationId: args.applicationId,
-        endUserId: args.endUserId,
-        planId: args.planId,
-        organizationId: args.organizationId,
-        subscriptionId,
-      },
-    });
-  };
-}
-
-/**
- * The subscriber's live subscription to this plan is billed to a different
- * subject. A subscription to one plan is one row per subscriber (#431), so
- * granting it for another subject would move it, the refusal hosted checkout
- * makes with the same code.
- */
-/**
- * Another admin's live free row for this organization, read under a lock held
- * until the grant transaction ends. Without the lock, admins racing for one
- * organization each saw no row and each got one, doubling its included usage
- * and, for a credit plan, granting the pool twice. The lock is per
- * (application, organization, plan), unlike the per-end-user claim lock.
- */
-async function organizationFreeRowUnderLock(
-  tx: Prisma.TransactionClient,
-  applicationId: string,
-  organizationId: string,
-  planId: string,
-  endUserId: string,
-): Promise<Subscription | null> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`free-tier-org:${applicationId}:${organizationId}:${planId}`}, 0))`;
-  return tx.subscription.findFirst({
-    where: {
-      applicationId,
-      planId,
-      beneficiaryOrgId: organizationId,
-      endUserId: { not: endUserId },
-      status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] },
-    },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
-}
-
-/**
- * Record that an organization is on the free tier. Idempotent under any number
- * of concurrent claims: the unique key settles it and a duplicate is skipped.
- */
-async function recordOrganizationClaim(
-  applicationId: string,
-  organizationId: string,
-  planId: string,
-  claimedByEndUserId: string,
-): Promise<void> {
-  await prisma.organizationFreeTierClaim.createMany({
-    data: [{ applicationId, organizationId, planId, claimedByEndUserId }],
-    skipDuplicates: true,
-  });
-}
 
 function subjectConflict(
   planSlug: string,

@@ -10,13 +10,15 @@ import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { StatTile } from '@/components/StatTile';
 import { hasScope } from '@/lib/operator-scopes';
+import { Badge } from '@/components/Badge';
+import { currencyFigures, monthlySeries, unverifiedMoney } from '@/lib/revenue';
+import { RevenueChart } from './RevenueChart';
 
 /**
- * Billing Overview, the Billing group's landing tab. Revenue/subscription
- * stat tiles fed by GET /tenant/applications/:id/billing/stats, a 12-month
- * revenue chart (inline SVG, same no-deps approach as the app overview's
- * sign-up trend), and the most recent payments with a link to the full
- * Payments tab.
+ * Billing overview, the Billing group's landing tab: stat tiles in the
+ * reporting currency, unverified money as its own figure, a table with one
+ * row per currency, one monthly chart per currency, and the most recent
+ * payments. Fed by GET /tenant/applications/:id/billing/stats.
  */
 
 export default async function BillingOverviewPage({
@@ -70,17 +72,34 @@ export default async function BillingOverviewPage({
   const recentPayments = paymentPage.items;
   const openDunning = dunningPage.items;
 
-  const currency = app.billingConfig.currency || 'USD';
+  // Every figure is per currency and leads with the reporting currency.
+  // Nothing is converted or added across currencies.
+  const reporting = stats?.reportingCurrency ?? app.billingConfig.reportingCurrency;
+  const figures = stats ? currencyFigures(stats) : [];
+  const headline = figures[0];
+  const others = figures.slice(1);
+  const charts = stats ? monthlySeries(stats) : [];
+  const unverified = stats ? unverifiedMoney(stats) : [];
+  const unverifiedPayments = unverified.reduce((sum, entry) => sum + entry.payments, 0);
 
   return (
     <div className="space-y-5">
       <SectionHeader
         title="Billing overview"
-        description="Revenue and subscription health for this application. Amounts reflect what the provider settled, after any coupon discount. Whether that is real money depends on the billing credentials this application has stored, not on its environment label."
+        description={
+          <>
+            Revenue and subscription health for this application, in {reporting} first because that is its{' '}
+            <Link href={`/applications/${id}/billing/settings`} className="underline hover:text-[var(--color-fg)]">
+              reporting currency
+            </Link>
+            . There is no conversion: each currency keeps its own totals and they are never added together.
+            Revenue counts verified payments, after any coupon discount.
+          </>
+        }
       />
 
       {stats && (
-        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
           <StatTile
             title="Active subscriptions"
             value={stats.activeSubscriptions.toLocaleString()}
@@ -88,13 +107,13 @@ export default async function BillingOverviewPage({
             footer={`${stats.newSubscriptionsLast30d} new · ${stats.canceledLast30d} canceled (30d)`}
           />
           <StatTile
-            title="MRR"
-            value={formatMoney(stats.mrrCents, stats.mrrCurrency ?? currency)}
+            title={`MRR in ${reporting}`}
+            value={formatMoney(headline?.mrr ?? 0, reporting)}
             href={`/applications/${id}/plans`}
             footer={
-              stats.mixedCurrencies
-                ? `${stats.mrrCurrency} plans only, other currencies excluded`
-                : 'Recurring plans, yearly normalized to monthly'
+              others.some((row) => row.mrr !== 0)
+                ? `${reporting} subscriptions only. Other currencies are listed below.`
+                : 'Each subscription at its own price, yearly counted as a twelfth'
             }
           />
           <StatTile
@@ -109,10 +128,14 @@ export default async function BillingOverviewPage({
             tone={stats.pastDueSubscriptions > 0 ? 'warn' : undefined}
           />
           <StatTile
-            title="Revenue (30d)"
-            value={formatMoney(stats.revenueLast30dCents, currency)}
+            title={`Net revenue in ${reporting} (30d)`}
+            value={formatMoney(headline?.net ?? 0, reporting)}
             href={`/applications/${id}/payments?status=SUCCEEDED`}
-            footer={`${stats.paymentsLast30d.succeeded} successful payment${stats.paymentsLast30d.succeeded === 1 ? '' : 's'}`}
+            footer={
+              (headline?.refunded ?? 0) > 0
+                ? `${formatMoney(headline?.gross ?? 0, reporting)} gross less ${formatMoney(headline?.refunded ?? 0, reporting)} refunded`
+                : `${headline?.payments ?? 0} verified payment${headline?.payments === 1 ? '' : 's'}`
+            }
           />
           <StatTile
             title="Failed payments (30d)"
@@ -139,21 +162,112 @@ export default async function BillingOverviewPage({
         />
       )}
 
-      {/* Revenue over the last 12 months, the headline graph. */}
+      {stats && unverified.length > 0 && (
+        <section
+          aria-labelledby="unverified-heading"
+          className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-5 text-amber-700 dark:text-amber-400"
+        >
+          <h3 id="unverified-heading" className="text-sm font-medium">
+            Unverified money: {unverifiedPayments} payment{unverifiedPayments === 1 ? '' : 's'} held, not counted as revenue
+          </h3>
+          <ul className="mt-2 flex flex-wrap gap-x-6 gap-y-1 font-mono text-sm">
+            {unverified.map((entry) => (
+              <li key={entry.currency}>
+                {formatMoney(entry.amount, entry.currency)}
+                <span className="ml-1.5 font-sans text-xs">
+                  in {entry.payments} payment{entry.payments === 1 ? '' : 's'}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 max-w-prose text-xs">
+            A provider took these charges and Rekey could not match them to what a subscription pays: another
+            currency, a very different amount, or no subscription at all. Nothing was granted for them and
+            they are in neither revenue nor MRR, whatever their age. Applying one to a subscription verifies
+            it and moves it into revenue. Refunding it sends it back.{' '}
+            <Link href={`/applications/${id}/unapplied-payments`} className="font-medium underline">
+              Review unapplied payments
+            </Link>
+          </p>
+        </section>
+      )}
+
       {stats && (
-        <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
-          <div className="flex items-baseline justify-between gap-2">
-            <h3 className="text-sm font-medium">Revenue</h3>
-            <span className="text-xs text-[var(--color-muted-fg)]">
-              last 12 months ·{' '}
-              {formatMoney(
-                stats.monthlyRevenue.reduce((s, m) => s + m.amountCents, 0),
-                currency,
-              )}{' '}
-              total
-            </span>
+        <section className="space-y-3" aria-labelledby="by-currency-heading">
+          <h3 id="by-currency-heading" className="text-sm font-medium">
+            By currency
+          </h3>
+          <Table minWidth="min-w-[52rem]">
+            <caption className="sr-only">
+              Monthly recurring revenue and the last 30 days of revenue, one row per currency, never added together
+            </caption>
+            <THead>
+              <TR>
+                <TH>Currency</TH>
+                <TH align="right">MRR</TH>
+                <TH align="right">Active subscriptions</TH>
+                <TH align="right">Gross (30d)</TH>
+                <TH align="right">Refunded (30d)</TH>
+                <TH align="right">Net (30d)</TH>
+                <TH align="right">Payments (30d)</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {figures.map((row) => (
+                <TR key={row.currency}>
+                  <TD>
+                    <span className="font-mono">{row.currency}</span>
+                    {row.currency === reporting && (
+                      <Badge tone="brand" className="ml-1.5">
+                        reporting
+                      </Badge>
+                    )}
+                  </TD>
+                  <TD align="right" mono>{formatMoney(row.mrr, row.currency)}</TD>
+                  <TD align="right" mono>{row.activeSubscriptions.toLocaleString('en-US')}</TD>
+                  <TD align="right" mono>{formatMoney(row.gross, row.currency)}</TD>
+                  <TD align="right" mono>{formatMoney(row.refunded, row.currency)}</TD>
+                  <TD align="right" mono>{formatMoney(row.net, row.currency)}</TD>
+                  <TD align="right" mono>{row.payments.toLocaleString('en-US')}</TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+          <p className="max-w-prose text-xs text-[var(--color-muted-fg)]">
+            There is no total row. A local price may be set for what buyers in that country can pay, so
+            adding currencies together, or converting them, would report money nobody was charged.
+          </p>
+        </section>
+      )}
+
+      {/* One chart per currency, each on its own scale. Never stacked. */}
+      {stats && (
+        <section className="space-y-3" aria-labelledby="monthly-heading">
+          <h3 id="monthly-heading" className="text-sm font-medium">
+            Revenue by month, last 12 months
+          </h3>
+          <div className={`grid gap-4 ${charts.length > 1 ? 'lg:grid-cols-2' : ''}`}>
+            {charts.map((series) => (
+              <div
+                key={series.currency}
+                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
+              >
+                <div className="mb-4 flex items-baseline justify-between gap-2">
+                  <h4 className="font-mono text-sm font-medium">{series.currency}</h4>
+                  <span className="text-xs text-[var(--color-muted-fg)]">
+                    {formatMoney(series.total, series.currency)} in 12 months
+                  </span>
+                </div>
+                <RevenueChart series={series} />
+              </div>
+            ))}
           </div>
-          <RevenueBarChart data={stats.monthlyRevenue} currency={currency} />
+          {charts.length > 1 && (
+            <p className="text-xs text-[var(--color-muted-fg)]">
+              Each chart is scaled to its own currency, so bar heights compare months within one chart and
+              not one currency with another.
+            </p>
+          )}
         </section>
       )}
 
@@ -189,7 +303,12 @@ export default async function BillingOverviewPage({
               {recentPayments.map((p) => (
                 <TR key={p.id} hover>
                   <TD muted className="whitespace-nowrap text-xs">
-                    {formatDateTime(p.createdAt)}
+                    <Link
+                      href={`/applications/${id}/payments/${encodeURIComponent(p.id)}`}
+                      className="underline decoration-[var(--color-border)] underline-offset-2 hover:text-[var(--color-fg)]"
+                    >
+                      {formatDateTime(p.createdAt)}
+                    </Link>
                   </TD>
                   <TD>
                     {p.endUserId && p.endUserEmail ? (
@@ -218,79 +337,6 @@ export default async function BillingOverviewPage({
           </Table>
         )}
       </section>
-    </div>
-  );
-}
-
-/**
- * Inline SVG bar chart for the 12-month revenue series. No chart library,
- * same approach as the overview page's sign-up AreaChart. One bar per month,
- * scaled to the series max; months render even when zero so gaps are visible.
- */
-function RevenueBarChart({
-  data,
-  currency,
-}: {
-  data: Array<{ month: string; amountCents: number }>;
-  currency: string;
-}): React.JSX.Element {
-  const max = Math.max(1, ...data.map((d) => d.amountCents));
-  const total = data.reduce((s, d) => s + d.amountCents, 0);
-  // "2026-06" → "Jun" (UTC, matching the API's UTC month bucketing).
-  const monthLabel = (key: string): string => {
-    const [y, m] = key.split('-').map(Number);
-    return new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, 1)).toLocaleString('en', {
-      month: 'short',
-      timeZone: 'UTC',
-    });
-  };
-
-  return (
-    <div className="mt-4">
-      {/* Screen-reader equivalent of the visual chart: hover titles on the
-          bars aren't focusable, so the values live in this sr-only table. */}
-      <table className="sr-only">
-        <caption>Revenue by month, last 12 months</caption>
-        <thead>
-          <tr>
-            <th scope="col">Month</th>
-            <th scope="col">Revenue</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.map((d) => (
-            <tr key={d.month}>
-              <th scope="row">{d.month}</th>
-              <td>{formatMoney(d.amountCents, currency)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div aria-hidden="true">
-        <div className="flex items-end gap-1.5 h-32">
-          {data.map((d) => (
-            <div key={d.month} className="flex-1 flex flex-col items-center gap-1 min-w-0 h-full justify-end">
-              <div
-                className="w-full rounded-sm bg-[color-mix(in_srgb,var(--color-primary)_70%,transparent)] hover:bg-[var(--color-primary)] transition-colors"
-                style={{ height: `${Math.max(d.amountCents === 0 ? 1 : 4, (d.amountCents / max) * 100)}%` }}
-                title={`${d.month}: ${formatMoney(d.amountCents, currency)}`}
-              />
-            </div>
-          ))}
-        </div>
-        <div className="flex gap-1.5 mt-1">
-          {data.map((d) => (
-            <span key={d.month} className="flex-1 text-center text-[10px] text-[var(--color-muted-fg)] truncate">
-              {monthLabel(d.month)}
-            </span>
-          ))}
-        </div>
-      </div>
-      {total === 0 && (
-        <p className="mt-2 text-xs text-[var(--color-muted-fg)]">
-          No settled revenue yet. Successful payments will chart here month by month.
-        </p>
-      )}
     </div>
   );
 }

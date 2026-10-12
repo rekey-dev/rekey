@@ -90,7 +90,7 @@ describe('PayPal webhook', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug, name: slug, amount: 999 },
+      payload: { slug, name: slug, price: { currency: 'USD', amount: 999 } },
     });
     expect(res.statusCode).toBe(201);
   }
@@ -223,6 +223,58 @@ describe('PayPal webhook', () => {
     expect(payments[0]!.status).toBe('SUCCEEDED');
     expect(payments[0]!.amount).toBe(999); // 9.99 → 999 minor units
     expect(payments[0]!.currency).toBe('USD');
+  });
+
+  it('a sale whose amount cannot be recorded writes payment.not_recorded with the amount as PayPal wrote it, and no payment', async () => {
+    await createPlan('pro');
+    const user = await signUpUser();
+    const { subId, paypalSubId } = await checkoutPaypal(user.token, 'pro');
+    await postEvent('BILLING.SUBSCRIPTION.ACTIVATED', { id: paypalSubId, custom_id: `${applicationId}:${user.id}` });
+    const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+
+    const unparseable = await postEvent('PAYMENT.SALE.COMPLETED', {
+      id: 'SALE-BAD',
+      billing_agreement_id: paypalSubId,
+      amount: { total: '9.999', currency: 'USD' },
+    });
+    expect(unparseable.statusCode, unparseable.body).toBe(200);
+    const oversized = await postEvent('PAYMENT.SALE.COMPLETED', {
+      id: 'SALE-HUGE',
+      billing_agreement_id: paypalSubId,
+      amount: { total: '30000000.00', currency: 'USD' },
+    });
+    expect(oversized.statusCode, oversized.body).toBe(200);
+    const refund = await postEvent('PAYMENT.SALE.REVERSED', { id: 'SALE-REV', amount: { total: 'ten', currency: 'USD' } });
+    expect(refund.statusCode, refund.body).toBe(200);
+
+    expect(await prisma.payment.findMany({ where: { applicationId } })).toEqual([]);
+    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect(after.currentPeriodEnd).toEqual(before.currentPeriodEnd);
+
+    const logged = await prisma.billingEvent.findMany({
+      where: { applicationId, type: 'payment.not_recorded' },
+      orderBy: { seq: 'asc' },
+    });
+    expect(logged.map((event) => ({ provider: event.provider, currency: event.currency, amount: event.amount, data: event.data }))).toEqual([
+      {
+        provider: 'paypal',
+        currency: 'USD',
+        amount: null,
+        data: { kind: 'charge', reason: 'amount_not_storable', providerPaymentId: 'SALE-BAD', providerRefundId: null, reportedAmount: '9.999' },
+      },
+      {
+        provider: 'paypal',
+        currency: 'USD',
+        amount: null,
+        data: { kind: 'charge', reason: 'amount_not_storable', providerPaymentId: 'SALE-HUGE', providerRefundId: null, reportedAmount: '30000000.00' },
+      },
+      {
+        provider: 'paypal',
+        currency: 'USD',
+        amount: null,
+        data: { kind: 'refund', reason: 'amount_not_storable', providerPaymentId: 'SALE-REV', providerRefundId: null, reportedAmount: 'ten' },
+      },
+    ]);
   });
 
   it('BILLING.SUBSCRIPTION.SUSPENDED → PAST_DUE (not a hard cancel)', async () => {

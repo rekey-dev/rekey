@@ -19,6 +19,7 @@
 import { cookies } from 'next/headers';
 import { apiGet, unlessBusy, type SecurityEventRow } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
+import type { SupportCaseDto } from '@/lib/support-mode';
 
 export interface EndUserDetailDto {
   endUser: {
@@ -95,10 +96,13 @@ export interface SubscriptionRow {
     slug: string;
     name: string;
     kind: string;
-    amount: number;
-    currency: string;
     interval: string | null;
   };
+  /**
+   * What this subscription costs: the price its checkout, grant or import
+   * fixed. Null for a subscription with no price of its own.
+   */
+  price: { amount: number; currency: string } | null;
 }
 
 export interface BillingDto {
@@ -189,6 +193,44 @@ export function getEndUserBan(
   return apiGet<{ state: BanStateDto; history: BanHistoryRow[] }>(`${base(applicationId, euid)}/ban`, {
     interruptOnAccessError: false,
   }).catch(unlessBusy(() => null));
+}
+
+export interface SupportEventRow {
+  id: string;
+  type: 'end_user.support_opened' | 'end_user.support_updated' | 'end_user.support_closed';
+  actorEmail: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface EndUserSupportDto {
+  open: SupportCaseDto | null;
+  /** The last 20 closed cases, newest first. */
+  history: SupportCaseDto[];
+  events: SupportEventRow[];
+}
+
+/** Null on failure, like the ban read above. For the Support mode tab only. */
+export function getEndUserSupport(applicationId: string, euid: string): Promise<EndUserSupportDto | null> {
+  return apiGet<EndUserSupportDto>(`${base(applicationId, euid)}/support`, {
+    interruptOnAccessError: false,
+  }).catch(unlessBusy(() => null));
+}
+
+/**
+ * Whether the end-user has an open support case, for the header badge every
+ * tab renders. One row from the case list, not the full support read with its
+ * history and events. Null on failure, so the header shows no badge rather
+ * than breaking the page.
+ */
+export function hasOpenSupportCase(applicationId: string, euid: string): Promise<boolean | null> {
+  const query = new URLSearchParams({ status: 'open', endUserId: euid, limit: '1' });
+  return apiGet<Page<SupportCaseDto>>(
+    `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/support-cases?${query.toString()}`,
+    { interruptOnAccessError: false },
+  )
+    .then((page) => page.items.length > 0)
+    .catch(unlessBusy(() => null));
 }
 
 /**

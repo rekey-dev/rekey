@@ -148,6 +148,9 @@ const ALLOWED_BARE_ARRAYS: ReadonlySet<string> = new Set<string>([
   // needs no entry here.)
   'GET /api/v1/tenant/applications/{id}/application-roles → 200',
   'GET /api/v1/tenant/applications/{id}/organization-roles → 200',
+  // The support capability catalogue: authored by hand like the role
+  // catalogs, and capped at 100 names on the write path.
+  'GET /api/v1/tenant/applications/{id}/support-capabilities → 200',
   // The same organization-role catalog, read by an end-user so an org-admin UI
   // can populate its role picker. Bounded by the operator-authored catalog it
   // reflects, not by how many organizations or members exist.

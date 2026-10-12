@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/shared-types",
-  "version": "2.2.0-rc.6",
+  "version": "2.2.0-rc.7",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -29,6 +29,11 @@
       "types": "./dist/checkout.d.ts",
       "import": "./dist/checkout.js",
       "default": "./dist/checkout.js"
+    },
+    "./currency": {
+      "types": "./dist/currency/index.d.ts",
+      "import": "./dist/currency/index.js",
+      "default": "./dist/currency/index.js"
     },
     "./package.json": "./package.json"
   },

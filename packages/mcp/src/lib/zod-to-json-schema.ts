@@ -2,10 +2,11 @@
  * Tiny Zod → JSON Schema shim sufficient for MCP tool input descriptors.
  *
  * The MCP `tools/list` response wants each tool's `inputSchema` as a JSON
- * Schema object. We only use a small Zod subset (objects of strings /
- * booleans / optionals with descriptions), so reaching for `zod-to-json-schema`
- * as a full dependency is overkill, this 30-line implementation covers it
- * and stays auditable. If the tool surface grows, swap in the npm package.
+ * Schema object. We only use a small Zod subset (objects of strings, numbers,
+ * booleans, enums, arrays and optionals with descriptions), so reaching for
+ * `zod-to-json-schema` as a full dependency is overkill: this implementation
+ * covers it and stays auditable. If the tool surface grows, swap in the npm
+ * package.
  */
 
 import { z } from 'zod';
@@ -39,7 +40,7 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
   }
   if (schema instanceof z.ZodString) return { type: 'string' };
   if (schema instanceof z.ZodEnum) return { type: 'string', enum: [...(schema.options as string[])] };
-  if (schema instanceof z.ZodNumber) return { type: 'number' };
+  if (schema instanceof z.ZodNumber) return { type: schema.isInt ? 'integer' : 'number' };
   if (schema instanceof z.ZodBoolean) return { type: 'boolean' };
   if (schema instanceof z.ZodArray) {
     return { type: 'array', items: zodToJsonSchema(schema.element) };

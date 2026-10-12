@@ -2,21 +2,24 @@
 /**
  * @rekey.dev/mcp, Model Context Protocol server.
  *
- * Speaks MCP over stdio, exposing introspection tools for Rekey
- * (Applications, Plans, Coupons, API keys, Tenants) plus a single guarded
- * WRITE tool (`mint_api_key`). Designed to be wired into Claude Desktop,
- * Cursor, and Claude Code so an AI agent can answer "what plans does this app
- * have?" or mint a fresh API key without screenshots.
+ * Speaks MCP over stdio. Designed to be wired into Claude Desktop, Cursor and
+ * Claude Code so an AI agent can answer "what plans does this app have?" or
+ * "why was this buyer charged in dollars?" without screenshots.
  *
- * Read tools use `SUPER_ADMIN_KEY` (global scope). The write tool uses a SCOPED
- * operator personal-access-token (`REKEY_OPERATOR_TOKEN`, an `rp_op_…` token)
- * and is rejected server-side unless that PAT carries the `keys:mint` scope,
- * default-deny, so an agent can't mutate production unless explicitly granted.
+ * Two credentials, by tool:
  *
- * At least ONE credential is required. An agent that should only mint keys can
- * run with `REKEY_OPERATOR_TOKEN` alone (no master key), read tools then fail
- * closed with `READ_REQUIRES_ADMIN_KEY`. Configure `SUPER_ADMIN_KEY` too to
- * enable the global read/introspection tools.
+ *   - `SUPER_ADMIN_KEY` (global scope) authenticates the deployment-wide read
+ *     tools: tenants, applications, plans, coupons, API keys, payments, the
+ *     billing outbox.
+ *   - `REKEY_OPERATOR_TOKEN` (an `rp_op_…` token, scoped to one workspace)
+ *     authenticates the billing tools of one Application and every WRITE
+ *     tool. The server refuses a call whose token lacks the scope the route
+ *     asks for (`billing:read`, `billing:write`, `keys:mint`): default-deny,
+ *     so an agent cannot change production unless explicitly granted.
+ *
+ * At least ONE credential is required. With the operator token alone the
+ * admin read tools fail closed with `READ_REQUIRES_ADMIN_KEY`; with the admin
+ * key alone the operator tools fail closed with `OPERATOR_TOKEN_MISSING`.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -56,8 +59,8 @@ export function createServer(env: NodeJS.ProcessEnv = process.env):
   | { ok: false; message: string } {
   const apiUrl = env.REKEY_URL ?? '';
   const adminKey = env.SUPER_ADMIN_KEY ?? '';
-  // Optional: only required by the `mint_api_key` write tool. Read tools work
-  // without it. When absent, the write tool fails closed with a clear error.
+  // Optional: the admin read tools work without it. When absent, the tools
+  // that need it fail closed with OPERATOR_TOKEN_MISSING.
   const operatorToken = env.REKEY_OPERATOR_TOKEN ?? '';
 
   if (!apiUrl || (!adminKey && !operatorToken)) {
@@ -65,7 +68,7 @@ export function createServer(env: NodeJS.ProcessEnv = process.env):
       ok: false,
       message:
         `[rekey-mcp] missing required env: REKEY_URL plus at least one credential ` +
-        `(SUPER_ADMIN_KEY for read tools and/or REKEY_OPERATOR_TOKEN for the keys:mint write tool).\n` +
+        `(SUPER_ADMIN_KEY for the deployment-wide read tools and/or REKEY_OPERATOR_TOKEN for the billing and write tools).\n` +
         `[rekey-mcp] fix: configure these in the MCP client (Claude Desktop config, Cursor MCP settings, …)\n`,
     };
   }

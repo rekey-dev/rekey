@@ -5,47 +5,45 @@
  *   rekey plans create --app <id> --slug <slug> --name <name> --amount <int>
  *                        [--currency USD] [--interval MONTH|YEAR]
  *   rekey plans set-active --app <id> --slug <slug> --active true|false
+ *   rekey plans local-prices <slug> <inherit|trusted|off> --app <id>
+ *   rekey plans prices list|add|update|archive …   (see `plan-prices.ts`)
  *
- * Money is the smallest currency unit (cents), never floats. The CLI refuses
- * fractional `--amount` values to prevent silent rounding bugs.
+ * An amount is a whole number of minor units of its currency, never a float,
+ * and is printed for a person with `formatMoney`.
  *
  * `create` posts to the super-admin route, which builds SUBSCRIPTION plans and
- * nothing else. This command used to carry LICENSE / USAGE / CREDIT flags and
- * claim the API validated the per-kind combinations for us. It never did: that
- * route's body schema has no such fields, so it discarded them and answered
- * 201 for a SUBSCRIPTION plan. `--kind LICENSE --credits-amount 500` reported
- * success and created the wrong plan. The flags are refused here now, and the
- * route rejects an unknown key rather than dropping it.
+ * nothing else, and whose body is closed: an unknown key is refused. The
+ * LICENSE, USAGE and CREDIT flags this command once carried were discarded by
+ * that route while it answered 201, so they are refused here by name.
  *
  * Per-kind plans are created from the panel, or from
  * POST /api/v1/tenant/applications/:id/plans, which implements every kind.
  */
 
 import { Option, type Command } from 'commander';
-import type { Paged } from '@rekey.dev/node';
+import { formatMoney, validatePriceAmount, type Paged, type PlanDto, type UpdatePlanRequest } from '@rekey.dev/node';
 import { ok, fail, readGlobalOpts } from '../lib/output.js';
-import { adminRequest, listQuery, readListOpts, withListOptions } from '../lib/api.js';
+import { adminRequest, listQuery, operatorRequest, readListOpts, withListOptions } from '../lib/api.js';
+import { MINOR_UNITS_HELP, appPath } from '../lib/input.js';
+import { priceLine, registerPlanPricesCommand } from './plan-prices.js';
 
-interface PlanDto {
-  id: string;
-  applicationId: string;
-  slug: string;
-  name: string;
-  amount: number;
-  currency: string;
-  interval: string;
-  kind: string;
-  licenseKind: string | null;
-  licenseSeatsAllowed: number | null;
-  licenseDurationDays: number | null;
-  meterSlug: string | null;
-  pricePerUnitCents: number | null;
-  creditsAmount: number | null;
-  active: boolean;
+/**
+ * What a plan charges, in a few words.
+ *
+ * @example
+ * planHeadline(plan); // '$19.00/MONTH', 'free' or 'no flat price'
+ */
+export function planHeadline(plan: Pick<PlanDto, 'prices' | 'isFree' | 'interval'>): string {
+  const defaultPrice = plan.prices.find((price) => price.isDefault);
+  if (defaultPrice !== undefined) return `${formatMoney(defaultPrice.amount, defaultPrice.currency)}/${plan.interval}`;
+  return plan.isFree ? 'free' : 'no flat price';
 }
+
+const LOCAL_PRICES_RULES = ['INHERIT', 'TRUSTED', 'OFF'] as const;
 
 export function registerPlansCommand(program: Command): void {
   const plans = program.command('plans').description('Manage Plans');
+  registerPlanPricesCommand(plans);
 
   withListOptions(
     plans
@@ -64,8 +62,6 @@ export function registerPlansCommand(program: Command): void {
         ...readListOpts(ctx, opts),
       });
       const path = `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans${qs}`;
-      // `{items, page}` since 2.0.0-rc.3, see `apps list` for why the page is
-      // printed rather than silently dropped.
       const data = await adminRequest<Paged<PlanDto>>({ ctx, method: 'GET', path });
       ok(ctx, { plans: data.items, page: data.page }, (d) => {
         if (d.plans.length === 0) {
@@ -73,10 +69,9 @@ export function registerPlansCommand(program: Command): void {
           return;
         }
         for (const p of d.plans) {
-          const flag = p.active ? '  ' : ' [inactive] ';
-          process.stdout.write(
-            `${p.slug.padEnd(20)} ${String(p.amount).padStart(8)} ${p.currency}/${p.interval}${flag}${p.name}\n`,
-          );
+          const flag = p.active ? '' : '  [inactive]';
+          process.stdout.write(`${p.slug.padEnd(20)} ${planHeadline(p)}  ${p.name}${flag}\n`);
+          for (const price of p.prices) process.stdout.write(`    ${priceLine(price)}\n`);
         }
         if (d.page.hasMore) {
           process.stdout.write(
@@ -94,13 +89,11 @@ export function registerPlansCommand(program: Command): void {
     .requiredOption('--app <id>', 'Application id')
     .requiredOption('--slug <slug>')
     .requiredOption('--name <name>')
-    .requiredOption('--amount <int>', 'Smallest currency unit, e.g. cents')
-    .option('--currency <code>', 'ISO 4217 — defaults to USD', 'USD')
+    .requiredOption('--amount <int>', `Integer, ${MINOR_UNITS_HELP}. 0 makes a free plan`)
+    .option('--currency <code>', 'ISO 4217, defaults to USD', 'USD')
     .option('--interval <interval>', 'MONTH | YEAR', 'MONTH')
-    // Hidden, not deleted. `--help` must not advertise a flag this route
-    // cannot honour, but a script or agent written against the old contract
-    // deserves the explanation below rather than commander's bare "unknown
-    // option". Every one of these is refused in the action.
+    // Hidden, not deleted: a script written against the old contract gets the
+    // explanation in the action instead of commander's bare "unknown option".
     .addOption(
       new Option('--kind <kind>', 'SUBSCRIPTION only on this route').default('SUBSCRIPTION').hideHelp(),
     )
@@ -108,7 +101,6 @@ export function registerPlansCommand(program: Command): void {
     .addOption(new Option('--license-duration-days <int>', 'Not supported here').hideHelp())
     .addOption(new Option('--license-seats-allowed <int>', 'Not supported here').hideHelp())
     .addOption(new Option('--meter-slug <slug>', 'Not supported here').hideHelp())
-    .addOption(new Option('--price-per-unit-cents <int>', 'Not supported here').hideHelp())
     .addOption(new Option('--credits-amount <int>', 'Not supported here').hideHelp())
     .action(async function (
       this: Command,
@@ -124,18 +116,25 @@ export function registerPlansCommand(program: Command): void {
         licenseDurationDays?: string;
         licenseSeatsAllowed?: string;
         meterSlug?: string;
-        pricePerUnitCents?: string;
         creditsAmount?: string;
       },
     ) {
       const ctx = readGlobalOpts(this);
 
-      const amountInt = Number(opts.amount);
-      if (!Number.isInteger(amountInt) || amountInt < 0) {
+      const amountInt = /^\d+$/.test(opts.amount.trim()) ? Number(opts.amount) : Number.NaN;
+      if (!Number.isSafeInteger(amountInt)) {
         fail(ctx, {
           code: 'CLI_PLANS_AMOUNT_INVALID',
-          message: `--amount must be a non-negative integer (smallest currency unit). Got "${opts.amount}".`,
-          fix: 'Pass an integer like 999 (= $9.99 in USD). Floats are rejected to prevent silent rounding.',
+          message: `--amount must be a whole number of minor units of ${opts.currency}, 0 or more. Got "${opts.amount}".`,
+          fix: 'Pass an integer such as 1900 for $19.00 or 5000 for ¥5,000. Decimals are refused so nothing is rounded.',
+        });
+      }
+      const price = amountInt === 0 ? { ok: true as const } : validatePriceAmount(opts.currency, amountInt);
+      if (!price.ok) {
+        fail(ctx, {
+          code: 'CLI_PLANS_AMOUNT_INVALID',
+          message: `--amount: ${price.message}`,
+          fix: 'Pass an amount the currency can be priced at, in a currency a price can be in (`--currency`).',
         });
       }
       if (!['MONTH', 'YEAR'].includes(opts.interval)) {
@@ -152,12 +151,6 @@ export function registerPlansCommand(program: Command): void {
           fix: 'Use SUBSCRIPTION, LICENSE, USAGE, or CREDIT.',
         });
       }
-      // The per-kind flags are refused BEFORE the request, not after it. The
-      // super-admin route implements SUBSCRIPTION only; it used to validate
-      // these fields away and answer 201, so the CLI reported success for a
-      // plan of the wrong kind. Fail here, and name the surface that does
-      // implement them, rather than letting the operator find out from a
-      // pricing page that sells the wrong thing.
       const unsupported: string[] = [];
       if (opts.kind !== 'SUBSCRIPTION') unsupported.push(`--kind ${opts.kind}`);
       for (const [value, flag] of [
@@ -165,7 +158,6 @@ export function registerPlansCommand(program: Command): void {
         [opts.licenseDurationDays, '--license-duration-days'],
         [opts.licenseSeatsAllowed, '--license-seats-allowed'],
         [opts.meterSlug, '--meter-slug'],
-        [opts.pricePerUnitCents, '--price-per-unit-cents'],
         [opts.creditsAmount, '--credits-amount'],
       ] as const) {
         if (value !== undefined) unsupported.push(flag);
@@ -187,31 +179,17 @@ export function registerPlansCommand(program: Command): void {
         ctx,
         method: 'POST',
         path: `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans`,
-        // Exactly the fields the admin route implements. It rejects an unknown
-        // key now instead of dropping it, so sending `kind` (even the correct
-        // SUBSCRIPTION) would be a 400 rather than a no-op.
+        // The route's body is closed: `kind`, even the correct SUBSCRIPTION, is a 400.
         body: {
           slug: opts.slug,
           name: opts.name,
-          amount: amountInt,
-          currency: opts.currency,
+          // A plan with no price is free: the route takes no amount of zero.
+          ...(amountInt > 0 && { price: { currency: opts.currency.toUpperCase(), amount: amountInt } }),
           interval: opts.interval,
         },
       });
       ok(ctx, data, (d) => {
-        let detail: string;
-        if (d.kind === 'LICENSE') {
-          detail = `${d.amount} ${d.currency} · ${d.licenseKind ?? '?'}`;
-          if (d.licenseKind === 'TIMED') detail += ` (${d.licenseDurationDays}d)`;
-          if (d.licenseKind === 'SEATS') detail += ` (${d.licenseSeatsAllowed} seats)`;
-        } else if (d.kind === 'USAGE') {
-          detail = `${d.pricePerUnitCents}¢/unit on ${d.meterSlug}`;
-        } else if (d.kind === 'CREDIT') {
-          detail = `${d.amount} ${d.currency} → ${d.creditsAmount} credits`;
-        } else {
-          detail = `${d.amount} ${d.currency}/${d.interval}`;
-        }
-        process.stdout.write(`✓ ${d.slug} [${d.kind}]  ${detail}\n`);
+        process.stdout.write(`✓ ${d.slug} [${d.kind}]  ${planHeadline(d)}\n`);
       });
     });
 
@@ -239,6 +217,39 @@ export function registerPlansCommand(program: Command): void {
       });
       ok(ctx, data, (d) => {
         process.stdout.write(`✓ ${d.slug} → active=${d.active}\n`);
+      });
+    });
+
+  plans
+    .command('local-prices')
+    .description(
+      "Set whether a buyer's country may select one of a plan's prices in another currency. " +
+        'inherit: follow the Application setting. trusted: only a country your server declared or a trusted proxy vouched for. ' +
+        'off: every buyer is charged the default price unless your server names a currency. Needs REKEY_OPERATOR_TOKEN',
+    )
+    .argument('<slug>', 'Plan slug')
+    .argument('<rule>', 'inherit | trusted | off')
+    .requiredOption('--app <id>', 'Application id')
+    .action(async function (this: Command, slug: string, ruleArg: string, opts: { app: string }) {
+      const ctx = readGlobalOpts(this);
+      const rule = LOCAL_PRICES_RULES.find((each) => each === ruleArg.trim().toUpperCase());
+      if (rule === undefined) {
+        fail(ctx, {
+          code: 'CLI_PLANS_LOCAL_PRICES_INVALID',
+          message: `<rule> must be inherit, trusted or off. Got "${ruleArg}".`,
+          fix: 'Pass inherit to follow the Application setting, trusted for a verified country only, or off to charge every buyer the default price.',
+        });
+      }
+      const body: UpdatePlanRequest = { localPrices: rule };
+      const data = await operatorRequest<PlanDto>({
+        ctx,
+        method: 'PATCH',
+        path: appPath(opts.app, `/plans/${encodeURIComponent(slug)}`),
+        body,
+        scope: 'billing:write',
+      });
+      ok(ctx, data, (d) => {
+        process.stdout.write(`✓ ${d.slug}  local prices: ${d.localPrices.toLowerCase()}\n`);
       });
     });
 }

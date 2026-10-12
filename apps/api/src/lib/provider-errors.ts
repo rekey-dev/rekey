@@ -56,7 +56,7 @@ const OPERATOR_FIX =
   'Re-check the API key / client secret + mode under the Application’s billing credentials, then retry.';
 
 const END_USER_FIX =
-  'Nothing to fix on this end — the payment provider for this application refused the request. ' +
+  'Nothing to fix on this end. The payment provider for this application refused the request. ' +
   'Contact the operator of this application, or retry in a few minutes if it was transient.';
 
 /**

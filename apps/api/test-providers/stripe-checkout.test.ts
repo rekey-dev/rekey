@@ -61,8 +61,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
       applicationId: fixture.applicationId,
       slug: plan.slug,
       name: `${HARNESS_PREFIX} ${plan.slug} ${runId}`,
-      amount: plan.amount,
-      currency: 'usd',
+      price: { currency: 'usd', amount: plan.amount },
       interval: 'MONTH',
       ...(plan.kind === 'CREDIT' && { kind: 'CREDIT' as const, creditsAmount: 500 }),
     });
@@ -134,8 +133,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
       applicationId: fixture.applicationId,
       code: `${HARNESS_PREFIX}-25`,
       discountType: 'PERCENT',
-      amountOff: 2500,
-      currency: 'usd',
+      basisPoints: 2500,
     });
 
     const res = await startCheckout(fixture, {
@@ -208,8 +206,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
       applicationId: fixture.applicationId,
       code: `${HARNESS_PREFIX}-full`,
       discountType: 'AMOUNT',
-      amountOff: 1200,
-      currency: 'usd',
+      amounts: [{ currency: 'usd', amountOff: 1200 }],
     });
 
     const before = await stripe.coupons.list({ limit: 5 });

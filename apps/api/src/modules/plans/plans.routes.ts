@@ -2,9 +2,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { assertMetadataWithinLimit } from "../../lib/metadata-limit.js";
 import { plansService } from "./plans.service.js";
+import { withPrices, withPricesForAll } from "./plan-dto.js";
 import { applicationsService } from "../applications/applications.service.js";
 import { requireSuperAdmin } from "../../middleware/admin-auth.js";
-import { moneyAmount } from "../../lib/bounded-int.js";
+import { PLAN_PRICE_JSON_SCHEMA, PlanPriceBody, assertNoRemovedPlanFields } from "./plan-body.js";
+import { PLAN_LOCAL_PRICES, PLAN_LOCAL_PRICES_DESCRIPTION, PlanLocalPricesBody } from "./local-prices.js";
 import { ok, okArray, okPage, errs, ref } from "../../lib/openapi.js";
 import { entitlementsService } from "../billing/entitlements.service.js";
 import {
@@ -17,10 +19,10 @@ import {
 /** The 401/403 pair every `/api/v1/admin/*` route shares. */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the Retry-After header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the Retry-After header.",
 } as const;
 
 const Params = z.object({ id: z.string().min(1) });
@@ -54,8 +56,7 @@ const CreateBody = z
   .object({
     slug: z.string().min(1).max(40),
     name: z.string().min(1).max(120),
-    amount: moneyAmount(),
-    currency: z.string().length(3).optional(),
+    price: PlanPriceBody.optional(),
     interval: z.enum(["MONTH", "YEAR"]).optional(),
     metadata: z.record(z.unknown()).optional(),
   })
@@ -66,9 +67,9 @@ const UpdateBody = z
   .object({
     active: z.boolean().optional(),
     name: z.string().min(1).max(120).optional(),
-    amount: z.number().int().min(0).optional(),
-    currency: z.string().length(3).optional(),
+    price: PlanPriceBody.nullable().optional(),
     interval: z.enum(["MONTH", "YEAR"]).optional(),
+    localPrices: PlanLocalPricesBody.optional(),
     metadata: z.record(z.unknown()).optional(),
   })
   .refine((b) => Object.values(b).some((v) => v !== undefined), {
@@ -101,9 +102,9 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
           // Handler returns a bare array, see the module report.
           200: okPage(ref("Plan"), "Plans for this application."),
           ...errs({
-            400: "VALIDATION_ERROR — `includeInactive` is not a boolean.",
+            400: "VALIDATION_ERROR: `includeInactive` is not a boolean.",
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
           }),
         },
       },
@@ -120,7 +121,7 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
         }),
         plansService.countForApplication(id, includeInactive ?? false),
       ]);
-      return { success: true, data: paged(items, total, take, skip) };
+      return { success: true, data: paged(await withPricesForAll(items), total, take, skip) };
     },
   );
 
@@ -134,7 +135,9 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
         description:
           "Creates a Plan locally, then registers it with Stripe if the Application has Stripe " +
           "credentials stored. PayPal and Razorpay register the plan lazily at first checkout. " +
-          "Amount is in the smallest currency unit (cents/paise/sen, never a decimal float).\n\n" +
+          "`price` is the plan's default price, with `amount` in the minor unit of its currency; " +
+          "leave it out for a free plan. The top-level `amount` and `currency` were removed: a " +
+          "body that sends one is refused with `BILLING_FIELD_REMOVED`.\n\n" +
           "Creates SUBSCRIPTION plans only, and the body is closed: a key this route does not " +
           "implement (`kind`, `licenseKind`, `creditsAmount`, `trialDays`, or a typo) is " +
           "refused, not ignored. LICENSE, USAGE and CREDIT plans are created on the tenant " +
@@ -146,21 +149,13 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
         },
         body: {
           type: "object",
-          required: ["slug", "name", "amount"],
+          required: ["slug", "name"],
           properties: {
             slug: { type: "string", minLength: 1, maxLength: 40 },
             name: { type: "string", minLength: 1, maxLength: 120 },
-            amount: {
-              type: "integer",
-              minimum: 0,
-              description: "Smallest currency unit (e.g. cents).",
-              maximum: 2147483647,
-            },
-            currency: {
-              type: "string",
-              minLength: 3,
-              maxLength: 3,
-              description: "ISO 4217. Defaults to USD.",
+            price: {
+              ...PLAN_PRICE_JSON_SCHEMA,
+              description: "The plan's default price. Left out, the plan is free.",
             },
             interval: { type: "string", enum: ["MONTH", "YEAR"] },
             metadata: { type: "object", additionalProperties: true },
@@ -178,31 +173,34 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
             // rather than dropped, so the caller learns that here instead of
             // from the plan they did not want. See `CreateBody`.
             400:
-              "VALIDATION_ERROR — a field failed schema validation, or the body carries a key " +
+              "VALIDATION_ERROR: a field failed schema validation, or the body carries a key " +
               "this route does not implement (`kind`, `licenseKind`, `creditsAmount`, " +
-              "`trialDays`, ...), which is refused rather than ignored; or PLAN_SLUG_INVALID — " +
-              "the slug is not URL-safe; or PLAN_AMOUNT_INVALID — `amount` is negative.",
+              "`trialDays`, ...), which is refused rather than ignored; or PLAN_SLUG_INVALID: " +
+              "the slug is not URL-safe; or BILLING_FIELD_REMOVED: the body sends `amount`, " +
+              "`currency` or `pricePerUnitCents` at the top level; or PLAN_PRICE_CURRENCY_INVALID / " +
+              "PLAN_PRICE_CURRENCY_UNSUPPORTED / PLAN_PRICE_AMOUNT_INVALID: `price` names a " +
+              "currency or an amount a price cannot have.",
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
-            409: "PLAN_SLUG_TAKEN — another plan on this application already uses that slug.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
+            409: "PLAN_SLUG_TAKEN: another plan on this application already uses that slug.",
           }),
         },
       },
     },
     async (req, reply) => {
       const { id } = Params.parse(req.params);
+      assertNoRemovedPlanFields(req.body, "create");
       const body = CreateBody.parse(req.body);
       if (body.metadata !== undefined) assertMetadataWithinLimit(body.metadata);
       const plan = await plansService.create({
         applicationId: id,
         slug: body.slug,
         name: body.name,
-        amount: body.amount,
-        ...(body.currency !== undefined && { currency: body.currency }),
+        ...(body.price !== undefined && { price: body.price }),
         ...(body.interval !== undefined && { interval: body.interval }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
       });
-      return reply.status(201).send({ success: true, data: plan });
+      return reply.status(201).send({ success: true, data: await withPrices(plan) });
     },
   );
 
@@ -214,9 +212,13 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
         security: [{ superAdminKey: [] }],
         summary: "Update a plan",
         description:
-          "Send any subset of the fields. `amount`, `currency` and `interval` are only accepted " +
+          "Send any subset of the fields. `price` and `interval` are only accepted " +
           "while the plan has not been registered with a payment provider (a provider price is " +
           "immutable once minted); a registered plan answers `PLAN_PRICE_IMMUTABLE`. " +
+          "`price: null` makes the plan free. The top-level `amount` and `currency` were removed " +
+          "and are refused with `BILLING_FIELD_REMOVED`. " +
+          "`localPrices` can change at any time; a change is written to the billing log as " +
+          "`plan.local_prices_changed`, by the system actor on this route. " +
           "`active: true` on a plan with no provider price answers " +
           "`PLAN_NOT_REGISTERED_WITH_PROVIDER`.",
         params: {
@@ -229,36 +231,46 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             active: { type: "boolean" },
             name: { type: "string", minLength: 1, maxLength: 120 },
-            amount: { type: "integer", minimum: 0 },
-            currency: { type: "string", minLength: 3, maxLength: 3 },
+            price: {
+              ...PLAN_PRICE_JSON_SCHEMA,
+              nullable: true,
+              description: "The plan's default price, or null to make it free. Unregistered plans only.",
+            },
             interval: { type: "string", enum: ["MONTH", "YEAR"] },
+            localPrices: { type: "string", enum: [...PLAN_LOCAL_PRICES], description: PLAN_LOCAL_PRICES_DESCRIPTION },
             metadata: { type: "object", additionalProperties: true },
           },
         },
         response: {
           200: ok(ref("Plan"), "The updated plan."),
           ...errs({
-            400: "VALIDATION_ERROR — `active` is missing or not a boolean.",
+            400:
+              "BAD_REQUEST: a field has the wrong type, or a value outside what its schema allows " +
+              "(`interval`, `localPrices`); or VALIDATION_ERROR: no field was sent, or `price` " +
+              "carries a key it does not take; or " +
+              "BILLING_FIELD_REMOVED: the body sends `amount`, `currency` or `pricePerUnitCents` " +
+              "at the top level.",
             ...SUPER_ADMIN_ERRORS,
-            404: "PLAN_NOT_FOUND — no plan with that slug in this application.",
+            404: "PLAN_NOT_FOUND: no plan with that slug in this application.",
           }),
         },
       },
     },
     async (req) => {
       const { id, slug } = PlanParams.parse(req.params);
+      assertNoRemovedPlanFields(req.body, "update");
       const body = UpdateBody.parse(req.body);
       if (body.metadata !== undefined) assertMetadataWithinLimit(body.metadata);
       return {
         success: true,
-        data: await plansService.update(id, slug, {
+        data: await withPrices(await plansService.update(id, slug, {
           ...(body.active !== undefined && { active: body.active }),
           ...(body.name !== undefined && { name: body.name }),
-          ...(body.amount !== undefined && { amount: body.amount }),
-          ...(body.currency !== undefined && { currency: body.currency }),
+          ...(body.price !== undefined && { price: body.price }),
           ...(body.interval !== undefined && { interval: body.interval }),
+          ...(body.localPrices !== undefined && { localPrices: body.localPrices }),
           ...(body.metadata !== undefined && { metadata: body.metadata }),
-        }),
+        })),
       };
     },
   );
@@ -333,13 +345,13 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
               "succeeded, unchanged if it was already REGISTERED or NOT_REQUIRED.",
           ),
           ...errs({
-            400: "BILLING_CREDENTIALS_NOT_CONFIGURED — this application has no stripe credentials configured.",
+            400: "BILLING_CREDENTIALS_NOT_CONFIGURED: this application has no stripe credentials configured.",
             ...SUPER_ADMIN_ERRORS,
             404:
-              "APPLICATION_NOT_FOUND — no application with that id; or PLAN_NOT_FOUND — no plan " +
+              "APPLICATION_NOT_FOUND: no application with that id; or PLAN_NOT_FOUND: no plan " +
               "with that slug on this application.",
             502:
-              "BILLING_PROVIDER_ERROR — stripe rejected the registration attempt (only reachable " +
+              "BILLING_PROVIDER_ERROR: stripe rejected the registration attempt (only reachable " +
               "while the plan was PENDING/FAILED). The plan's registrationStatus is now FAILED " +
               "with the provider's message attached (`registrationError`), and it stays off sale.",
           }),
@@ -351,7 +363,7 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
       await applicationsService.get(id);
       return {
         success: true,
-        data: await plansService.registerWithProvider(id, slug),
+        data: await withPrices(await plansService.registerWithProvider(id, slug)),
       };
     },
   );

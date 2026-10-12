@@ -150,6 +150,17 @@ describe('RazorpayPayment', () => {
     expect(button().disabled).toBe(false);
   });
 
+  it('mentions the UPI app only where UPI was offered', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'open' }), { status: 200 }));
+    mount({ kind: 'subscription', subscriptionId: 'sub_7' }, { upiFirst: false });
+    loadScript();
+    act(() => button().click());
+    await act(async () => {
+      opened[0]!.modal.ondismiss();
+    });
+    expect(status()).toBe('Payment not completed. You can try again.');
+  });
+
   it('moves on to confirming when the payment went through as the modal closed', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'confirming' }), { status: 200 }));
     mount({ kind: 'order', orderId: 'order_9' });

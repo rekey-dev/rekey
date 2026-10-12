@@ -290,6 +290,7 @@ export const STYLES = `
 /* The plan you are on, marked with a solid rule rather than a tint. A tinted
    card competes with the CTA for the same attention; a rule states a fact. */
 .rekey-plan-current { border-color: var(--rekey-color-primary); border-top-width: 2px; }
+.rekey-plan-unavailable .rekey-price { color: var(--rekey-color-text-muted); }
 .rekey-plan-name { font-weight: 600; }
 .rekey-price { font-size: 1.5rem; font-weight: 700; }
 .rekey-price-sub { font-size: 0.75rem; font-weight: 400; color: var(--rekey-color-text-muted); }

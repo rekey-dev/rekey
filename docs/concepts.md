@@ -30,7 +30,7 @@ An **Application** is one project under a Tenant — `MyApp-prod`, `MyApp-stagin
 - Has a publishable key (`rp_pub_<slug>_<rand>`) — a real browser credential for the public-bootstrap routes (sign-in/up, magic-link, passkey, license verify, plans). Rotatable with a grace window. See [api-keys.md](api-keys.md#publishable-key).
 - Has many ApiKeys (server-side secret keys).
 - Owns its own end-user pool — users do not cross Applications.
-- Owns its `authConfig` (which auth methods enabled, redirect URLs) and `billingConfig` (which provider, currency).
+- Owns its `authConfig` (which auth methods enabled, redirect URLs) and `billingConfig` (which provider, the reporting currency).
 
 A handy frame: a single Rekey instance with three Tenants, each running two Applications, looks like six totally independent SaaS systems sharing one DB.
 

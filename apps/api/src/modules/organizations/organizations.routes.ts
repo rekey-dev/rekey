@@ -53,12 +53,12 @@ import { requestClient } from '../../lib/client-platform.js';
  */
 const ORG_AUTH_ERRORS = {
   401:
-    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID — missing or invalid ' +
+    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID: missing or invalid ' +
     'Application credential; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / ' +
-    'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED — missing, invalid, or ' +
+    'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED: missing, invalid, or ' +
     "mismatched end-user token (X-Rekey-User-Token).",
   403:
-    'IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED — the caller is outside the presented key\'s ' +
+    'IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED: the caller is outside the presented key\'s ' +
     "allowlist; or API_KEY_SCOPE_INSUFFICIENT: a secret key was presented without the " +
     'scope the method needs (`auth:read` for GET, `auth:write` for every other method).',
 } as const;
@@ -192,9 +192,9 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             400:
-              'ORGANIZATIONS_NOT_ENABLED — `authConfig.organizationsEnabled` is false on this ' +
-              'Application; or ORGANIZATION_SLUG_INVALID — slug fails `[a-z0-9-]`, 1-40 chars.',
-            409: 'ORGANIZATION_SLUG_TAKEN — another organization on this Application already uses that slug.',
+              'ORGANIZATIONS_NOT_ENABLED: `authConfig.organizationsEnabled` is false on this ' +
+              'Application; or ORGANIZATION_SLUG_INVALID: slug fails `[a-z0-9-]`, 1-40 chars.',
+            409: 'ORGANIZATION_SLUG_TAKEN: another organization on this Application already uses that slug.',
           }),
         },
       },
@@ -336,7 +336,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           200: ok(ref('OrganizationWithRole'), 'The organization, with the caller\'s role.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
-            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member of this organization.`,
           }),
         },
       },
@@ -371,8 +371,8 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
-              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller is a MEMBER ' +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller is a MEMBER ' +
               '(update requires OWNER or ADMIN).',
           }),
         },
@@ -404,7 +404,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           200: okPage(ref('OrganizationMember'), 'A page of members of the organization.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
-            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member of this organization.`,
           }),
         },
       },
@@ -484,10 +484,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
-              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller\'s role ' +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller\'s role ' +
               'cannot invite to the requested role (ADMIN cannot invite an OWNER).',
-            409: 'ORGANIZATION_ALREADY_MEMBER — that email is already a member of this organization.',
+            409: 'ORGANIZATION_ALREADY_MEMBER: that email is already a member of this organization.',
           }),
         },
       },
@@ -515,7 +515,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           },
           token: result.rawToken,
           warning:
-            'Raw token shown ONCE. Share via your own channel — Rekey does not send organisation-invitation email at this time (planned).',
+            'Raw token shown ONCE. Share via your own channel. Rekey does not send organisation-invitation email at this time (planned).',
         },
       });
     },
@@ -540,10 +540,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
-              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller is a MEMBER ' +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller is a MEMBER ' +
               '(revoke requires OWNER or ADMIN).',
-            404: 'ORGANIZATION_INVITATION_NOT_FOUND — no invitation with that id in this organization.',
+            404: 'ORGANIZATION_INVITATION_NOT_FOUND: no invitation with that id in this organization.',
           }),
         },
       },
@@ -584,11 +584,11 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
-              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller's role " +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
+              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller's role " +
               "cannot manage the target's current or requested role.",
-            404: 'ORGANIZATION_MEMBER_NOT_FOUND — that user is not a member of this organization.',
-            409: 'ORGANIZATION_LAST_OWNER — cannot demote the only OWNER; promote another member first.',
+            404: 'ORGANIZATION_MEMBER_NOT_FOUND: that user is not a member of this organization.',
+            409: 'ORGANIZATION_LAST_OWNER: cannot demote the only OWNER; promote another member first.',
           }),
         },
       },
@@ -628,10 +628,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
-              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller's role " +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
+              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller's role " +
               'cannot remove the target (self-removal is always allowed).',
-            409: 'ORGANIZATION_LAST_OWNER — cannot remove the only OWNER; transfer ownership first.',
+            409: 'ORGANIZATION_LAST_OWNER: cannot remove the only OWNER; transfer ownership first.',
           }),
         },
       },
@@ -653,14 +653,14 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
     {
       schema: {
         tags: ['Public · Organizations'],
-        summary: 'Self-leave. OWNERs cannot leave (billing is tied to them) — transfer ownership first.',
+        summary: 'Self-leave. OWNERs cannot leave (billing is tied to them). Transfer ownership first.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         response: {
           200: ok(RemovedFlag, 'Whether the caller was removed.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
-            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
-            409: 'ORGANIZATION_OWNER_CANNOT_LEAVE — an OWNER cannot leave; transfer ownership first.',
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member of this organization.`,
+            409: 'ORGANIZATION_OWNER_CANNOT_LEAVE: an OWNER cannot leave; transfer ownership first.',
           }),
         },
       },
@@ -702,8 +702,8 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           200: ok(ref('AuthResult'), 'A fresh session pair carrying the active org.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
-            401: `${ORG_AUTH_ERRORS[401]} Or SESSION_DEVICE_RELEASED — the device this session is bound to was released; sign in again.`,
-            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization; or DEVICE_BLOCKED — an operator blocked the device this session is bound to.`,
+            401: `${ORG_AUTH_ERRORS[401]} Or SESSION_DEVICE_RELEASED: the device this session is bound to was released; sign in again.`,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member of this organization; or DEVICE_BLOCKED: an operator blocked the device this session is bound to.`,
           }),
         },
       },
@@ -821,12 +821,12 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
           ...errs({
             ...ORG_AUTH_ERRORS,
             400:
-              'ORGANIZATION_INVITATION_NOT_USABLE — the token is missing, revoked, or already ' +
-              'accepted; or ORGANIZATION_INVITATION_EXPIRED — past its `expiresAt`.',
-            401: `${ORG_AUTH_ERRORS[401]} Or ORGANIZATION_INVITATION_WRONG_APPLICATION — the ` +
+              'ORGANIZATION_INVITATION_NOT_USABLE: the token is missing, revoked, or already ' +
+              'accepted; or ORGANIZATION_INVITATION_EXPIRED: past its `expiresAt`.',
+            401: `${ORG_AUTH_ERRORS[401]} Or ORGANIZATION_INVITATION_WRONG_APPLICATION: the ` +
               'invitation belongs to a different Application than the presented key.',
             403:
-              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_INVITATION_EMAIL_MISMATCH — the signed-in ` +
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_INVITATION_EMAIL_MISMATCH: the signed-in ` +
               "end-user's email does not match the invited address.",
           }),
         },

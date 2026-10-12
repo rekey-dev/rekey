@@ -76,12 +76,14 @@ function sign(body: string, secret: string): string {
   return `t=${t},v1=${v1}`;
 }
 
-const body = JSON.stringify(event);
-await fetch(`${REKEY_URL}/api/v1/webhooks/billing/external/${APP_SLUG}`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', 'x-rekey-signature': sign(body, SECRET) },
-  body,
-});
+export async function send(event: object, rekeyUrl: string, appSlug: string, secret: string): Promise<Response> {
+  const body = JSON.stringify(event);
+  return fetch(`${rekeyUrl}/api/v1/webhooks/billing/external/${appSlug}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rekey-signature': sign(body, secret) },
+    body,
+  });
+}
 ```
 
 With curl and OpenSSL:
@@ -247,20 +249,33 @@ already chases the customer, leave that switch off. Post
 ```
 
 Optional bookkeeping so the panel's payment list and revenue figures include
-what you sold. `amount` is in the smallest currency unit. A succeeded payment
+what you sold. `amount` is an integer in the minor unit of `currency`. A succeeded payment
 for a `subscriptionId` Rekey does not hold is still recorded, unlinked, and
 appears in the operator's unapplied-payments queue so that money never goes
 unseen; resolve it there once the matching `subscription.activated` has
 landed. A failed payment for an unknown subscription is skipped.
 `payment.succeeded` emits `payment.succeeded` outbound.
 
+A succeeded payment for a subscription Rekey does hold is checked against it
+before anything is granted. One in another currency than the subscription is
+priced in, or 100 times its price or more, is still recorded, marked
+unverified, left unlinked and put in the unapplied-payments queue; the
+receipt says why. The one exception is a subscription nobody has paid at yet
+and no checkout priced: its first payment in another currency the plan has a
+price in moves the subscription to that price and is verified.
+
 `payment.refunded` carries the amount of THAT refund, not a running total.
-Rekey adds it to the payment's `refundedAmount` and sets the status to
-`PARTIALLY_REFUNDED`, or `REFUNDED` once the whole amount is back; revenue
-figures count what the buyer kept. A refund that would take the total past
-the payment is refused and recorded on the receipt as
-`BILLING_REFUND_EXCEEDS_PAYMENT`, as is one in another currency or for a
-payment Rekey never recorded. Refunds do not revoke entitlements, and
+Send `payment.refundId`, your own id for the refund, when you have one: a
+refund id is recorded once, whatever event carries it and however often it
+arrives. Without one, the event id is what stops a redelivery counting
+twice. Each refund becomes a row (`GET
+/api/v1/tenant/applications/:id/payments/:paymentId/refunds`), the payment's
+`refundedAmount` is their sum, and its status becomes `PARTIALLY_REFUNDED`, or
+`REFUNDED` once the whole amount is back; revenue figures count what the buyer
+kept. A refund that would take the total past the payment is refused and
+recorded on the receipt as `BILLING_REFUND_EXCEEDS_PAYMENT`, as is one in
+another currency or for a payment Rekey never recorded. Each recorded refund
+emits `payment.refunded` outbound. Refunds do not revoke entitlements, and
 disputes are not modelled.
 
 ### `ping`

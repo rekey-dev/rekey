@@ -44,7 +44,7 @@ import {
 import { PricingTableInteractive, type ProviderOption } from './provider-picker.js';
 import type { FormAction } from './auth-components.js';
 
-export type { PricingPlan, PlanTrialEligibility } from './pricing-shared.js';
+export type { PricingPlan, PricingPlanPrice, PricingPlanResolvedPrice, PlanTrialEligibility } from './pricing-shared.js';
 
 // ---------------------------------------------------------------------------
 // <CheckoutButton>
@@ -108,7 +108,12 @@ export function CheckoutButton(props: CheckoutButtonProps): React.JSX.Element {
 // ---------------------------------------------------------------------------
 
 export interface PricingTableProps {
-  /** Plans to render, fetch via `billing.getPlans()` server-side and pass here. */
+  /**
+   * Plans to render: the `items` of `billing.getPlans()` (server) or
+   * `getPlans()` (browser), passed as they are. Each card shows the plan's
+   * resolved `price.formatted`, so fetch the plans for the buyer you are
+   * rendering for: pass their `country`, and their access token when signed in.
+   */
   plans: PricingPlan[];
   /** Server Action that starts checkout for a plan (reads `planSlug`) and redirects. */
   checkoutAction?: FormAction | undefined;
@@ -129,7 +134,7 @@ export interface PricingTableProps {
   orgGateBlocking?: boolean;
   /** What to render when `orgGateBlocking`. Defaults to a built-in notice. */
   orgGate?: React.ReactNode;
-  /** Hide free (amount 0) plans' CTA, they have no checkout. Default true. */
+  /** Hide free plans' CTA, they have no checkout. Default true. */
   hideFreeCta?: boolean;
   /** Label for the upgrade CTA. */
   ctaLabel?: string;
@@ -137,11 +142,22 @@ export interface PricingTableProps {
    * The Application's enabled billing providers, fetch with
    * `billing.getProviders()` on the server, or `listBillingProviders()` in the
    * browser (the endpoint accepts the publishable key). When present, a
-   * `<ProviderPicker>` renders above the grid and the chosen provider is threaded
-   * into every plan's checkout form (posted as `provider`). This makes the table
-   * an interactive client component; omit it to keep the table a Server Component.
+   * `<ProviderPicker>` renders above the grid and the selected provider is
+   * posted as `provider` with every plan it can charge at one of the plan's
+   * prices. A plan with more than one price posts it only once the buyer has
+   * changed the picker, so a preselected provider never decides which price
+   * they pay. A plan the provider cannot charge posts none, the API routes it,
+   * and its card says so. A provider that can charge no plan here is not
+   * offered. This makes the table an interactive client component; omit it to
+   * keep the table a Server Component.
    */
   providers?: ProviderOption[];
+  /**
+   * `routedProvider` from the same provider list response: the provider a
+   * checkout that names none is sent to. Selected in the picker by default.
+   * Without it the first provider is.
+   */
+  routedProvider?: string | null | undefined;
   /**
    * Per-plan trial answers for the signed-in buyer, the `items` array from
    * `GET /billing/trial-eligibility` (`billing.getTrialEligibility()` on the
@@ -157,6 +173,21 @@ export interface PricingTableProps {
    * than advertising a trial that checkout would refuse.
    */
   trialEligibility?: readonly PlanTrialEligibility[] | undefined;
+  /**
+   * What a plan's card says when the price selected for the buyer cannot be
+   * charged and the plan's default price is shown and charged instead (its
+   * `price.reason` is `fallback`). Defaults to "Prices in INR are not available
+   * yet. You will pay $19.00.", naming the currency that could not be charged
+   * and the plan's own price.
+   */
+  priceFallbackNote?: React.ReactNode;
+  /**
+   * What a paid plan's card shows in place of its button when the plan's
+   * `checkout.ready` is false, meaning a checkout for it would be refused.
+   * Default "Not available right now". A free plan is never shown this way:
+   * it applies without a checkout.
+   */
+  unavailableLabel?: React.ReactNode;
   appearance?: AppearanceProp;
   className?: string;
 }
@@ -174,7 +205,7 @@ export interface PricingTableProps {
  * @example
  * ```tsx
  * <PricingTable
- *   plans={plans}                       // billing.getPlans() server-side
+ *   plans={plans}                       // (await billing.getPlans(undefined, { country })).items
  *   providers={providers}               // billing.getProviders() server-side (optional)
  *   currentPlanSlug={isPro ? "pro_monthly" : "free"}
  *   checkoutAction={checkoutAction} checkoutUrl={checkoutUrl}     // billing.createCheckout server-side
@@ -185,9 +216,9 @@ export interface PricingTableProps {
  */
 export function PricingTable(props: PricingTableProps): React.JSX.Element {
   const {
-    providers, appearance, className,
+    providers, routedProvider, appearance, className,
     plans, checkoutAction, checkoutUrl, currentPlanSlug, hiddenFields,
-    orgGateBlocking, orgGate, hideFreeCta, ctaLabel, trialEligibility,
+    orgGateBlocking, orgGate, hideFreeCta, ctaLabel, trialEligibility, priceFallbackNote, unavailableLabel,
   } = props;
 
   // With a provider list, dispatch to the interactive (client) variant; the
@@ -196,6 +227,7 @@ export function PricingTable(props: PricingTableProps): React.JSX.Element {
     return (
       <PricingTableInteractive
         providers={providers}
+        {...(routedProvider !== undefined ? { routedProvider } : {})}
         plans={plans}
         checkoutAction={checkoutAction} checkoutUrl={checkoutUrl}
         {...(currentPlanSlug !== undefined ? { currentPlanSlug } : {})}
@@ -205,6 +237,8 @@ export function PricingTable(props: PricingTableProps): React.JSX.Element {
         {...(hideFreeCta !== undefined ? { hideFreeCta } : {})}
         {...(ctaLabel !== undefined ? { ctaLabel } : {})}
         {...(trialEligibility !== undefined ? { trialEligibility } : {})}
+        {...(priceFallbackNote !== undefined ? { priceFallbackNote } : {})}
+        {...(unavailableLabel !== undefined ? { unavailableLabel } : {})}
         {...(appearance !== undefined ? { appearance } : {})}
         {...(className !== undefined ? { className } : {})}
       />
@@ -224,6 +258,8 @@ export function PricingTable(props: PricingTableProps): React.JSX.Element {
         {...(hideFreeCta !== undefined ? { hideFreeCta } : {})}
         {...(ctaLabel !== undefined ? { ctaLabel } : {})}
         {...(trialEligibility !== undefined ? { trialEligibility } : {})}
+        {...(priceFallbackNote !== undefined ? { priceFallbackNote } : {})}
+        {...(unavailableLabel !== undefined ? { unavailableLabel } : {})}
       />
     </Themed>
   );

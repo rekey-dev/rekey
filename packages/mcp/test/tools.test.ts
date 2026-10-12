@@ -57,15 +57,30 @@ describe('@rekey.dev/mcp tool registry', () => {
 
   it('exposes the expected tool names', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'archive_plan_price',
+      'create_coupon',
+      'create_refund',
       'get_application',
+      'get_billing_outbox_status',
+      'get_billing_reconciliation',
+      'get_billing_stats',
+      'get_payment',
       'get_payment_stats_by_app',
+      'get_price_fallbacks',
+      'get_reporting_currency',
       'list_api_keys',
       'list_applications',
       'list_coupons',
       'list_payments',
       'list_plans',
+      'list_refunds',
       'list_tenants',
       'mint_api_key',
+      'preview_checkout_routing',
+      'recent_billing_events',
+      'set_plan_price',
+      'set_reporting_currency',
+      'update_coupon',
     ]);
   });
 
@@ -102,14 +117,48 @@ describe('@rekey.dev/mcp tool registry', () => {
 
   it('get_payment_stats_by_app GETs the payments-by-app rollup', async () => {
     stub.reset();
-    stub.set('GET /api/v1/admin/metrics/payments-by-app', 200, {
-      success: true,
-      data: [{ applicationId: 'app_1', succeeded: 3, failed: 1, volumeCents: 2997 }],
-    });
+    // Volume is per currency. The scalar `volumeCents` beside the counts is gone.
+    const row = {
+      applicationId: 'app_1',
+      applicationSlug: 'a',
+      applicationName: 'A',
+      succeeded: 3,
+      failed: 1,
+      pending: 0,
+      refunded: 0,
+      successRate: 0.75,
+      volumeByCurrency: [
+        { currency: 'USD', volumeCents: 2997, payments: 2 },
+        { currency: 'JPY', volumeCents: 5000, payments: 1 },
+      ],
+    };
+    stub.set('GET /api/v1/admin/metrics/payments-by-app', 200, { success: true, data: [row] });
     const tool = tools.find((t) => t.name === 'get_payment_stats_by_app')!;
-    expect(await tool.execute(client, {})).toEqual([
-      { applicationId: 'app_1', succeeded: 3, failed: 1, volumeCents: 2997 },
-    ]);
+    expect(await tool.execute(client, {})).toEqual([row]);
+    expect(tool.description).toContain('volumeByCurrency');
+    expect(tool.description).not.toMatch(/volume \(volumeCents/);
+  });
+
+  it('get_billing_outbox_status reads the outbox with the admin key', async () => {
+    stub.reset();
+    const status = { pending: 2, due: 1, failing: 0, failingThreshold: 5, oldestPendingAt: null, stuck: [] };
+    stub.set('GET /api/v1/admin/metrics/billing-outbox', 200, { success: true, data: status });
+    const tool = tools.find((t) => t.name === 'get_billing_outbox_status')!;
+    expect(await tool.execute(client, {})).toEqual(status);
+    const opOnly = new AdminClient({ apiUrl: stub.url, operatorToken: 'rp_op_test-token' });
+    await expect(tool.execute(opOnly, {})).rejects.toMatchObject({ code: 'READ_REQUIRES_ADMIN_KEY' });
+  });
+
+  it('list_plans and list_coupons describe the per-currency shapes and the unit', () => {
+    const plans = tools.find((t) => t.name === 'list_plans')!.description;
+    expect(plans).toContain('`prices`');
+    expect(plans).toContain('`defaultPriceId`');
+    expect(plans).toContain('`isFree`');
+    expect(plans).toContain('integer, minor units of the currency (cents for USD, whole yen for JPY)');
+    const coupons = tools.find((t) => t.name === 'list_coupons')!.description;
+    expect(coupons).toContain('`basisPoints`');
+    expect(coupons).toContain('`coveredCurrencies`');
+    expect(coupons).toContain('integer, minor units of the currency (cents for USD, whole yen for JPY)');
   });
 
   it('list_applications passes ?tenantId when provided, omits when not', async () => {
@@ -252,6 +301,28 @@ describe('zodToJsonSchema shim', () => {
         b: { type: 'boolean', description: 'the optional b' },
       },
       required: ['a'],
+    });
+  });
+
+  it('renders an integer as integer, and an array of objects with its item fields', () => {
+    const schema = z.object({
+      amounts: z.array(z.object({ currency: z.string(), amountOff: z.number().int().describe('minor units') })),
+      rate: z.number().optional(),
+    });
+    expect(zodToJsonSchema(schema)).toEqual({
+      type: 'object',
+      properties: {
+        amounts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { currency: { type: 'string' }, amountOff: { type: 'integer', description: 'minor units' } },
+            required: ['currency', 'amountOff'],
+          },
+        },
+        rate: { type: 'number' },
+      },
+      required: ['amounts'],
     });
   });
 

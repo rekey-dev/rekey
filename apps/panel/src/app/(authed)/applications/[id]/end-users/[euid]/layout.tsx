@@ -31,7 +31,7 @@ import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
 import { CopyLinkButton } from '@/components/CopyLinkButton';
 import { RecordHeader } from '@/components/RecordHeader';
-import { getEndUserDetail } from './shared';
+import { getEndUserDetail, hasOpenSupportCase } from './shared';
 import { getApplication } from '@/lib/api';
 import { hasScope } from '@/lib/operator-scopes';
 import { formatDateTime } from '@/lib/date';
@@ -46,7 +46,11 @@ export default async function EndUserLayout({
 }): Promise<React.JSX.Element> {
   const { id, euid } = await params;
   // Request-cached: the application layout already fetched this row.
-  const [detail, application] = await Promise.all([getEndUserDetail(id, euid), getApplication(id)]);
+  const [detail, application, inSupportMode] = await Promise.all([
+    getEndUserDetail(id, euid),
+    getApplication(id),
+    hasOpenSupportCase(id, euid),
+  ]);
   const scopes = application.access?.scopes ?? null;
   const canBilling = hasScope(scopes, 'billing:read');
   const canWrite = hasScope(scopes, 'end-users:write');
@@ -79,6 +83,11 @@ export default async function EndUserLayout({
                 banned
               </Badge>
             )}
+            {inSupportMode && (
+              <Badge tone="info" dot>
+                support mode
+              </Badge>
+            )}
           </>
         }
         meta={<span className="font-mono">{detail.endUser.id}</span>}
@@ -93,6 +102,7 @@ export default async function EndUserLayout({
           ...(canBilling ? [{ href: `${base}/credits`, label: 'Credits' }] : []),
           { href: `${base}/security`, label: 'Security' },
           { href: `${base}/access`, label: 'Access' },
+          { href: `${base}/support-mode`, label: 'Support mode' },
           { href: `${base}/data`, label: 'Data & privacy' },
         ]}
       />

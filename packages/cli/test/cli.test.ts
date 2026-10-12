@@ -151,6 +151,10 @@ describe('rekey CLI', () => {
   it('doctor reports ok when API responds 200 to /health', async () => {
     stub.reset();
     stub.setResponse('GET /health', 200, { status: 'ok', service: 'rekey-api' });
+    stub.setResponse('GET /api/v1/admin/metrics/billing-outbox', 200, {
+      success: true,
+      data: { pending: 0, due: 0, failing: 0, failingThreshold: 5, oldestPendingAt: null, stuck: [] },
+    });
     const r = await runCli(['doctor', '--json'], {
       REKEY_URL: stub.url,
       SUPER_ADMIN_KEY: 'x'.repeat(40),
@@ -375,7 +379,6 @@ describe('rekey CLI', () => {
     ['--license-duration-days', '365'],
     ['--license-seats-allowed', '5'],
     ['--meter-slug', 'api_calls'],
-    ['--price-per-unit-cents', '2'],
     ['--credits-amount', '500'],
   ])('plans create %s %s is refused before any request is sent', async (flag, value) => {
     stub.reset();
@@ -403,8 +406,10 @@ describe('rekey CLI', () => {
         applicationId: 'app_1',
         slug: 'pro',
         name: 'Pro',
-        amount: 999,
-        currency: 'USD',
+        price: { id: 'pp_1', currency: 'USD', amount: 999, formatted: '$9.99', isDefault: true, reason: 'default', requestedCurrency: null },
+        prices: [{ id: 'pp_1', currency: 'USD', amount: 999, countries: [], isDefault: true, archived: false, registration: { status: 'REGISTERED', error: null }, amountEditable: false, liveSubscriptions: 0, openCheckouts: 0 }],
+        defaultPriceId: 'pp_1',
+        isFree: false,
         interval: 'MONTH',
         kind: 'SUBSCRIPTION',
         active: true,
@@ -418,13 +423,19 @@ describe('rekey CLI', () => {
     expect(sent).toBeDefined();
     // `kind` included: the route is strict now, so sending even the correct
     // "SUBSCRIPTION" would be a 400 rather than a harmless no-op.
-    expect(Object.keys(sent!.body as Record<string, unknown>).sort()).toEqual([
-      'amount',
-      'currency',
-      'interval',
-      'name',
-      'slug',
-    ]);
+    expect(sent!.body).toEqual({ slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 999 }, interval: 'MONTH' });
+  });
+
+  it('plans create --amount 0 sends no price: a plan with none is free', async () => {
+    stub.reset();
+    stub.setResponse('POST /api/v1/admin/applications/app_1/plans', 201, {
+      success: true,
+      data: { id: 'pl_2', applicationId: 'app_1', slug: 'free', name: 'Free', price: null, prices: [], defaultPriceId: null, isFree: true, interval: 'MONTH', kind: 'SUBSCRIPTION', active: true },
+    });
+    const args = ['plans', 'create', '--app', 'app_1', '--slug', 'free', '--name', 'Free', '--amount', '0', '--json'];
+    const r = await runCli(args, { ...ENV, REKEY_URL: stub.url });
+    expect(r.code, r.stderr).toBe(0);
+    expect(stub.requests.map((q) => q.body)).toEqual([{ slug: 'free', name: 'Free', interval: 'MONTH' }]);
   });
 
   it('plans create --help does not advertise a flag that cannot work', async () => {

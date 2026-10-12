@@ -23,7 +23,7 @@ export async function setDefaultDeviceLimit(
     method: 'POST',
     url: `/api/v1/tenant/applications/${applicationId}/plans`,
     headers: auth,
-    payload: { slug, name: slug, amount: 0, kind: 'SUBSCRIPTION' },
+    payload: { slug, name: slug, kind: 'SUBSCRIPTION' },
   });
   if (plan.statusCode !== 201) throw new Error(`plan ${plan.statusCode}: ${plan.body}`);
   const put = await app.inject({

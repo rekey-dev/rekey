@@ -208,7 +208,7 @@ export const applicationRolesService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_IS_DEFAULT',
-        message: `Cannot delete "${name}" — it's the default role for this Application.`,
+        message: `Cannot delete "${name}". It is the default role for this Application.`,
         fix: 'Mark a different role as default first, then delete this one.',
       });
     }
@@ -219,7 +219,7 @@ export const applicationRolesService = {
       throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_IN_USE',
-        message: `Cannot delete "${name}" — ${inUse} end-user${inUse === 1 ? '' : 's'} still hold this role.`,
+        message: `Cannot delete "${name}". ${inUse} end-user${inUse === 1 ? '' : 's'} still hold this role.`,
         fix: 'Pass `reassignTo` with the name of another role to bulk-reassign + delete in one shot.',
       });
     }

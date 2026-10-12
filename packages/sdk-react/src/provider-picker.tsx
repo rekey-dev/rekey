@@ -29,7 +29,12 @@
 
 import * as React from 'react';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
-import { PricingGrid, type PricingGridProps } from './pricing-shared.js';
+import {
+  PricingGrid,
+  providerCanCharge,
+  providerCanChargePlan,
+  type PricingGridProps,
+} from './pricing-shared.js';
 import type { BillingProvider, BillingProviderInfoDto } from '@rekey.dev/shared-types';
 
 /**
@@ -50,7 +55,23 @@ export type ProviderOption = Pick<BillingProviderInfoDto, 'provider'> & {
    * proper label without an SDK update.
    */
   label?: BillingProviderInfoDto['label'] | undefined;
+  /**
+   * The currencies this provider account charges, as the API returned them.
+   * An empty list charges nothing. Leave the field out when you have no list
+   * and the provider is treated as able to charge. A provider is not posted
+   * with a plan it cannot charge.
+   */
+  currencies?: BillingProviderInfoDto['currencies'] | undefined;
 };
+
+/** `routed` when the list still offers it, otherwise the first entry. */
+function initialProvider(
+  providers: readonly ProviderOption[],
+  routed: string | null | undefined,
+): BillingProvider | undefined {
+  const match = routed ? providers.find((opt) => opt.provider === routed) : undefined;
+  return (match ?? providers[0])?.provider;
+}
 
 /**
  * Built-in fallback labels for the three bundled providers. The server's
@@ -84,10 +105,21 @@ export interface ProviderPickerProps {
    */
   name?: string;
   /**
-   * Uncontrolled initial selection. Defaults to the first provider in the list
-   * (the geo router's top pick). Ignored when `value` is supplied.
+   * Uncontrolled initial selection. Defaults to `routedProvider`, then to the
+   * first provider in the list. Ignored when `value` is supplied.
    */
   defaultValue?: BillingProvider;
+  /**
+   * `routedProvider` from the provider list response: the provider a checkout
+   * that names none is sent to. Selected by default when the list offers it.
+   */
+  routedProvider?: string | null | undefined;
+  /**
+   * The currency (ISO 4217) of the one plan this picker is for. Providers
+   * that cannot charge it are left out. Not needed when the list was fetched
+   * with that plan's `planSlug`, which filters it on the server.
+   */
+  currency?: string | undefined;
   /** Controlled selection. Pass with `onChange` for a controlled radio group. */
   value?: BillingProvider;
   /** Fired with the newly-selected provider in controlled mode. */
@@ -100,9 +132,11 @@ export interface ProviderPickerProps {
 
 /** The inner radio group. Assumes it's already inside a `<Themed>` scope. */
 function ProviderPickerBody({
-  providers,
+  providers: allProviders,
   name = 'provider',
   defaultValue,
+  routedProvider,
+  currency,
   value,
   onChange,
   label = 'Pay with',
@@ -111,14 +145,19 @@ function ProviderPickerBody({
   // A stable id so the visual label associates with the radiogroup for a11y.
   const groupId = React.useId();
 
-  // The default selection is the first provider (geo router's top pick) unless
-  // the caller pins one via `defaultValue`.
-  const first = providers[0]?.provider;
+  const providers = currency
+    ? allProviders.filter((opt) => providerCanCharge(opt, currency))
+    : allProviders;
   const controlled = value !== undefined;
   const [uncontrolled, setUncontrolled] = React.useState<BillingProvider | undefined>(
-    defaultValue ?? first,
+    defaultValue ?? initialProvider(providers, routedProvider),
   );
-  const selected = controlled ? value : uncontrolled;
+  const chosen = controlled ? value : uncontrolled;
+  // A choice the list does not offer (its currency filter dropped it) falls
+  // back, so the form never posts a provider that is not on screen.
+  const selected = providers.some((opt) => opt.provider === chosen)
+    ? chosen
+    : initialProvider(providers, routedProvider);
 
   if (providers.length === 0) return null;
 
@@ -172,16 +211,17 @@ function ProviderPickerBody({
  * keyboard navigation come built in.
  *
  * The provider list is passed in (fetch it with `listBillingProviders()` or the
- * node SDK's `billing.getProviders()`). The first provider is the geo router's
- * top pick and is selected by default.
+ * node SDK's `billing.getProviders()`). Pass the response's `routedProvider`
+ * too and it is selected by default; otherwise the first provider is.
  *
  * @example
  * ```tsx
- * // Server: const { providers } = await rekey.billing.getProviders(country);
+ * // Server: const { providers, routedProvider } =
+ * //   await rekey.billing.getProviders(country, { planSlug: 'pro_monthly' });
  * // The picker posts the selected provider as `provider` in this form's FormData.
  * <form action={checkoutAction}>
  *   <input type="hidden" name="planSlug" value="pro_monthly" />
- *   <ProviderPicker providers={providers} />
+ *   <ProviderPicker providers={providers} routedProvider={routedProvider} />
  *   <button type="submit">Continue</button>
  * </form>
  * ```
@@ -200,8 +240,10 @@ export function ProviderPicker(props: ProviderPickerProps): React.JSX.Element {
 
 /** Props the interactive pricing table needs (the grid props + the provider list). */
 export interface PricingTableInteractiveProps extends PricingGridProps {
-  /** Providers to offer above the grid. The first is the default selection. */
+  /** Providers to offer above the grid. */
   providers: ProviderOption[];
+  /** `routedProvider` from the provider list response. Selected by default; otherwise the first is. */
+  routedProvider?: string | null | undefined;
   appearance?: AppearanceProp;
   className?: string;
 }
@@ -209,42 +251,60 @@ export interface PricingTableInteractiveProps extends PricingGridProps {
 /**
  * The interactive `<PricingTable>` body used ONLY when a `providers` list is
  * passed. It holds the selected provider in client state, renders a controlled
- * `<ProviderPicker>` above the grid, and threads the chosen provider into EACH
- * plan's checkout form via `hiddenFields={{ ...hiddenFields, provider }}`, so
- * whichever plan the user buys carries their provider choice into
- * `billing.createCheckout`.
+ * `<ProviderPicker>` above the grid, and threads the selected provider into
+ * the checkout form of each plan it can charge, so the plan the user buys
+ * carries their provider choice into `billing.createCheckout`.
+ *
+ * Two kinds of plan post no `provider`, and the API routes them. A plan none
+ * of whose prices the selected provider can charge, which says so on its
+ * card. And a plan with more than one price while the picker still shows the
+ * provider it preselected: that selection is not the buyer's choice, and
+ * posting it would let it decide which of the plan's prices they pay.
  *
  * This is a separate client component so the plain (no-providers)
  * `<PricingTable>` can stay a Server Component; the dispatcher in
  * `billing-components.tsx` only reaches for this when `providers?.length`.
  */
 export function PricingTableInteractive({
-  providers, appearance, className, hiddenFields, orgGateBlocking, ...gridProps
+  providers, routedProvider, appearance, className, hiddenFields, orgGateBlocking, ...gridProps
 }: PricingTableInteractiveProps): React.JSX.Element {
-  const first = providers[0]?.provider;
-  const [provider, setProvider] = React.useState<BillingProvider | undefined>(first);
-
-  // Merge the chosen provider into the per-form hidden fields (string map). When
-  // nothing is selected (empty list, shouldn't happen here) we leave it off.
-  const mergedHidden: Record<string, string> = {
-    ...(hiddenFields ?? {}),
-    ...(provider ? { provider } : {}),
-  };
+  // A provider that can charge none of the plans on show, at any of their
+  // prices, is not worth offering.
+  const paidPlans = gridProps.plans.filter((plan) => !plan.isFree && plan.prices.length > 0);
+  const offered =
+    paidPlans.length === 0
+      ? providers
+      : providers.filter((opt) => paidPlans.some((plan) => providerCanChargePlan(opt, plan)));
+  const preselected = initialProvider(offered, routedProvider);
+  // Undefined until the buyer touches the picker.
+  const [picked, setPicked] = React.useState<BillingProvider | undefined>(undefined);
+  const selected =
+    offered.find((opt) => opt.provider === picked) ?? offered.find((opt) => opt.provider === preselected);
 
   return (
     <Themed appearance={appearance} className={className}>
       {/* Hide the picker behind the org gate, there's nothing to pay with yet. */}
-      {!orgGateBlocking && providers.length > 0 && (
+      {!orgGateBlocking && selected !== undefined && (
         <ProviderPickerBody
-          providers={providers}
-          value={provider ?? providers[0]!.provider}
-          onChange={setProvider}
+          providers={offered}
+          value={selected.provider}
+          onChange={setPicked}
         />
       )}
       <PricingGrid
         {...gridProps}
         {...(orgGateBlocking ? { orgGateBlocking } : {})}
-        hiddenFields={mergedHidden}
+        {...(hiddenFields ? { hiddenFields } : {})}
+        {...(selected !== undefined
+          ? {
+              selectedProvider: {
+                provider: selected.provider,
+                currencies: selected.currencies,
+                label: providerLabel(selected),
+                chosen: selected.provider !== preselected,
+              },
+            }
+          : {})}
       />
     </Themed>
   );

@@ -73,7 +73,7 @@ Steps 1 and 2 work on a brand-new Application. Step 3 needs one thing first:
 // Panel → Application → Billing. Read the live value from
 // `rekey.applications.me()` if you need to branch on it.
 const { features, creditBalance } = await rekey.billing.getEntitlements(accessToken);
-if (features.advanced_reporting) renderReportingTab();
+if (features.advanced_reporting) console.log('Show the reporting tab', creditBalance);
 ```
 
 ### The two-credential model
@@ -87,7 +87,7 @@ A JWT issued by Application A presented through Application B's secret key is re
 
 ## Core API
 
-Everything hangs off namespaces on the client. `amount` fields are always integers in the smallest currency unit (cents/paise/sen) — never floats.
+Everything hangs off namespaces on the client. Every amount is an integer in the minor unit of its currency, never a float. Show one with `formatMoney(amount, currency)` (see [Money helpers](#money-helpers)).
 
 ### `rekey.applications`
 | Method | Description |
@@ -125,6 +125,7 @@ Everything hangs off namespaces on the client. `amount` fields are always intege
 | No transport (or send failed), user exists | `true` | `false` | the raw token | **You** email the link via your own provider. |
 | Unknown email | `false` | `false` | `null` | Nothing. Render the same neutral UI — never reveal. |
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 const r = await rekey.auth.requestPasswordReset({
   email,
@@ -143,15 +144,85 @@ if (!r.emailSent && r.resetToken) {
 ### `rekey.billing`
 | Method | Description |
 | --- | --- |
-| `getPlans(page?)` | List the Application's active plans (public, for rendering pricing pages). Returns `{items, page}`. Each plan's `checkout.ready` is false when checkout for it would be refused, so you can hide it: `items.filter((p) => p.slug === freeSlug \|\| p.checkout.ready)`. Keep the free tier in. The free tier is the plan named by `billingConfig.defaultPlanSlug`: it applies to every signed-in user without checkout, and `billing.subscribe` activates it with no provider. It must be an active plan that costs nothing (`amount` 0, no per-unit price). Set it with `PATCH /api/v1/tenant/applications/:id/billing-config` (the panel has no control for it yet). Any other plan, a $0 SUBSCRIPTION plan included, still goes through checkout and reads `ready: false` with no provider connected. |
-| `getSubscription(accessToken, { organizationId?, includeEnded? })` | The user's active subscription, or `null`. `includeEnded: true` falls back to their most recent CANCELED/EXPIRED subscription **only when the answer would otherwise be null** — so a billing page can say what a former subscriber was on and when it ended, instead of showing them the same blank state as somebody who never subscribed. It never replaces a live subscription; leave it off for entitlement checks. |
-| `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. |
+| `getPlans(page?, { country?, accessToken? })` | List the Application's active plans (public, for rendering pricing pages). Returns `{items, page}`. Each plan carries `price`: the price this buyer would be charged, resolved by the function checkout uses. Render `price.formatted` and pick nothing yourself. `price` is null for a plan with no flat price (`isFree` says whether it is free). `prices` lists every price the plan sells at. Pass `country` (ISO 3166-1 alpha-2) for a buyer there, and `accessToken` for a signed-in buyer, who is shown the currency they already pay in. `price.reason` is `bound`, `country`, `default`, or `fallback` when the price selected for the buyer cannot be charged and the default one is shown. Each plan's `checkout.ready` is false when checkout for it would be refused: `items.filter((p) => p.slug === freeSlug \|\| p.checkout.ready)`. Keep the free tier in. The free tier is the plan named by `billingConfig.defaultPlanSlug`: it applies to every signed-in user without checkout, and `billing.subscribe` activates it with no provider. It must be an active plan that is free (`isFree`). Set it with `PATCH /api/v1/tenant/applications/:id/billing-config` (the panel has no control for it yet). |
+| `getSubscription(accessToken, { organizationId?, includeEnded? })` | The user's active subscription, or `null`. Its `price` (`{ id, currency, amount, formatted }`) is what this subscriber pays each period, which can differ from the plan's default price; null for a plan with no flat price and for an unpaid checkout. `includeEnded: true` falls back to their most recent CANCELED/EXPIRED subscription **only when the answer would otherwise be null**, so a billing page can say what a former subscriber was on and when it ended. It never replaces a live subscription; leave it off for entitlement checks. |
+| `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, country?, currency?, onUnavailableCurrency?, provider?, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. The result's `price` is always the price charged, with `currency` and `unitAmount`. `priceFallback` is set when the price selected for the buyer could not be charged and the plan's default price is charged instead: tell the buyer before you redirect them (`priceFallbackMessage` writes the sentence). `currency` names the price from your server; with `onUnavailableCurrency: 'refuse'` a currency no provider can charge throws `BILLING_NO_PROVIDER_FOR_CURRENCY` in place of falling back. A buyer who already pays in another currency is refused with `BILLING_CURRENCY_CONFLICT`. |
 | `cancelSubscription(accessToken, { atPeriodEnd?, organizationId? })` | Cancel the user's subscription. Defaults to **at period end** — the row stays ACTIVE with `cancelAt` set until the day arrives, so read `cancelAt`, not `status`. Pass `atPeriodEnd: false` to end it immediately. The default is a *request*: a PAST_DUE subscription, a PENDING checkout, or an ACTIVE row with no known period end is canceled on the spot regardless. Ask `cancelsAtPeriodEnd(sub)` (exported from this package) before showing a confirmation, so you promise the outcome the caller will actually get. |
-| `validateCoupon(accessToken, { code, planSlug })` | Price-check a coupon without applying it. |
-| `getProviders(country?)` | The geo-routed list of enabled billing providers. |
+| `validateCoupon(accessToken, { code, planSlug, country?, currency?, onUnavailableCurrency?, provider?, organizationId? })` | Price-check a coupon without applying it, at the price the checkout would charge. Render `formatted.discount` and `formatted.total`. A coupon that does not work in the currency charged throws `COUPON_CURRENCY_NOT_COVERED`, here and at checkout. |
+| `getProviders(country?, { planSlug }?)` | The geo-routed list of enabled billing providers, with `routedProvider` and `countrySource`. Each provider's `currencies` is what that account charges; an empty list means none. With `planSlug`, only those that can charge that plan. |
 | `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md#caching-entitlements). |
 | `hasFeature(accessToken, key, { organizationId? })` / `getFeature(...)` | One feature: `hasFeature` is `Boolean(value)`, `getFeature` returns `{ key, granted, value }`. Same subject as `include: ['entitlements']`; skips the credit balance read. |
 | `hasFeatureFor(endUserId, key)` / `getFeatureFor(...)` | The same for an end-user you name. Secret key only. |
+
+### Money helpers
+
+```ts
+import { formatMoney, minorUnitExponent, validatePriceAmount, sellableCurrencies, isSellableCurrency } from '@rekey.dev/node';
+
+formatMoney(149900, 'INR'); // '₹1,499.00'
+formatMoney(5000, 'JPY'); // '¥5,000'
+minorUnitExponent('JPY'); // 0
+validatePriceAmount('HUF', 500050).ok; // false: HUF is sold in whole units
+isSellableCurrency('KWD'); // false: three decimal places
+sellableCurrencies().length; // every currency a price may be in
+```
+
+| Export | Description |
+| --- | --- |
+| `formatMoney(amount, currency, locale?)` | Writes an integer amount in minor units for a person. Use it wherever you show an amount, so nothing in your code keeps its own divisor. |
+| `minorUnitExponent(currency)` | How many decimal places the currency has, or `null` for an unknown code. |
+| `validatePriceAmount(currency, amount)` | Whether a price may be stored, and the rule it breaks when not. |
+| `sellableCurrencies()` / `isSellableCurrency(code)` | The currencies a price may be in. |
+| `priceFallbackMessage(fallback)` | The sentence to show a buyer whose checkout charges the default price. |
+| `BILLING_MONEY_ERROR_CODES` / `isBillingMoneyError(err)` | The closed list of money error codes, and a guard for a caught error. |
+
+See [docs/currencies.md](https://github.com/rekey-dev/rekey/blob/main/docs/currencies.md).
+
+### `RekeyOperator` (operator token)
+
+`Rekey` acts as your Application towards its end users, with a secret key.
+`RekeyOperator` acts as a member of the workspace that owns the Application,
+with an operator token, and calls the routes the panel calls. Use it for
+back-office tools, scripts and reports, never on a path a visitor can reach.
+
+```ts
+import { RekeyOperator, formatMoney } from '@rekey.dev/node';
+
+const operator = new RekeyOperator({
+  apiUrl: process.env.REKEY_URL!,
+  operatorToken: process.env.REKEY_OPERATOR_TOKEN!, // rp_op_..., from Panel → Account → API tokens
+  applicationId: process.env.REKEY_APPLICATION_ID!,
+});
+
+const stats = await operator.billing.stats();
+for (const row of stats.mrr) console.log(row.currency, formatMoney(row.mrrCents, row.currency));
+
+const { refund, payment } = await operator.payments.refunds.create('pay_123', { amount: 500, reason: 'Duplicate charge' });
+console.log(refund.status, formatMoney(payment.refundedAmount, payment.currency));
+```
+
+Reads need the `billing:read` scope on the token and writes `billing:write`.
+
+| Method | Description |
+| --- | --- |
+| `plans.list(page?)` | Every plan, active or not, with `prices` (where each stands at the provider, whether its amount can still change, and how many live subscriptions and open checkouts are on it), `price` and `checkout` readiness with its blockers. |
+| `plans.create(input)` / `plans.update(slug, input)` | Create a plan, or change one. The default price is `price: { currency, amount }`, with `amount` in minor units; leave it out for a free plan, and send `price: null` on an update to make a plan free. `price` and `interval` change only until a provider has registered the plan. `localPrices` (`INHERIT`, `TRUSTED`, `OFF`) says whether a buyer's country may select one of the plan's other prices, and can change at any time. |
+| `plans.prices.list(plan)` / `set(plan, currency, { amount?, countries? })` / `archive(plan, currency)` | A plan's prices, one per currency. `amount` is required to add a price and can change only until a provider has registered it. |
+| `coupons.list(page?)` / `get(code)` / `create(input, { idempotencyKey? }?)` / `update(code, input)` | Coupons: a percentage in `basisPoints`, or `amounts` with one amount per currency. `coveredCurrencies` is where a coupon works, `null` for any. `update` also changes `endsAt`, `maxRedemptions` and `maxRedemptionsPerUser`, each a value or `null` to remove it; a cap below what is already redeemed is refused with `COUPON_LIMIT_BELOW_REDEEMED`. |
+| `payments.list({ status?, from?, to?, sort?, order?, limit?, offset? })` / `payments.get(paymentId)` | Payments, each with `refundedAmount`, the `provider` that took it, and whether it is `refundable` through Rekey with the `refundBlockedReason` when it is not. `refundBlockedMessage(reason)` is the sentence for a person. |
+| `payments.refunds.list(paymentId, page?)` / `create(paymentId, { amount?, reason?, idempotencyKey? }?)` | Refunds of one payment. Leave `amount` out to refund everything that remains. The same call made twice is one refund. |
+| `billingLog.events.list(options?)` / `pages(options?)` / `iterate(options?)` | The billing log: one page, every page, or every entry, newest first, paged on a cursor. |
+| `billingLog.forSubscription(id)` / `forPayment(id)` / `forEndUser(id)` | The trail of one record. |
+| `billingLog.priceFallbacks(period?)` | How often a buyer was charged the default price because their currency could not be charged. |
+| `billingLog.reconciliation(period?)` | Where the log and the payments, refunds and subscriptions disagree. |
+| `billing.getReportingCurrency()` / `setReportingCurrency(code)` | The currency the stats lead with. Nothing is converted into it. |
+| `billing.getConfig()` / `updateConfig({ onUnavailableCurrency })` | The Application's billing settings, and the default for a checkout that names a currency no provider can charge: `'fallback'` charges the default price, `'refuse'` answers `BILLING_NO_PROVIDER_FOR_CURRENCY`. A request's own `onUnavailableCurrency` wins. |
+| `billing.stats()` | Subscription counts, and MRR and revenue per currency. No total across currencies. `unverified` is money recorded and not applied. |
+| `billing.previewRouting({ country, plan?, couponCode?, ... })` | Which price and provider a buyer in a country would get, and why, without opening a checkout. |
+| `billing.providers()` / `providerCurrencies()` | What each provider can charge, and what each configured account charges. |
+| `forApplication(applicationId)` | The same client for another Application of the workspace. |
+
+See [docs/billing-log.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing-log.md) and [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md).
 
 ### `rekey.organizations` (teams)
 | Method | Description |
@@ -189,14 +260,17 @@ The key is unique per **subject** within the Application: `(applicationId, subje
 
 ```ts
 // Recommended format: `${subjectId}:${operationId}` — stable per logical operation.
-const result = await rekey.credits.consume({
-  endUserId: user.id,
-  amount: 1,
-  idempotencyKey: `${user.id}:enrich-lead:${leadId}`, // ≤ 200 chars
-});
-if (!result.applied) {
-  // Replay: this exact operation was already charged. `result.balance` and
-  // `result.entryId` are from the ORIGINAL entry — safe to treat as success.
+export async function chargeForLead(user: { id: string }, leadId: string) {
+  const result = await rekey.credits.consume({
+    endUserId: user.id,
+    amount: 1,
+    idempotencyKey: `${user.id}:enrich-lead:${leadId}`, // ≤ 200 chars
+  });
+  if (!result.applied) {
+    // Replay: this exact operation was already charged. `result.balance` and
+    // `result.entryId` are from the ORIGINAL entry, so it is safe to treat as success.
+  }
+  return result.balance;
 }
 ```
 
@@ -219,6 +293,7 @@ Rekey sends no email to a list. See [docs/lists.md](https://github.com/rekey-dev
 | --- | --- |
 | `send({ template, to, variables?, version?, idempotencyKey? })` | Send a custom template registered and published in the panel (Application → Email → Custom templates). Needs a key minted with the **elevated** `email:send` scope, which `*` does not include. Returns `{ id, status: 'sent' \| 'suppressed', template, version, messageId? }`. |
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 import { emailVariableIssues, isEmailSendError } from '@rekey.dev/node';
 
@@ -278,8 +353,9 @@ try {
 | --- | --- |
 | `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
 | `verifyAccessToken(token, { applicationId, jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). **`applicationId` is required** — the RS256 keypair is deployment-wide, so without it a token minted for any other Application on the same deployment would verify here. (The HS256 default is unaffected: its key is derived per Application.) It cannot see a server-side revocation: a locally verified token stays valid until it expires, even after sign-out everywhere, a session revoke or a device release, so call the API when immediate revocation matters. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
-| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry: `{ name, description }` pairs (and just the names) for the 27 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due/entitlements_updated`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`, `device.registered/released/blocked/unblocked/limit_reached`, `license.deactivated`, `credit.granted/consumed/adjusted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
+| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry: `{ name, description }` pairs (and just the names) for every event Rekey can send, among them `payment.succeeded`, `payment.failed` and `payment.refunded`. Mirrors the API exactly; use it for event pickers and for autocompleting an endpoint's `events` array, and do not hardcode a list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
+| `PaymentWebhookData` / `SubscriptionWebhookData` | Types for `data` of the `payment.*` and `subscription.*` events. A payment carries `refundedAmount` and `verification`; a subscription's `amount` and `currency` are its own price, with `currency: null` when it has none. |
 | `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |
 
 ### Pagination
@@ -306,7 +382,7 @@ Request pagination is `{ limit, offset }` everywhere. Per-endpoint windows
 | `credits.listLedger(subject, limit?, offset?)` | 50 | 200 |
 | `auth.listSessions(accessToken, page?)` | 50 | 100 |
 | `auth.listPasskeys(accessToken, page?)` | 50 | 100 |
-| `billing.getPlans(page?)` | 50 | 100 |
+| `billing.getPlans(page?, opts?)` | 50 | 100 |
 | `auth.listOAuthIdentities` | — (bare array; one row per provider the user linked, bounded by the Application's provider list) | — |
 
 ## Errors
@@ -319,7 +395,7 @@ That includes failures where no server answered. A refused connection, a DNS fai
 import { RekeyError } from '@rekey.dev/node';
 
 try {
-  await rekey.billing.createCheckout(accessToken, { /* … */ });
+  await rekey.billing.createCheckout(accessToken, { planSlug: 'pro', successUrl, cancelUrl });
 } catch (err) {
   if (err instanceof RekeyError) console.error(err.code, err.fix);
   throw err;
@@ -339,6 +415,7 @@ Transport codes, and what each one asks you to do:
 
 Every request carries a **10-second deadline** by default — the same one the Rekey API uses for its own outbound webhooks. Without it the effective timeout is undici's `headersTimeout`, five minutes, which is long enough for one unreachable deployment to pin a request handler.
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 // Client-wide.
 const rekey = new Rekey({ apiUrl, secretKey, timeoutMs: 5_000 });
@@ -371,6 +448,7 @@ Prefer a namespace method wherever one exists — those carry the endpoint's rea
 - **Entitlements are resolved server-side.** Never gate features from client state — always read `rekey.billing.getEntitlements(...)` on the server.
 - **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Setup → Settings), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
 - **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to Rekey** lands (Stripe/PayPal → Rekey — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks Rekey sends to your app (user-lifecycle events); see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md).
+- **A checkout can charge the default price.** When no provider can charge the price selected for the buyer, `createCheckout` charges the plan's default price and sets `priceFallback`. Tell the buyer before you redirect them. Read `price` for what is charged.
 - **Switching active org returns new tokens.** `organizations.switch` / `clearActive` return a fresh `{ accessToken, refreshToken }` pair — persist both, or later reads use the stale org view.
 - **Pagination is `{ limit, offset }`.** Defaults to 50 everywhere; max is 100 for org lists and 200 for the credit ledger — see the [Pagination](#pagination) table.
 - **Retrying a timed-out mutation? Send an `Idempotency-Key` header.** High-value mutating routes (checkout, subscription cancel, credits consume, and the operator create/mint/issue/grant endpoints) accept the header (max 200 chars, scoped to your Application): a retry with the same key replays the first response (`Idempotency-Replayed: true`) instead of executing twice; the same key with a *different* body is a `409 IDEMPOTENCY_KEY_REUSED`. Keys live 24 h; 5xx responses are never cached, so retries after server errors really re-execute. The body-level `idempotencyKey` on `credits.consume` still works — it dedupes the ledger entry itself. See [docs/concepts.md → Idempotent requests](https://github.com/rekey-dev/rekey/blob/main/docs/concepts.md#idempotent-requests).

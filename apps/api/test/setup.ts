@@ -26,7 +26,7 @@
  * no credentials, deliberately, see `providers/index.ts`. Tests must not
  * reach api.stripe.com, so the seam is here in test-land rather than a
  * `NODE_ENV === 'test'` branch in the product. `pickProvider` and
- * `countryFromRequest` keep their real implementations: routing logic is
+ * `resolveBuyerCountry` keep their real implementations: routing logic is
  * under test, the network call is not.
  */
 

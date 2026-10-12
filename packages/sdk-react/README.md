@@ -78,6 +78,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
 For a pure SPA / mobile / desktop app with no backend, give the provider a `publishableKey` and call the bootstrap methods directly:
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <RekeyProvider
   apiUrl={process.env.NEXT_PUBLIC_REKEY_URL!}
@@ -87,12 +88,13 @@ For a pure SPA / mobile / desktop app with no backend, give the provider a `publ
 </RekeyProvider>
 ```
 
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
 ```ts
 import { RekeyBrowserClient } from '@rekey.dev/react';
 
 const client = new RekeyBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 const out = await client.signIn({ email, password });   // → SignInOutcome (branch on mfaRequired)
-const { items: plans, page } = await client.getPlans();  // public catalogue → {items, page}
+const { items: plans, page } = await client.getPlans();  // public catalogue → {items, page}; render plan.price.formatted
 const lic = await client.verifyLicense({ key, machineFingerprint });
 
 // The signed-in user's own state, with their access token
@@ -104,13 +106,17 @@ With the user's access token the browser client also reads what that user
 may see about themselves: `getMe` (`include` any of `entitlements`, `device`,
 `subscription`, `organization`, `licenses`), `getEntitlements`, `getFeature` /
 `hasFeature`, `getSubscription`, `listMyLicenses`, `getUsageRemaining`,
-`listMyCreditLedger`, `listMyDevices` and `getTrialEligibility`. Each plan from
-`getPlans` carries `checkout.ready`.
+`listMyCreditLedger`, `listMyDevices`, `getTrialEligibility` and `validateCoupon`
+(a coupon quote at the price their checkout would charge). Each plan from
+`getPlans` carries `checkout.ready` and `price`, the price this buyer would be
+charged: render `price.formatted`. Pass `{ accessToken }` as the second argument
+for a signed-in buyer.
 
 Restrict where the key works via the Application's **CORS origin allowlist** (Panel → Application → Access); off-allowlist origins get `403 ORIGIN_NOT_ALLOWED`. Money + account-management routes still require the secret key on a server. See [api-keys.md → Publishable key](https://github.com/rekey-dev/rekey/blob/main/docs/api-keys.md#publishable-key).
 
 ### Hooks
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 'use client';
 import { useUser, useRekey } from '@rekey.dev/react';
@@ -140,6 +146,7 @@ Gate regions of your UI. No styling, no opinions.
 | `<RekeyLoaded>` | the provider has resolved |
 | `<Protect>` | the supplied entitlement / feature / role check passes |
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 import { SignedIn, SignedOut, RekeyLoading, RekeyLoaded, Protect } from '@rekey.dev/react';
 
@@ -154,6 +161,7 @@ import { SignedIn, SignedOut, RekeyLoading, RekeyLoaded, Protect } from '@rekey.
 
 Entitlements **resolve server-side** (`@rekey.dev/node` `billing.getEntitlements`) — the browser never re-fetches them with a credential. Pass the resolved facts in via `authorization`; `<Protect>` renders the decision your server already made.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 // feature flag
 <Protect authorization={{ features }} feature="analytics" fallback={<UpgradeCard />}>
@@ -179,6 +187,7 @@ Entitlements **resolve server-side** (`@rekey.dev/node` `billing.getEntitlements
 
 Styled cards with email + password, optional magic-link, and optional OAuth buttons. They **post to your Server Actions**.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 'use client';
 import { SignIn } from '@rekey.dev/react';
@@ -215,6 +224,7 @@ Not on the App Router? Use `actionUrl="/api/sign-in"` (the form does a plain `PO
 
 **OAuth buttons without listing them.** Leave `oauthProviders` out and pass a start target, and the card shows every provider enabled on the Application in the panel (fetched with the publishable key, so set `publishableKey` on `<RekeyProvider>`):
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <SignIn action={signInAction} oauthStartAction={startOAuthAction} />       // action gets formData.get('provider')
 <SignIn action={signInAction} oauthStartUrl="/oauth/{provider}/start" />   // {provider} is replaced
@@ -226,6 +236,7 @@ The buttons appear just after hydration. The list is fetched once per `<RekeyPro
 
 Avatar + dropdown menu (manage account, sessions, sign out). Renders nothing when signed out.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <UserButton
   manageAccountUrl="/account"
@@ -239,6 +250,7 @@ Avatar + dropdown menu (manage account, sessions, sign out). Renders nothing whe
 
 Small affordances. Sign-in/up navigate to a URL; sign-out invokes your action.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <SignedOut>
   <SignInButton url="/login" />
@@ -259,6 +271,7 @@ The org endpoints are secret-key guarded, so these read **server-resolved data v
 
 Pick / switch / create the active team.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <OrganizationSwitcher
   organizations={orgs}              // organizations.listMine().items, server-side
@@ -271,6 +284,7 @@ Pick / switch / create the active team.
 
 ### `<CreateOrganization>`
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <CreateOrganization action={createOrgAction} />
 ```
@@ -279,6 +293,7 @@ Pick / switch / create the active team.
 
 Members + pending invitations, with role-change / remove / revoke affordances for OWNER/ADMIN viewers.
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <OrganizationProfile
   organization={{ id: org.id, name: org.name }}
@@ -302,77 +317,146 @@ Members + pending invitations, with role-change / remove / revoke affordances fo
 
 ### `<PricingTable>`
 
-Renders your plans with upgrade buttons. Plans come from `billing.getPlans()` (public — no user token needed) fetched **server-side** and passed in; each upgrade posts to your checkout action.
+Renders your plans with upgrade buttons. Plans come from `billing.getPlans()`, fetched **server-side** and passed in as they are; each upgrade posts to your checkout action.
 
-> **`getPlans()` returns `{ items, page }`, not an array** (2.0.0-rc.3 — every list method does). Pass `.items` to the component. `page.hasMore` is worth reading on a pricing page: it is how you learn the catalogue is longer than the window you were served.
+Each plan carries `price`: the price this buyer would be charged, resolved by the API with the function checkout uses. The table renders `price.formatted` and does no arithmetic. So fetch the plans for the buyer in front of you: pass their `country`, and their access token when they are signed in.
+
+> **`getPlans()` returns `{ items, page }`, not an array.** Pass `.items` to the component. `page.hasMore` is how you learn the catalogue is longer than the window you were served.
 
 ```tsx
-<PricingTable
-  plans={plans}                       // billing.getPlans().items, server-side
-  currentPlanSlug={isPro ? 'pro_monthly' : 'free'}
-  checkoutAction={checkoutAction}     // billing.createCheckout() + redirect
-  hiddenFields={activeOrgId ? { orgId: activeOrgId } : undefined}
-  orgGateBlocking={config.billingSubject === 'org' && !activeOrgId}
-/>
+// app/pricing/page.tsx (Server Component)
+import { PricingTable } from '@rekey.dev/react';
+import { auth, visitorCountryHint } from '@rekey.dev/nextjs/server';
+import { rekey } from '@/lib/rekey';
+import { checkout } from './actions';
+
+export default async function Pricing() {
+  const session = await auth();
+  const scoped = rekey.with({ visitorCountryHint: await visitorCountryHint() });
+  const { items } = await scoped.billing.getPlans(undefined, session ? { accessToken: session.accessToken } : {});
+
+  return <PricingTable plans={items} checkoutAction={checkout} />;
+}
 ```
+
+- `PricingPlan` requires `price`, `prices`, `isFree` and `checkout`. It no longer has `amount` or `currency`. A plan built by hand supplies `price: { currency, amount, formatted }` and lists its one price in `prices`.
+- The `currency` prop is removed: the price shown has to be the price charged.
+- `priceFallbackNote` is what a card says when the plan's `price.reason` is `fallback` (the price selected for the buyer cannot be charged, and the default price is shown and charged). It defaults to a sentence naming the price.
+- `unavailableLabel` is what a paid plan's card shows in place of its button when `checkout.ready` is false. Default "Not available right now".
+- `currentPlanSlug`, `hiddenFields`, `orgGateBlocking`, `hideFreeCta` and `ctaLabel` are unchanged.
+
+### `<PriceFallbackNotice>` and `<CouponQuote>`
+
+Two small components for what a buyer is told about the price before they pay. Both render text the API wrote; neither computes an amount.
+
+```tsx
+'use client';
+import { CouponQuote, PriceFallbackNotice } from '@rekey.dev/react';
+import type { CheckoutResultDto, ValidateCouponResultDto } from '@rekey.dev/react';
+
+export function BeforeYouPay({ checkout, quote }: { checkout: Pick<CheckoutResultDto, 'url' | 'priceFallback'>; quote: ValidateCouponResultDto | null }) {
+  return (
+    <div>
+      {/* "Prices in INR are not available yet. You will pay $19.00." Renders nothing without a fallback. */}
+      <PriceFallbackNotice fallback={checkout.priceFallback} />
+      {/* "LAUNCH50 takes ₹750.00 off. You pay ₹749.00." */}
+      {quote && <CouponQuote quote={quote} />}
+      <a href={checkout.url}>Continue to payment</a>
+    </div>
+  );
+}
+```
+
+`fallback` is `priceFallback` from `createCheckout()` or `validateCoupon()`. `quote` is what `validateCoupon()` resolved to. A refused code throws: show that error's `message`. For `COUPON_CURRENCY_NOT_COVERED` it says the code does not work for prices in the buyer's currency, and the buyer can continue without it.
+
+`formatMoney`, `minorUnitExponent`, `validatePriceAmount`, `sellableCurrencies` and `priceFallbackMessage` are exported from this package too, for the few places a page formats an amount itself, such as `formatMoney(payment.amount - payment.refundedAmount, payment.currency)`.
 
 ### `<CheckoutButton>`
 
 A single-plan CTA.
 
 ```tsx
-<CheckoutButton planSlug="pro_monthly" action={checkoutAction}>
-  Upgrade to Pro
-</CheckoutButton>
+import { CheckoutButton } from '@rekey.dev/react';
+import { checkout } from './actions';
+
+export function Upgrade() {
+  return (
+    <CheckoutButton planSlug="pro_monthly" action={checkout}>
+      Upgrade to Pro
+    </CheckoutButton>
+  );
+}
 ```
 
-### `<ProviderPicker>` — let the user choose how to pay
+### `<ProviderPicker>`: let the user choose how to pay
 
-An Application can enable up to **3 billing providers** (`stripe` / `paypal` / `razorpay`). Checkout's `provider` is optional — when you omit it, a **server-side geo router** auto-picks one. `<ProviderPicker>` lets the end-user override that pick with a "Pay with…" radio group.
+An Application can enable more than one billing provider. Checkout's `provider` is optional: when you omit it, Rekey routes the checkout. `<ProviderPicker>` lets the end-user override that pick with a "Pay with…" radio group.
 
-Like `<PricingTable plans>`, the provider list is a **prop**: the picker renders what you hand it and issues no API calls of its own. `GET /api/v1/billing/providers` sits at the same trust level as `/plans` — it accepts the **publishable key** as well as a secret key — so you can fetch it either server-side with `billing.getProviders()` or in the browser with `listBillingProviders()`.
+Like `<PricingTable plans>`, the provider list is a **prop**: the picker renders what you hand it and issues no API calls of its own. `GET /api/v1/billing/providers` sits at the same trust level as `/plans`. It accepts the **publishable key** as well as a secret key, so you can fetch it either server-side with `billing.getProviders()` or in the browser with `listBillingProviders()`.
 
 ```tsx
-// Server component — fetch the list with the secret key, pass it down.
-const { providers } = await rekey.billing.getProviders(country); // country optional (ISO-3166 alpha-2)
+// Server component: fetch both lists with the secret key, pass them down.
+import { PricingTable } from '@rekey.dev/react';
+import { rekey } from '@/lib/rekey';
+import { checkout } from './actions';
 
-<PricingTable
-  plans={plans}                       // billing.getPlans().items, server-side
-  providers={providers}               // billing.getProviders() server-side
-  checkoutAction={checkoutAction}
-/>
+export default async function Pricing() {
+  const { items } = await rekey.billing.getPlans(undefined, { country: 'IN' });
+  const { providers, routedProvider } = await rekey.billing.getProviders('IN'); // country optional (ISO 3166-1 alpha-2)
+
+  return <PricingTable plans={items} providers={providers} routedProvider={routedProvider} checkoutAction={checkout} />;
+}
 ```
 
-With `providers` passed, `<PricingTable>` renders the picker above the grid and threads the chosen provider into **every** plan's checkout form (posted as `provider`). Your checkout Server Action must **forward it** to `createCheckout`:
+Each provider's `currencies` is what that account charges. An empty list means none: such a provider is never posted with a paid plan. Leave the field out when you have no list, and the provider is treated as able to charge. Pass the providers as `getProviders()` returned them.
+
+With `providers` passed, `<PricingTable>` renders the picker above the grid. The chosen provider is posted as `provider` with a plan it can charge, and for a plan with more than one price only once the buyer has changed the picker. Your checkout Server Action must **forward it** to `createCheckout`:
 
 ```ts
-// lib/actions.ts
+// app/pricing/actions.ts
 'use server';
-export async function checkoutAction(formData: FormData) {
+import { redirect } from 'next/navigation';
+import { auth } from '@rekey.dev/nextjs/server';
+import { rekey } from '@/lib/rekey';
+
+export async function checkout(formData: FormData) {
+  const session = await auth();
+  if (!session) redirect('/sign-in');
   const planSlug = String(formData.get('planSlug'));
   const provider = formData.get('provider'); // 'stripe' | 'paypal' | 'razorpay' | null
-  const { url } = await rekey.billing.createCheckout(session.accessToken, {
+  const result = await rekey.billing.createCheckout(session.accessToken, {
     planSlug,
-    successUrl, cancelUrl,
-    ...(provider ? { provider: provider as BillingProvider } : {}), // omit → geo router picks
+    successUrl,
+    cancelUrl,
+    ...(provider ? { provider: String(provider) } : {}), // left out, Rekey routes the checkout
   });
-  redirect(url);
+  // Set when the default price is charged because the selected one could not be.
+  if (result.priceFallback) redirect(`/checkout/confirm?session=${result.checkoutSessionId}`);
+  redirect(result.url);
 }
 ```
 
 > Without `providers`, `<PricingTable>` stays a Server Component (zero client JS). The provider-aware variant is an interactive client component, dispatched only when `providers` is non-empty.
 
-Use it standalone (outside `<PricingTable>`) by dropping it into any checkout `<form>` — the selected radio posts `provider` with no JS in uncontrolled mode:
+Use it standalone (outside `<PricingTable>`) by dropping it into any checkout `<form>`. The selected radio posts `provider` with no JS in uncontrolled mode:
 
 ```tsx
-<form action={checkoutAction}>
-  <input type="hidden" name="planSlug" value="pro_monthly" />
-  <ProviderPicker providers={providers} />
-  <button type="submit">Continue</button>
-</form>
+import { ProviderPicker } from '@rekey.dev/react';
+import type { ProviderOption } from '@rekey.dev/react';
+import { checkout } from './actions';
+
+export function PayWith({ providers }: { providers: ProviderOption[] }) {
+  return (
+    <form action={checkout}>
+      <input type="hidden" name="planSlug" value="pro_monthly" />
+      <ProviderPicker providers={providers} />
+      <button type="submit">Continue</button>
+    </form>
+  );
+}
 ```
 
-It also supports a controlled `value` + `onChange` pair, an optional `label`, and a custom field `name`. The first provider in the list (the geo router's top pick) is selected by default.
+It also supports a controlled `value` + `onChange` pair, an optional `label`, and a custom field `name`. `routedProvider` from the same response is selected by default; without it, the first provider in the list is.
 
 ### Org-billing (`billingSubject='org'`)
 
@@ -395,6 +479,7 @@ pass `action` (your Server Action) and `form` (from `rekey.lists.get(key)` on yo
 server) to post through your server instead. Rekey sends no email to a list. See
 [docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md#list-forms).
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <NewsletterForm list="waitlist" title="Join the waitlist" />
 ```
@@ -407,12 +492,14 @@ Every component accepts an `appearance` prop and a `className`. Theming is **tok
 
 Defaults follow `prefers-color-scheme`. Pin it explicitly:
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <SignIn appearance="dark" action={signInAction} />
 ```
 
 ### Override tokens
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <SignIn
   appearance={{
@@ -443,6 +530,7 @@ You can also set the `--rekey-*` variables in your own CSS for app-wide theming.
 
 Target one slot without re-theming (the `appearance.elements` pattern):
 
+<!-- snippet: no-check a JSX fragment: no imports, and values from the surrounding page -->
 ```tsx
 <SignIn
   appearance={{ elements: { buttonPrimary: 'my-cta', card: 'shadow-2xl' } }}

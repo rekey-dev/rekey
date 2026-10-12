@@ -74,8 +74,8 @@ describe('trial eligibility through checkout', () => {
     await configureSandboxStripe(applicationId);
 
     for (const plan of [
-      { slug: 'basic', name: 'Basic', amount: 900 },
-      { slug: 'pro', name: 'Pro', amount: 9900 },
+      { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 900 } },
+      { slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 9900 } },
     ]) {
       const res = await app.inject({
         method: 'POST',

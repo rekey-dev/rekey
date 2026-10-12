@@ -11,10 +11,10 @@ import { ok, okArray, errs, ref, type JsonSchema } from "../../lib/openapi.js";
  */
 const SUPER_ADMIN_ERRORS = {
   401:
-    "ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the " +
+    "ADMIN_AUTH_MISSING: no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID: the " +
     "value does not match `SUPER_ADMIN_KEY`.",
-  403: "ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE — an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
-  429: "RATE_LIMITED — too many requests. Honour the `Retry-After` header.",
+  403: "ADMIN_IP_NOT_ALLOWED: the caller IP is outside `ADMIN_IP_ALLOWLIST`; or ADMIN_IP_UNVERIFIABLE: an allowlist is set but the caller arrived through a proxy the API cannot identify, so it has no client address to check.",
+  429: "RATE_LIMITED: too many requests. Honour the `Retry-After` header.",
 } as const;
 
 /** The mint response: the newly created key plus its one-time raw secret. */
@@ -73,7 +73,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
           }),
         },
       },
@@ -133,12 +133,12 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             400:
-              "BAD_REQUEST — the body failed schema validation; or API_KEY_EXPIRY_IN_PAST — " +
-              "`expiresAt` is not in the future; or API_KEY_LIMIT_REACHED — the application " +
+              "BAD_REQUEST: the body failed schema validation; or API_KEY_EXPIRY_IN_PAST: " +
+              "`expiresAt` is not in the future; or API_KEY_LIMIT_REACHED: the application " +
               "already has 25 active keys; or API_KEY_SCOPE_UNKNOWN: `scopes` names a scope " +
               "no route enforces.",
             ...SUPER_ADMIN_ERRORS,
-            404: "APPLICATION_NOT_FOUND — no application with that id.",
+            404: "APPLICATION_NOT_FOUND: no application with that id.",
           }),
         },
       },
@@ -164,7 +164,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
           apiKey: result.apiKey,
           rawKey: result.rawKey,
           warning:
-            "Store this rawKey now — it is shown exactly once and cannot be recovered. Treat it like a database password.",
+            "Store this rawKey now. It is shown exactly once and cannot be recovered. Treat it like a database password.",
         },
       });
     },
@@ -191,7 +191,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...SUPER_ADMIN_ERRORS,
             404:
-              "API_KEY_NOT_FOUND — no key with that id under this application (also returned " +
+              "API_KEY_NOT_FOUND: no key with that id under this application (also returned " +
               "when `id` itself does not name an application).",
           }),
         },
