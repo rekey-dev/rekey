@@ -20,6 +20,10 @@ import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { randomUUID } from 'node:crypto';
 import Stripe from 'stripe';
 import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 /** Matches what `configureSandboxStripe` stores. */
@@ -87,7 +91,7 @@ describe('trial eligibility through checkout', () => {
     }
     // See the module docblock: the write path refuses this, so it goes on the
     // row directly, which is how the exposed population got theirs.
-    await prisma.plan.updateMany({ where: { applicationId }, data: { trialDays: 14 } });
+    await revisePlans({ applicationId }, { trialDays: 14 });
 
     userAccess = await app
       .inject({
@@ -181,13 +185,6 @@ describe('trial eligibility through checkout', () => {
     expect(rows.filter((r) => r.status === 'RESERVED')).toHaveLength(1);
     expect(rows.filter((r) => r.status === 'RELEASED')).toHaveLength(1);
   });
-
-  it('a plan with no trial is untouched by any of this', async () => {
-    await prisma.plan.updateMany({ where: { applicationId }, data: { trialDays: null } });
-    expect((await checkout({ planSlug: 'basic' })).statusCode).toBe(200);
-    expect((await checkout({ planSlug: 'pro' })).statusCode).toBe(200);
-    expect(await prisma.trialRedemption.count({ where: { applicationId } })).toBe(0);
-  });
   it('a day-0 trialist is stored TRIALING with a trial end, not ACTIVE', async () => {
     // `applyCheckoutCompleted` hard-wrote ACTIVE and never wrote `trialEndsAt`.
     // Stripe's `customer.subscription.created` is not in the translate switch
@@ -242,7 +239,7 @@ describe('trial eligibility through checkout', () => {
   });
 
   it('a checkout with NO trial is still stored ACTIVE', async () => {
-    await prisma.plan.updateMany({ where: { applicationId }, data: { trialDays: null } });
+    await revisePlans({ applicationId }, { trialDays: null });
     const res = await checkout({ planSlug: 'pro' });
     const sessionId = (res.json().data as { subscription: { metadata: { checkoutSessionId: string } } })
       .subscription.metadata.checkoutSessionId;

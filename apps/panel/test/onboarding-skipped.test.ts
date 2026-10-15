@@ -79,11 +79,8 @@ describe('Onboarding status counts', () => {
     expect(t).toContain('Pending 250 25.0%');
   });
 
-  it('renders nothing when the section is not ok or the API predates it', async () => {
+  it('renders nothing when the section is not ok', async () => {
     reply = () => envelope({ status: 'pending' });
-    expect(await counts()).toBe('');
-    const { PanelApiError } = (await import('@/lib/api')) as unknown as { PanelApiError: new (s: number, c: string) => Error };
-    reply = () => new PanelApiError(404, 'ROUTE_NOT_FOUND');
     expect(await counts()).toBe('');
   });
 
@@ -97,12 +94,11 @@ describe('Onboarding status counts', () => {
 });
 
 describe('End-users onboarding column', () => {
-  it('names each state and shows a dash on an older API', async () => {
+  it('names each state', async () => {
     const { OnboardingBadge } = await import('@/app/(authed)/applications/[id]/end-users/onboarding-badge');
-    const r = (status?: 'pending' | 'completed' | 'skipped'): string => text(renderToStaticMarkup(createElement(OnboardingBadge, { status })));
+    const r = (status: 'pending' | 'completed' | 'skipped'): string => text(renderToStaticMarkup(createElement(OnboardingBadge, { status })));
     expect(r('completed')).toBe('completed');
     expect(r('skipped')).toBe('skipped');
     expect(r('pending')).toBe('pending');
-    expect(r(undefined)).toBe('—');
   });
 });

@@ -12,7 +12,7 @@ import {
   paged,
   paginationJsonSchema,
 } from "../../lib/pagination.js";
-import { stripApplicationSecrets, withBillingDefaults } from "../../lib/app-access.js";
+import { applicationPayload } from "../../lib/app-access.js";
 import { ok, okPage, errs, ref } from "../../lib/openapi.js";
 import { getModule, registryNames } from "../billing/providers/registry.js";
 
@@ -98,7 +98,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       ]);
       return {
         success: true,
-        data: paged(items.map((item) => stripApplicationSecrets(withBillingDefaults(item))), total, take, skip),
+        data: paged(items.map((item) => applicationPayload(item)), total, take, skip),
       };
     },
   );
@@ -128,7 +128,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       const { id } = Params.parse(req.params);
       return {
         success: true,
-        data: stripApplicationSecrets(withBillingDefaults(await applicationsService.get(id))),
+        data: applicationPayload(await applicationsService.get(id)),
       };
     },
   );
@@ -234,7 +234,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply
         .status(201)
-        .send({ success: true, data: stripApplicationSecrets(withBillingDefaults(application)) });
+        .send({ success: true, data: applicationPayload(application) });
     },
   );
 }

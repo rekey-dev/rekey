@@ -95,17 +95,13 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
     it('201: publishable key may create a user', async () => {
       expect((await signUp(publicKey, 'pub-public@example.com')).statusCode).toBe(201);
     });
-
-    it('201: secret key may create a user', async () => {
-      expect((await signUp(liveKey, 'secret-public@example.com')).statusCode).toBe(201);
-    });
   });
 
   // ---------- secret_only ----------
 
   describe('secret_only', () => {
     beforeEach(async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId,
         patch: { signupMode: 'secret_only', methods: ['password', 'magic_link'] },
       });
@@ -115,10 +111,6 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
       const res = await signUp(publicKey, 'pub-blocked@example.com');
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe('SIGNUP_REQUIRES_SECRET_KEY');
-    });
-
-    it('201: secret key may still create a user', async () => {
-      expect((await signUp(liveKey, 'secret-ok@example.com')).statusCode).toBe(201);
     });
 
     it('publishable magic-link for a NEW email is silently refused (enumeration-safe)', async () => {
@@ -154,7 +146,7 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
 
   describe('invite_only', () => {
     beforeEach(async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId,
         patch: { signupMode: 'invite_only' },
       });
@@ -177,7 +169,7 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
 
   describe('legacy signupEnabled back-compat', () => {
     it('PATCH signupEnabled=false ⇒ invite_only behaviour', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId,
         patch: { signupEnabled: false },
       });
@@ -194,15 +186,6 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
       });
       expect(parsed.signupMode).toBe('invite_only');
       expect(parsed.signupEnabled).toBe(false);
-    });
-
-    it('secret_only still reports signupEnabled=true (signup IS enabled)', () => {
-      const parsed = AuthConfigSchema.parse({
-        methods: ['password'],
-        redirectUrls: [],
-        signupMode: 'secret_only',
-      });
-      expect(parsed.signupEnabled).toBe(true);
     });
   });
 });

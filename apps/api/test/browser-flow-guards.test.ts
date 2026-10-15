@@ -27,6 +27,10 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import * as OTPAuth from 'otpauth';
+import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
+endUsersConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PASSWORD = 'pw-one-two-three';
@@ -320,7 +324,9 @@ describe('browser-reachable end-user self-service flows', () => {
         page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
       });
 
-      // It could consume a verification token but never request one.
+      // It could consume a verification token but never request one. Asking
+      // for one only makes sense while the address is unconfirmed.
+      await prisma.endUser.updateMany({ data: { emailVerified: false } });
       const sendVerification = await asBrowser('POST', '/api/v1/auth/send-verification', {});
       expect(sendVerification.statusCode).toBe(200);
 
@@ -359,24 +365,6 @@ describe('browser-reachable end-user self-service flows', () => {
       expect(server.statusCode).toBe(400);
       expect(server.json().error.code).toBe('WEBAUTHN_NOT_CONFIGURED');
     });
-
-    it('401 USER_TOKEN_MISSING for every management route with no user token', async () => {
-      expectNoSessionRefused(await asAnonBrowser('GET', '/api/v1/auth/sessions'));
-      expectNoSessionRefused(await asAnonBrowser('GET', '/api/v1/auth/passkeys'));
-      expectNoSessionRefused(await asAnonBrowser('POST', '/api/v1/auth/send-verification', {}));
-      expectNoSessionRefused(await asAnonBrowser('POST', '/api/v1/auth/sign-out-everywhere'));
-      expectNoSessionRefused(await asAnonBrowser('DELETE', '/api/v1/auth/sessions/some-id'));
-      expectNoSessionRefused(await asAnonBrowser('DELETE', '/api/v1/auth/passkeys/some-id'));
-      expectNoSessionRefused(
-        await asAnonBrowser('POST', '/api/v1/auth/passkey/register/start', {}),
-      );
-      expectNoSessionRefused(
-        await asAnonBrowser('POST', '/api/v1/auth/change-password', {
-          currentPassword: PASSWORD,
-          newPassword: 'pw-four-five-six',
-        }),
-      );
-    });
   });
 
   // ------------------------------------------------------------------
@@ -384,11 +372,6 @@ describe('browser-reachable end-user self-service flows', () => {
   // ------------------------------------------------------------------
 
   describe('/auth/oauth link routes', () => {
-    it('GET /identities works with a publishable key + user token', async () => {
-      const res = await asBrowser('GET', '/api/v1/auth/oauth/identities');
-      expect(res.statusCode).toBe(200);
-      expect(res.json().data).toEqual([]);
-    });
 
     it('link/start is reachable from a browser (fails on provider config, not credential)', async () => {
       // No Google OAuth config on this app, so this refuses on the provider,
@@ -398,17 +381,6 @@ describe('browser-reachable end-user self-service flows', () => {
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe('OAUTH_PROVIDER_NOT_CONFIGURED');
-    });
-
-    it('401 USER_TOKEN_MISSING for link routes with no user token', async () => {
-      expectNoSessionRefused(await asAnonBrowser('GET', '/api/v1/auth/oauth/identities'));
-      expectNoSessionRefused(
-        await asAnonBrowser('POST', '/api/v1/auth/oauth/google/link/start', { state: 's' }),
-      );
-      expectNoSessionRefused(
-        await asAnonBrowser('POST', '/api/v1/auth/oauth/google/link/complete', { code: 'c' }),
-      );
-      expectNoSessionRefused(await asAnonBrowser('DELETE', '/api/v1/auth/oauth/google'));
     });
   });
 

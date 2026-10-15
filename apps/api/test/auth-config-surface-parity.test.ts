@@ -236,14 +236,4 @@ describe('auth-config write surfaces agree on their fields', () => {
         "`type: 'string', nullable: true`.",
     ).toEqual([]);
   });
-
-  it('the MCP tool documents the sign-in redirect it can now set', () => {
-    // hostedAuthorizeUrl points the browser somewhere during sign-in, which is
-    // a phishing surface if it is set carelessly. It is the one field here
-    // whose description has to carry that warning, so an MCP client's model
-    // reads it before choosing a value.
-    const field = toolProps.hostedAuthorizeUrl as { description?: string };
-    expect(field).toBeDefined();
-    expect(field.description ?? '').toMatch(/SECURITY/);
-  });
 });

@@ -11,6 +11,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { waitForDeliveries } from './device-fixtures.js';
 import { bearer, operatorWorld } from './operator-world.js';
 import { codeOf, PASSWORD, REASON, supportWorld, type Json, type SupportWorld } from './support-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 /** Distinctive on purpose: the leak test searches serialised rows for it. */
 const NOTE = 'heron-basalt-note-5519 sent build 4.2.1, customer to retry export';

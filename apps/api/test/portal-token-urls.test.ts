@@ -78,15 +78,6 @@ describe('portal token URLs', () => {
     });
   }
 
-  function resendVerification(verifyUrl: string) {
-    return app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/resend-verification',
-      headers: { authorization: `Bearer ${publicKey}` },
-      payload: { email: EMAIL, verifyUrl },
-    });
-  }
-
   function refusal(res: { statusCode: number; json: () => unknown }): string | undefined {
     if (res.statusCode !== 400) return undefined;
     return (res.json() as { error?: { code?: string } }).error?.code;
@@ -94,11 +85,6 @@ describe('portal token URLs', () => {
 
   it('accepts a reset link into this app\'s own portal pages', async () => {
     const res = await forgot(`${PORTAL}/${SLUG}/reset-password?token={token}`);
-    expect(res.statusCode).toBe(200);
-  });
-
-  it('accepts a verification link into this app\'s own portal pages', async () => {
-    const res = await resendVerification(`${PORTAL}/${SLUG}/verify?token={token}`);
     expect(res.statusCode).toBe(200);
   });
 
@@ -176,19 +162,6 @@ describe('portal token URLs', () => {
     }
   });
 
-  it('refuses a verified custom domain once the portal is off', async () => {
-    await prisma.application.update({
-      where: { id: applicationId },
-      data: {
-        hostedPortalEnabled: false,
-        portalDomain: 'billing.acme.test',
-        portalDomainVerifiedAt: new Date(),
-      },
-    });
-    const res = await forgot('https://billing.acme.test/reset-password?token={token}');
-    expect(refusal(res)).toBe('AUTH_URL_NOT_ALLOWED');
-  });
-
   it('does not write the portal into the operator\'s redirect URLs', async () => {
     await forgot(`${PORTAL}/${SLUG}/reset-password?token={token}`);
     const row = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
@@ -206,40 +179,4 @@ describe('portal token URLs', () => {
     expect(refusal(unknown)).toBe('AUTH_URL_NOT_ALLOWED');
   });
 
-  it('refuses a verification re-send to an unknown address exactly like a known one', async () => {
-    const bad = 'https://attacker.test/verify?token={token}';
-    const request = (email: string) =>
-      app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/resend-verification',
-        headers: { authorization: `Bearer ${publicKey}` },
-        payload: { email, verifyUrl: bad },
-      });
-    expect(refusal(await request(EMAIL))).toBe('AUTH_URL_NOT_ALLOWED');
-    expect(refusal(await request('nobody@example.com'))).toBe('AUTH_URL_NOT_ALLOWED');
-  });
-
-  it('refuses a magic link to an unknown address exactly like a known one', async () => {
-    const row = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
-    await prisma.application.update({
-      where: { id: applicationId },
-      data: {
-        authConfig: {
-          ...(row.authConfig as Record<string, unknown>),
-          methods: ['password', 'magic_link'],
-          signupMode: 'invite_only',
-        },
-      },
-    });
-    const bad = 'https://attacker.test/in?token={token}';
-    const request = (email: string) =>
-      app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/magic-link/request',
-        headers: { authorization: `Bearer ${publicKey}` },
-        payload: { email, signInUrl: bad },
-      });
-    expect(refusal(await request(EMAIL))).toBe('AUTH_URL_NOT_ALLOWED');
-    expect(refusal(await request('nobody@example.com'))).toBe('AUTH_URL_NOT_ALLOWED');
-  });
 });

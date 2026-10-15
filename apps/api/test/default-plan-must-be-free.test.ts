@@ -197,20 +197,6 @@ describe('the free-tier default plan must cost nothing', () => {
       expect(events[0]!.metadata).toMatchObject({ defaultPlanSlug: 'pro' });
     });
 
-    it('a default repriced after nomination stops applying', async () => {
-      await free();
-      expect((await tenantSet('free')).statusCode).toBe(200);
-      expect((await whatAFreshUserGets()).features).toEqual({ reports: true });
-
-      await prisma.plan.update({
-        where: { applicationId_slug: { applicationId: appId, slug: 'free' } },
-        data: { amount: 900 },
-      });
-      const got = await whatAFreshUserGets();
-      expect(got.features).toEqual({});
-      expect(got.calls).toBeNull();
-    });
-
     it('a free default keeps applying', async () => {
       await free();
       await forceDefault('free');

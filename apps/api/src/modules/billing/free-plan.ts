@@ -6,9 +6,6 @@ import { WITH_DEFAULT_PRICE, withDefaultPrice } from '../plans/default-price.js'
 /**
  * Whether a plan charges nothing at all: no flat price and no metered one.
  *
- * Read the plan through `withDefaultPrices` first. That is what keeps
- * `isFree` true to a plan another build wrote.
- *
  * @example
  * costsNothing({ isFree: true }); // true
  */

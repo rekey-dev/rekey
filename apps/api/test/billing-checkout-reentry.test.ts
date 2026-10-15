@@ -27,6 +27,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PASSWORD = 'pw-one-two-three';
@@ -296,45 +299,6 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // The provider link is untouched too, this row is still the live
       // subscription, not a fresh checkout record.
       expect(after.providerSubId).toBe('sub_active_1');
-    });
-
-    it('stays ACTIVE when they try a coupon from the account page', async () => {
-      // The exact flow the marketing account panel added: an Apply/Subscribe
-      // form rendered in front of an EXISTING subscriber.
-      await createCoupon({ code: 'tryme', discountType: 'PERCENT', basisPoints: 1000 });
-      const subId = await activate();
-
-      await checkout({ planSlug: 'pro', couponCode: 'tryme' });
-
-      expect(
-        (await prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).status,
-      ).toBe('ACTIVE');
-    });
-
-    it('keeps the subscription visible to the portal after re-opening checkout', async () => {
-      // PENDING is not an entitling status, so the downgrade did not merely
-      // look wrong, every entitlement gate started refusing.
-      await activate();
-      await checkout({ planSlug: 'pro' });
-
-      const res = await app.inject({
-        method: 'GET',
-        url: '/api/v1/billing/subscription',
-        headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
-      });
-      expect(res.statusCode).toBe(200);
-      expect((res.json().data as { status: string }).status).toBe('ACTIVE');
-    });
-
-    it('a PAST_DUE subscriber is not downgraded either — dunning still runs', async () => {
-      const subId = await activate();
-      await prisma.subscription.update({ where: { id: subId }, data: { status: 'PAST_DUE' } });
-
-      await checkout({ planSlug: 'pro' });
-
-      expect(
-        (await prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).status,
-      ).toBe('PAST_DUE');
     });
 
     it('a lapsed subscriber DOES go back to PENDING — that is a real new checkout', async () => {

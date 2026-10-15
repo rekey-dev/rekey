@@ -73,7 +73,7 @@ export default async function EndUserAccessPage({
     getApplication(id),
     getEndUserBan(id, euid),
   ]);
-  const scopes = application.access?.scopes ?? null;
+  const scopes = application.access.scopes;
   const canBilling = hasScope(scopes, 'billing:read');
   const canWrite = hasScope(scopes, 'end-users:write');
   const billing = canBilling ? await getEndUserBilling(id, euid) : null;

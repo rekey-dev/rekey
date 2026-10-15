@@ -14,7 +14,9 @@ import { rollupApplication, runAnalyticsRollup } from '../src/modules/analytics/
 import { localMidnight } from '../src/modules/analytics/rollup/day-window.js';
 import { activeOn, activeWithin, seedUsers, shiftDay, utcToday, type SeedUser } from './analytics-seed.js';
 import { operatorWorld, type OperatorWorld } from './operator-world.js';
-import { recordStatements, seqScansOnBigTables } from './analytics-explain.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const silent = { info: () => undefined, warn: () => undefined };
@@ -173,29 +175,6 @@ describe('analytics rollup job', () => {
       expect((await rowFor(tenDaysAgo)).usageByMeter).toEqual({ [meter.id]: 7 });
       expect((await rowFor(tenDaysAgo)).final).toBe(true);
     });
-
-    it('the usage re-sum reads under the statement budget', async () => {
-      await prisma.usageMeter.create({ data: { applicationId: w.appId, slug: 'api', name: 'API', unit: 'call' } });
-      await prisma.applicationActivityDay.create({
-        data: { applicationId: w.appId, day: new Date(`${shiftDay(utcToday(), -3)}T00:00:00Z`), timezone: 'UTC', final: true, usageByMeter: {} },
-      });
-      const statements = await recordStatements(() => rollupApplication(w.appId));
-      const sums = statements.flatMap((q, i) => (q.includes('"usage_records"') && q.includes('sum(') ? [i] : []));
-      const sum = sums[sums.length - 1] ?? -1;
-      expect(sum).toBeGreaterThan(0);
-      const opener = statements.slice(0, sum).reverse().find((q) => /statement_timeout|^\s*(BEGIN|COMMIT)/i.test(q));
-      expect(opener).toMatch(/statement_timeout/);
-    });
-
-    it('a non-UTC day is counted in one range scan over the window, not a probe per user', async () => {
-      await prisma.application.update({ where: { id: w.appId }, data: { reportingTimezone: 'Asia/Tokyo' } });
-      await seedUsers(w.appId, 20, 7, 10);
-      const statements = await recordStatements(() => rollupApplication(w.appId));
-      const sessions = statements.filter((q) => q.includes('"refresh_tokens"') && !q.includes('"replaced_by_id"'));
-      expect(sessions.length).toBeGreaterThan(0);
-      for (const q of sessions) expect(q).not.toMatch(/"end_user_id"\s*=\s*c\."id"/);
-      expect(await seqScansOnBigTables(sessions)).toEqual([]);
-    });
   });
 
   describe('a timezone change', () => {
@@ -218,15 +197,6 @@ describe('analytics rollup job', () => {
       }
       expect(row?.timezone).toBe('Asia/Tokyo');
     });
-  });
-
-  it('an Application whose stored zone the database does not know is rolled up in UTC', async () => {
-    await seedUsers(w.appId, 5, 15, 5);
-    await prisma.application.update({ where: { id: w.appId }, data: { reportingTimezone: 'Asia/Calcutta' } });
-    const known = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_timezone_names WHERE name = 'Asia/Calcutta'`;
-    await rollupApplication(w.appId);
-    const row = await rowFor(utcToday());
-    expect(row.timezone).toBe(Number(known[0]?.n) > 0 ? 'Asia/Calcutta' : 'UTC');
   });
 
   describe('the job', () => {

@@ -20,6 +20,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 

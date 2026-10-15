@@ -10,6 +10,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { setDefaultDeviceLimit as setDefaultDeviceLimitFor } from './device-fixtures.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('max_devices bounds perpetual and timed licenses', () => {
   let app: FastifyInstance;

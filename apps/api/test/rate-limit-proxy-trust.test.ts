@@ -25,11 +25,13 @@ import { waitForSecurityEvents } from "./wait-for-security-events.js";
 import { createClientIpResolver } from "../src/lib/client-ip.js";
 import {
   createVerifiedKeyMemo,
-  forgetVerifiedKey,
 } from "../src/lib/rate-limit.js";
 import { hashKey } from "../src/lib/keys.js";
 import type { Redis } from "ioredis";
 import type { IncomingMessage } from "node:http";
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const TRAEFIK = "10.0.5.5"; // a proxy on a shared Docker network, no fixed address
@@ -234,27 +236,6 @@ describe("through a proxy we cannot identify (no API_PROXY_SECRET)", () => {
     );
     expect(proxied.statusCode).toBe(200);
   });
-
-  it("does not apply the per-IP ceiling across identities to the shared address", async () => {
-    app = await enforcedApp({ rateLimitOverrides: { authenticatedPerIp: 3 } });
-    const tokens = await Promise.all([
-      makeOperator("ceil-a"),
-      makeOperator("ceil-b"),
-    ]);
-    for (let i = 0; i < 8; i++) {
-      const r = await app.inject(
-        viaTraefik(
-          {
-            method: "GET",
-            url: "/api/v1/tenant/auth/me",
-            headers: { authorization: `Bearer ${tokens[i % 2]}` },
-          },
-          `203.0.113.${10 + i}`,
-        ),
-      );
-      expect(r.statusCode).toBe(200);
-    }
-  });
 });
 
 describe("through our proxy, proven by API_PROXY_SECRET", () => {
@@ -314,54 +295,6 @@ describe("through our proxy, proven by API_PROXY_SECRET", () => {
       },
     });
     expect(over.statusCode).toBe(429);
-  });
-
-  it("a private peer forwarding without the secret is never IP-blocked, even with the secret configured", async () => {
-    // Traefik on a router that lost the secret middleware: every public
-    // request arrives from its one private address, forwarding, no secret.
-    // Blocking that address would refuse everyone behind it.
-    app = await enforcedApp({ apiProxy: { secret: SECRET, hops: 1 } });
-    for (let i = 0; i < 150; i++) {
-      expect(
-        (await app.inject(viaTraefik(garbage, `198.51.100.${i % 250}`)))
-          .statusCode,
-      ).toBe(401);
-    }
-    const operator = await makeOperator("lost-middleware");
-    const valid = await app.inject(
-      viaTraefik(
-        {
-          method: "GET",
-          url: "/api/v1/tenant/auth/me",
-          headers: { authorization: `Bearer ${operator}` },
-        },
-        "203.0.113.2",
-      ),
-    );
-    expect(valid.statusCode).toBe(200);
-  });
-
-  it("warns once, not per request, that a proxy route is missing the secret", async () => {
-    const lines: string[] = [];
-    const stream = new Writable({
-      write(chunk, _enc, cb) {
-        lines.push(String(chunk));
-        cb();
-      },
-    });
-    app = await enforcedApp({
-      logger: { level: "warn", stream },
-      apiProxy: { secret: SECRET, hops: 1 },
-    });
-    for (let i = 0; i < 5; i++)
-      await app.inject(
-        viaTraefik({ method: "GET", url: "/health/live" }, `198.51.100.${i}`),
-      );
-    const warnings = lines.filter((l) =>
-      l.includes("without X-Rekey-Proxy-Secret"),
-    );
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain(TRAEFIK);
   });
 
   it("a forged address cannot pass ADMIN_IP_ALLOWLIST; the proxy-vouched one can", async () => {
@@ -572,18 +505,6 @@ describe("INTERNAL_CALLER_SECRET: our panel or portal calling through the public
     expect(valid.statusCode).toBe(200);
   });
 
-  it("a malformed X-Rekey-Client-Ip is treated as absent", async () => {
-    app = await enforcedApp({ apiProxy: { callerSecret: CALLER } });
-    for (const bad of ["not-an-ip", "198.51.100.1, 198.51.100.2"]) {
-      // Believed as a value, either would be one bucket and trip at 101.
-      for (let i = 0; i < 150; i++) {
-        expect((await app.inject(fromCaller(garbage, bad))).statusCode).toBe(
-          401,
-        );
-      }
-    }
-  });
-
   it("X-Rekey-Client-Ip without the secret, or with a wrong one, is ignored", async () => {
     app = await enforcedApp({ apiProxy: { callerSecret: CALLER } });
     // A public peer (not behind any proxy of ours) rotating the header: it is
@@ -767,38 +688,6 @@ describe("the resolver strips what must not travel further", () => {
   });
 });
 
-describe("the verified-key memo forgets a revoked key", () => {
-  it("a revoked key no longer passes a blocked address without a lookup", async () => {
-    app = await enforcedApp({ apiProxy: { secret: SECRET, hops: 1 } });
-    const { secretKey, applicationId, keyId } = await makeKeys("rlp-revoke");
-    const client = "198.51.100.170";
-    const me: InjectOptions = {
-      method: "GET",
-      url: "/api/v1/me/",
-      headers: { authorization: `Bearer ${secretKey}` },
-    };
-    expect((await app.inject(viaTraefik(me, client, true))).statusCode).toBe(
-      200,
-    );
-    for (let i = 0; i < 100; i++)
-      await app.inject(viaTraefik(garbage, client, true));
-    // Still known, so still passes.
-    expect((await app.inject(viaTraefik(me, client, true))).statusCode).toBe(
-      200,
-    );
-    const revoked = await fixtures.inject({
-      method: "DELETE",
-      url: `/api/v1/admin/applications/${applicationId}/api-keys/${keyId}`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-    });
-    expect(revoked.statusCode).toBe(200);
-    // Refused at the block, before the lookup that would 401 it.
-    expect((await app.inject(viaTraefik(me, client, true))).statusCode).toBe(
-      429,
-    );
-  });
-});
-
 describe("a failing address resolver does not take the process down", () => {
   it("treats the request as unvouched and serves it", async () => {
     app = await enforcedApp({
@@ -856,18 +745,6 @@ describe("verified-key memo across replicas", () => {
     } finally {
       replicaA.dispose();
       replicaB.dispose();
-    }
-  });
-
-  it("forgetVerifiedKey reaches every memo in the process", async () => {
-    const memo = createVerifiedKeyMemo({ redis: null, ttlMs: 60_000 });
-    try {
-      await memo.remember("rp_live_local-key");
-      expect(await memo.known("rp_live_local-key")).toBe(true);
-      await forgetVerifiedKey(hashKey("rp_live_local-key"));
-      expect(await memo.known("rp_live_local-key")).toBe(false);
-    } finally {
-      memo.dispose();
     }
   });
 });

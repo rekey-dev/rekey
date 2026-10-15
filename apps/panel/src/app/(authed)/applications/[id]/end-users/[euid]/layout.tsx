@@ -51,11 +51,11 @@ export default async function EndUserLayout({
     getApplication(id),
     hasOpenSupportCase(id, euid),
   ]);
-  const scopes = application.access?.scopes ?? null;
+  const scopes = application.access.scopes;
   const canBilling = hasScope(scopes, 'billing:read');
   const canWrite = hasScope(scopes, 'end-users:write');
   const isErased = detail.endUser.erasedAt !== null;
-  const bannedAt = detail.endUser.bannedAt ?? null;
+  const bannedAt = detail.endUser.bannedAt;
   const isBanned = bannedAt !== null && !isErased;
   const base = `/applications/${id}/end-users/${euid}`;
 

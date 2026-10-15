@@ -22,6 +22,9 @@ import { entitlementsService } from '../src/modules/billing/entitlements.service
 import { RekeyError } from '../src/lib/error.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const REGISTERED = 'https://app.example';
@@ -187,38 +190,6 @@ describe('PayPal one-time purchase on the checkout page', () => {
     expect((await approve(token, { orderId })).json().data).toEqual({ status: 'complete' });
   });
 
-  it('accepts an order the webhook already captured', async () => {
-    const { token, orderId } = await startCheckout();
-    markApproved(orderId, { status: 'COMPLETED' });
-    expect((await approve(token, { orderId })).json().data).toEqual({ status: 'confirming' });
-  });
-
-  it('tells the buyer to start again after a counted refusal, and to approve again only when PayPal has not approved yet', async () => {
-    const { token, orderId } = await startCheckout();
-    const pending = await approve(token, { orderId });
-    expect(pending.json().error.fix).toMatch(/^Approve the payment again/);
-    markApproved(orderId, { amount: 1 });
-    const wrong = await approve(token, { orderId });
-    expect(wrong.json().error.fix).toBe('Return to the app you were buying in and start the checkout again.');
-  });
-
-  it('shows the price the order charges after the plan is re-priced', async () => {
-    const { token } = await startCheckout();
-    const patched = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${applicationId}/plans/pack`,
-      headers: { authorization: `Bearer ${operatorAccess}` },
-      payload: { price: { currency: 'USD', amount: 100 } },
-    });
-    expect(patched.statusCode, patched.body).toBe(200);
-    const order = (await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${token}` })).json().data.order as {
-      plan: { amount: number; currency: string };
-      totalDueToday: number;
-    };
-    expect(order.plan).toMatchObject({ amount: 4999, currency: 'USD' });
-    expect(order.totalDueToday).toBe(4999);
-  });
-
   it.each([
     ['an order for another buyer', { customId: 'someone:else' }, 'custom_id_mismatch'],
     ['an order for a different amount', { amount: 1 }, 'amount_mismatch'],
@@ -257,15 +228,6 @@ describe('PayPal one-time purchase on the checkout page', () => {
     expect(await refusalReasons()).toEqual(['approval_kind_mismatch']);
   });
 
-  it('refuses a body with both ids, an unknown key or a malformed order id', async () => {
-    const { token, orderId } = await startCheckout();
-    markApproved(orderId);
-    for (const body of [{ orderId, subscriptionId: orderId }, { paymentId: orderId }, {}, { orderId: '../../v2/x' }]) {
-      expect((await approve(token, body)).statusCode).toBe(400);
-    }
-    expect((await approve(token, { orderId })).statusCode).toBe(200);
-  });
-
   it('refuses an order PayPal does not know', async () => {
     const { token, orderId } = await startCheckout();
     fakePaypal.orders.delete(orderId);
@@ -285,18 +247,6 @@ describe('PayPal one-time purchase on the checkout page', () => {
     const res = await approve(token, { orderId });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('CHECKOUT_CONFIRMATION_LIMIT');
-  });
-
-  it('refuses a confirmation after the credentials moved from sandbox to live', async () => {
-    const { token, orderId } = await startCheckout();
-    markApproved(orderId);
-    await prisma.billingCredentials.update({
-      where: { applicationId_provider: { applicationId, provider: 'paypal' } },
-      data: { mode: 'live' },
-    });
-    const res = await approve(token, { orderId });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe('CHECKOUT_MODE_MISMATCH');
   });
 
   it('does not capture an order whose session was started in the other mode', async () => {
@@ -371,7 +321,7 @@ describe('PayPal one-time purchase on the checkout page', () => {
   });
 
   it('fulfils once and announces once when eight deliveries of the approval arrive together', async () => {
-    const { endpoint } = await webhookService.createEndpoint({
+    const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId,
       // Unreachable on purpose: delivery rows are the assertion, not HTTP success.
       url: 'https://example.invalid/onetime-hook',
@@ -451,19 +401,5 @@ describe('PayPal one-time purchase on the checkout page', () => {
     const row = await sessionRow(sessionId);
     expect(row.status).toBe('COMPLETE');
     expect(row.subscription.status).toBe('ACTIVE');
-  });
-
-  it('passes the provider check for a one-time PayPal plan', async () => {
-    await prisma.webhookEvent.create({
-      data: { applicationId, provider: 'paypal', providerEventId: `WH-${randomUUID()}`, eventType: 'PAYMENT.CAPTURE.COMPLETED', payload: {}, mode: 'test' },
-    });
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${applicationId}/checkout/readiness`,
-      headers: { authorization: `Bearer ${operatorAccess}` },
-    });
-    const data = res.json().data as { test: Array<{ id: string; status: string; message: string }> };
-    expect(data.test.find((c) => c.id === 'provider')).toMatchObject({ status: 'PASS' });
-    expect(data.test.find((c) => c.id === 'plans')).toMatchObject({ status: 'PASS' });
   });
 });

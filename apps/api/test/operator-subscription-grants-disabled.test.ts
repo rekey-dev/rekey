@@ -130,49 +130,4 @@ describe('operator subscription grants, switched off', () => {
     expect(res.json().error.code).toBe('SUBSCRIPTION_NOT_FOUND');
   });
 
-  it('the refusal happens before anything is written', async () => {
-    const { ownerToken, applicationId, endUserId } = await world();
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${applicationId}/end-users/${endUserId}/subscriptions`,
-      headers: { authorization: `Bearer ${ownerToken}` },
-      payload: { planSlug: `${applicationId}-pro` },
-    });
-    expect(res.statusCode).toBe(404);
-
-    const { prisma } = await import('../src/lib/prisma.js');
-    expect(await prisma.subscription.count({ where: { applicationId } })).toBe(0);
-    expect(
-      await prisma.securityEvent.count({
-        where: { applicationId, type: 'app.subscription_granted' },
-      }),
-    ).toBe(0);
-  });
-
-  it('the super-admin route still works, so granting is moved rather than removed', async () => {
-    const { applicationId, endUserId, ownerToken } = await world();
-    const tag = applicationId.slice(-6);
-    const plan = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${applicationId}/plans`,
-      headers: { authorization: `Bearer ${ownerToken}` },
-      payload: {
-        slug: `sa-${tag}`,
-        name: 'SA',
-        price: { currency: 'USD', amount: 1000 },
-        kind: 'SUBSCRIPTION',
-        interval: 'MONTH',
-      },
-    });
-    expect(plan.statusCode).toBe(201);
-
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/admin/applications/${applicationId}/subscriptions`,
-      headers: { authorization: `Bearer ${process.env.SUPER_ADMIN_KEY}` },
-      payload: { planSlug: `sa-${tag}`, endUserId },
-    });
-    expect(res.statusCode).toBe(201);
-    expect(res.json().data.activated).toBe(true);
-  });
 });

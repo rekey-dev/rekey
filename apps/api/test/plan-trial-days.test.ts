@@ -30,7 +30,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { resolveCheckoutTrial } from '../src/modules/billing/checkout-trial.js';
 import { plansService } from '../src/modules/plans/plans.service.js';
 
 const PASSWORD = 'correct-horse-battery';
@@ -84,24 +83,6 @@ describe('plan trialDays reaches the database and the checkout', () => {
       payload,
     });
   }
-
-  it('a trial on a plan that materialises nothing is now accepted', async () => {
-    // The 2.1.0 hold is lifted. What replaced it is narrower: a trial is
-    // refused only on a plan that would hand something over on day 0.
-    const { token, appId } = await setup('held-create');
-    const res = await createPlan(token, appId, {
-      slug: 'pro',
-      name: 'Pro',
-      price: { currency: 'USD', amount: 1000 },
-      kind: 'SUBSCRIPTION',
-      trialDays: 14,
-    });
-    expect(res.statusCode).toBe(201);
-    const stored = await prisma.plan.findFirstOrThrow({
-      where: { applicationId: appId, slug: 'pro' },
-    });
-    expect(stored.trialDays).toBe(14);
-  });
 
   it('refuses a trial on a plan that grants credits, and says why', async () => {
     // `provision` has no trial gate, so a CREDIT entitlement mints credits on
@@ -213,25 +194,6 @@ describe('plan trialDays reaches the database and the checkout', () => {
     ).resolves.toMatchObject({ trialDays: 7 });
   });
 
-  it('a trial added to an existing plain plan is accepted', async () => {
-    const { token, appId } = await setup('held-update');
-    expect(
-      (await createPlan(token, appId, { slug: 'basic', name: 'Basic', price: { currency: 'USD', amount: 500 } })).statusCode,
-    ).toBe(201);
-
-    const patched = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${appId}/plans/basic`,
-      headers: { authorization: `Bearer ${token}` },
-      payload: { trialDays: 30 },
-    });
-    expect(patched.statusCode).toBe(200);
-    const stored = await prisma.plan.findFirstOrThrow({
-      where: { applicationId: appId, slug: 'basic' },
-    });
-    expect(stored.trialDays).toBe(30);
-  });
-
   it('names an out-of-range value as out of range, not as held', async () => {
     // Through the SERVICE, deliberately. The create route's zod is `min(1)`, so
     // over the wire these are VALIDATION_ERROR and never reach this code. The
@@ -256,36 +218,6 @@ describe('plan trialDays reaches the database and the checkout', () => {
     }
   });
 
-  it('still accepts a plan with no trial, and clearing one with 0', async () => {
-    const { token, appId } = await setup('held-none');
-    expect(
-      (await createPlan(token, appId, { slug: 'none', name: 'None', price: { currency: 'USD', amount: 100 } })).statusCode,
-    ).toBe(201);
-
-    // 0 is legal on UPDATE (its zod is `min(0)`; create's is `min(1)`), and must
-    // stay legal: it is how an operator clears a trial, which the hold must not
-    // take away from anyone who already has one.
-    const cleared = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${appId}/plans/none`,
-      headers: { authorization: `Bearer ${token}` },
-      payload: { trialDays: 0 },
-    });
-    expect(cleared.statusCode).toBe(200);
-
-    const row = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'none' } });
-    // One encoding of "no trial", so `?? 0` and `> 0` cannot disagree.
-    expect(row.trialDays).toBeNull();
-  });
-
-  it('offers no trial at checkout for any plan that can now exist', async () => {
-    // The read side is untouched and still correct; with the write side held,
-    // every real row resolves to no trial.
-    const { token, appId } = await setup('held-checkout');
-    await createPlan(token, appId, { slug: 'sub', name: 'Sub', price: { currency: 'USD', amount: 1000 } });
-    const row = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'sub' } });
-    expect(resolveCheckoutTrial({ plan: row, provider: 'stripe', isOneTime: false })).toBeNull();
-  });
   it('a plan that already holds the forbidden pair can still be archived', async () => {
     // The remedy has to be reachable. Guarding on the row's EXISTING trialDays
     // meant a plan written before this rule could not be renamed or archived

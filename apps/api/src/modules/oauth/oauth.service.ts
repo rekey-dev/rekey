@@ -15,6 +15,7 @@
 
 import type { Application } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { credentialSuperseded } from '../../lib/session-refusals.js';
 import { RekeyError } from '../../lib/error.js';
 import { AuthConfigSchema, createdViaOAuth } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
@@ -30,7 +31,13 @@ import {
   type SignInOutcome,
 } from '../auth/auth.service.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
-import { sendWelcomeEmail, userSnapshot, welcomeTiming } from '../auth/user-lifecycle.js';
+import {
+  claimUnverifiedAccount,
+  sendAccountClaimedEmail,
+  sendWelcomeEmail,
+  userSnapshot,
+  welcomeTiming,
+} from '../auth/user-lifecycle.js';
 
 export interface OAuthPublicConfigEntry {
   clientId: string;
@@ -211,6 +218,15 @@ export const oauthService = {
           fix: 'Sign in to the Application this account belongs to, or use a different provider account.',
         });
       }
+      // Read again after the account row: a claim removes every other linked
+      // identity and moves the stamp together, so either this identity is
+      // already gone here, or the session is refused when it is written
+      // because the stamp is no longer the one read with it.
+      const stillLinked = await prisma.oAuthIdentity.findUnique({
+        where: { id: existing.id },
+        select: { id: true },
+      });
+      if (!stillLinked) throw credentialSuperseded();
       return issueSessionOrMfaChallenge(args.application, existing.endUser, { via: 'oauth' }, args.device);
     }
 
@@ -235,16 +251,60 @@ export const oauthService = {
         // Refuse before the link is written, so a banned account does not
         // gain a provider identity it will keep after the ban is lifted.
         assertEndUserNotBanned(matchedByEmail);
-        await prisma.oAuthIdentity.create({
-          data: {
-            applicationId: args.application.id,
-            endUserId: matchedByEmail.id,
-            provider: args.providerName,
-            providerAccountId: identity.providerAccountId,
-            email: identity.email,
-          },
+        const email = identity.email;
+        // The provider vouches for the mailbox, which is the same proof a
+        // sign-in link collects. On an account nobody had confirmed, the link
+        // and the claim commit together: the password and every other way in
+        // set by whoever registered the address first are removed, and only
+        // the identity that did the proving stays.
+        const linked = await prisma.$transaction(async (tx) => {
+          const link = await tx.oAuthIdentity.create({
+            data: {
+              applicationId: args.application.id,
+              endUserId: matchedByEmail.id,
+              provider: args.providerName,
+              providerAccountId: identity.providerAccountId,
+              email,
+            },
+          });
+          const claim = await claimUnverifiedAccount(tx, matchedByEmail, {
+            via: 'oauth',
+            keepIdentityId: link.id,
+            ip: args.device?.ip ?? null,
+            userAgent: args.device?.userAgent ?? null,
+          });
+          // A second factor holds the claim back, and the link with it. Left
+          // in place, the next sign-in through this provider account would
+          // find the identity, carry no mailbox proof, and never be asked for
+          // one again. The challenge carries the identity and links it when
+          // the code is given.
+          if (claim.kind === 'held_for_mfa') await tx.oAuthIdentity.delete({ where: { id: link.id } });
+          return claim;
         });
-        return issueSessionOrMfaChallenge(args.application, matchedByEmail, { via: 'oauth' }, args.device);
+        if (linked.kind !== 'claimed') {
+          return issueSessionOrMfaChallenge(
+            args.application,
+            matchedByEmail.emailVerified
+              ? matchedByEmail
+              : await prisma.endUser.findUniqueOrThrow({ where: { id: matchedByEmail.id } }),
+            {
+              via: 'oauth',
+              ...(linked.kind === 'held_for_mfa' && {
+                mailboxProven: true,
+                pendingIdentity: {
+                  provider: args.providerName,
+                  providerAccountId: identity.providerAccountId,
+                  email,
+                },
+              }),
+            },
+            args.device,
+          );
+        }
+        kickDeliveries(linked.deliveryIds);
+        if (linked.welcome) sendWelcomeEmail(args.application, linked.user.email);
+        if (linked.signInMethodsRemoved) sendAccountClaimedEmail(args.application, linked.user.email);
+        return issueSessionOrMfaChallenge(args.application, linked.user, { via: 'oauth' }, args.device);
       }
     }
 
@@ -358,7 +418,8 @@ export const oauthService = {
       void deliverVerificationEmail({
         application: args.application,
         endUser: created,
-      });
+        allowance: 'reserve',
+      }).catch(() => undefined);
     }
     return issueSessionOrMfaChallenge(
       args.application,

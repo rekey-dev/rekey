@@ -34,7 +34,7 @@ import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import { hashOperatorToken, isOperatorToken } from '../../lib/operator-token.js';
 import { shouldWriteLastUsed } from '../../lib/last-used-throttle.js';
-import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { unanchoredTokenEnded } from '../../lib/session-stamp.js';
 import {
   verifyOperatorMcpAccessToken,
   type OperatorMcpAccessClaims,
@@ -161,7 +161,7 @@ async function resolveByOAuthJwt(request: FastifyRequest, token: string): Promis
   // than at its one-hour expiry. Same stamp and granularity as the panel
   // session middleware (lib/session-stamp.ts). Checked before the workspace
   // switch, so an ended token gets the generic 401 and learns nothing.
-  if (sessionIssuedBefore(claims, user.sessionsInvalidBefore)) throw unauthorized();
+  if (unanchoredTokenEnded(claims, user.sessionsInvalidBefore)) throw unauthorized();
   if (!membership.tenant.operatorMcpEnabled) throw operatorMcpDisabled();
 
   const { passwordHash, ...publicUser } = user;

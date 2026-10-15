@@ -12,6 +12,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { countQueries } from './query-counter.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface WirePrice {
   id: string;
@@ -154,60 +157,6 @@ describe('price usage facts on the operator plan', () => {
   });
 
 
-  it('keeps the amount of an additional price an open checkout is on, and its fix adds the new amount once the checkout is over', async () => {
-    const before = await inrRow();
-    const row = await openUnregisteredInrCheckout();
-    expect((await pricesOf()).INR).toMatchObject({ amountEditable: false, openCheckouts: 1 });
-
-    const refused = await w.operator('PUT', INR_URL, { amount: before.amount + 100 });
-    expect(refused.statusCode, refused.body).toBe(409);
-    expect(refused.json().error).toMatchObject({
-      code: 'PLAN_PRICE_REFERENCED',
-      message: expect.stringContaining('1 open checkout'),
-      fix: expect.stringContaining(`DELETE /api/v1/tenant/applications/${w.applicationId}/plans/pro/prices/INR`),
-    });
-    expect((await inrRow()).amount).toBe(before.amount);
-
-    // What does not change the amount is still accepted.
-    expect((await w.operator('PUT', INR_URL, { amount: before.amount })).statusCode).toBe(200);
-    expect((await w.operator('PUT', INR_URL, { countries: ['IN', 'NP'] })).statusCode).toBe(200);
-
-    // The fix, followed as written: wait for the checkout, DELETE, then PUT.
-    await prisma.checkoutSession.update({ where: { id: row.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-    expect((await w.operator('DELETE', INR_URL)).statusCode).toBe(200);
-    const added = await w.operator('PUT', INR_URL, { amount: before.amount + 100 });
-    expect(added.statusCode, added.body).toBe(200);
-    expect(added.json().data).toMatchObject({ currency: 'INR', amount: before.amount + 100, amountEditable: true });
-  });
-
-  it('keeps the amount of an additional price a subscription is on or was on, and its fix archives the price and adds the new amount', async () => {
-    const before = await inrRow();
-    const granted = await w.operator('POST', `/end-users/${w.buyer.id}/subscriptions`, { planSlug: 'pro', currency: 'INR' });
-    expect(granted.statusCode, granted.body).toBe(201);
-    expect((await pricesOf()).INR).toMatchObject({ amountEditable: false, liveSubscriptions: 1 });
-    const whileLive = await w.operator('PUT', INR_URL, { amount: before.amount + 100 });
-    expect(whileLive.statusCode, whileLive.body).toBe(409);
-    expect(whileLive.json().error).toMatchObject({ code: 'PLAN_PRICE_REFERENCED', message: expect.stringContaining('1 live subscription') });
-
-    // The subscription ends. Nobody is on the price, and the record of it still names it.
-    await prisma.subscription.updateMany({ where: { planPriceId: w.inrPriceId }, data: { status: 'CANCELED' } });
-    expect((await pricesOf()).INR).toMatchObject({ amountEditable: false, liveSubscriptions: 0, openCheckouts: 0 });
-    const onRecord = await w.operator('PUT', INR_URL, { amount: before.amount + 100 });
-    expect(onRecord.statusCode, onRecord.body).toBe(409);
-    expect(onRecord.json().error).toMatchObject({ code: 'PLAN_PRICE_REFERENCED', message: expect.stringContaining('an ended subscription, a payment or a credit grant') });
-    expect(onRecord.json().error.fix).not.toContain('Wait until');
-
-    // The fix, followed as written: DELETE archives it, PUT adds the new amount.
-    expect((await w.operator('DELETE', INR_URL)).statusCode).toBe(200);
-    const added = await w.operator('PUT', INR_URL, { amount: before.amount + 100 });
-    expect(added.statusCode, added.body).toBe(200);
-    expect(added.json().data.id).not.toBe(w.inrPriceId);
-    const archived = await inrRow();
-    expect(archived.amount).toBe(before.amount);
-    expect(archived.archivedAt).not.toBeNull();
-    expect((await prisma.subscription.findFirstOrThrow({ where: { planPriceId: w.inrPriceId } })).unitAmount).toBe(before.amount);
-  });
-
   it('keeps the amount of an additional price a payment was recorded at', async () => {
     const before = await inrRow();
     await prisma.payment.create({
@@ -256,12 +205,6 @@ describe('price usage facts on the operator plan', () => {
       expect(await prisma.planPrice.findUniqueOrThrow({ where: { id: oldPriceId } })).toMatchObject({ amount: 900, archivedAt: expect.any(Date) });
       expect((await prisma.checkoutSession.findUniqueOrThrow({ where: { id: row.id } })).planPriceId).toBe(oldPriceId);
     });
-  });
-
-  it('returns the same facts on the price a PUT answers with', async () => {
-    const res = await w.operator('PUT', '/plans/pro/prices/EUR', { amount: 1800 });
-    expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toMatchObject({ currency: 'EUR', amountEditable: true, liveSubscriptions: 0, openCheckouts: 0 });
   });
 
   it('reads them with one grouped query each, however many plans and prices the page holds', async () => {

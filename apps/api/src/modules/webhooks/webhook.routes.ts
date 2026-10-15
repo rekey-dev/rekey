@@ -35,10 +35,10 @@ import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { webhookService } from './webhook.service.js';
 import { KNOWN_WEBHOOK_EVENTS } from './events.js';
-import { isWebhookUrlSafe } from '../../lib/webhook-signing.js';
-import { env } from '../../config/env.js';
+import { plainHttpRefused } from '../../lib/ssrf-guard.js';
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 /**
  * Ceiling on the stored `responseBody` this route returns per delivery.
@@ -158,7 +158,24 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           'any grant on it. A MEMBER with no grant on this Application gets 404.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
-          200: okPage(WebhookEndpointSchema, 'A page of webhook endpoints for this Application.'),
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                items: { type: 'array', items: WebhookEndpointSchema, description: 'The rows of this page.' },
+                page: ref('PageMeta'),
+                httpsRequired: {
+                  type: 'boolean',
+                  description:
+                    'Whether this deployment refuses a plain `http://` endpoint URL (`URL_NOT_HTTPS`) and ' +
+                    'sends nothing to an endpoint already stored as one. True in production unless ' +
+                    '`WEBHOOK_ALLOW_PRIVATE_TARGETS=true`.',
+                },
+              },
+              required: ['items', 'page', 'httpsRequired'],
+            },
+            'A page of webhook endpoints for this Application, and the URL rule of this deployment.',
+          ),
           ...errs({
             400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...APP_READ_ERRORS,
@@ -178,18 +195,21 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       ]);
       return {
         success: true,
-        data: paged(
-          endpoints.map((e) => ({
-            id: e.id,
-            url: e.url,
-            events: e.events,
-            enabled: e.enabled,
-            createdAt: e.createdAt.toISOString(),
-          })),
-          total,
-          take,
-          skip,
-        ),
+        data: {
+          ...paged(
+            endpoints.map((e) => ({
+              id: e.id,
+              url: e.url,
+              events: e.events,
+              enabled: e.enabled,
+              createdAt: e.createdAt.toISOString(),
+            })),
+            total,
+            take,
+            skip,
+          ),
+          httpsRequired: plainHttpRefused(),
+        },
       };
     },
   );
@@ -240,6 +260,8 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
               'VALIDATION_ERROR: `url` or `events` failed schema validation; or ' +
               'WEBHOOK_URL_UNSAFE: the URL resolves to a private/loopback/link-local address ' +
               '(unless `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` on a self-hosted deploy); or ' +
+              'URL_NOT_HTTPS: the URL is plain http and the deployment runs in production ' +
+              'without `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`; or ' +
               'WEBHOOK_ENDPOINT_LIMIT_REACHED: the Application already has 100 webhook endpoints.',
             ...APP_WRITE_ERRORS,
           }),
@@ -250,21 +272,11 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = CreateBody.parse(req.body);
-      const safety = isWebhookUrlSafe(body.url, {
-        allowPrivate: env.WEBHOOK_ALLOW_PRIVATE_TARGETS ?? false,
-      });
-      if (!safety.ok) {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'WEBHOOK_URL_UNSAFE',
-          message: `Webhook URL is not allowed: ${safety.reason}`,
-          fix: 'Use a public HTTPS URL. To enable private targets on a self-hosted deploy, set WEBHOOK_ALLOW_PRIVATE_TARGETS=true.',
-        });
-      }
       const result = await webhookService.createEndpoint({
         applicationId: id,
         url: body.url,
         events: body.events,
+        createdByTenantUserId: req.tenantUser!.id,
       });
       return reply.status(201).send({
         success: true,
@@ -311,7 +323,9 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             400:
               'VALIDATION_ERROR: `url` or `events` failed schema validation; or ' +
-              'WEBHOOK_URL_UNSAFE: the new URL resolves to a private/loopback/link-local address.',
+              'WEBHOOK_URL_UNSAFE: the new URL resolves to a private/loopback/link-local address; or ' +
+              'URL_NOT_HTTPS: the new URL is plain http and the deployment runs in production ' +
+              'without `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`.',
             ...APP_WRITE_ERRORS,
             404: `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}`,
           }),
@@ -323,22 +337,10 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       await ensureAppAccess(req, id, 'write');
       await ensureEndpointInApp(id, endpointId);
       const body = UpdateBody.parse(req.body);
-      if (body.url !== undefined) {
-        const safety = isWebhookUrlSafe(body.url, {
-          allowPrivate: env.WEBHOOK_ALLOW_PRIVATE_TARGETS ?? false,
-        });
-        if (!safety.ok) {
-          throw new RekeyError({
-            statusCode: 400,
-            code: 'WEBHOOK_URL_UNSAFE',
-            message: `Webhook URL is not allowed: ${safety.reason}`,
-            fix: 'Use a public HTTPS URL. To enable private targets on a self-hosted deploy, set WEBHOOK_ALLOW_PRIVATE_TARGETS=true.',
-          });
-        }
-      }
       const updated = await webhookService.updateEndpoint({
         applicationId: id,
         endpointId,
+        actorTenantUserId: req.tenantUser!.id,
         ...(body.url !== undefined && { url: body.url }),
         ...(body.events !== undefined && { events: body.events }),
         ...(body.enabled !== undefined && { enabled: body.enabled }),
@@ -421,6 +423,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'rotate a webhook signing secret');
       const { id, endpointId } = EndpointParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       await ensureEndpointInApp(id, endpointId);

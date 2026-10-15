@@ -14,6 +14,9 @@ import { entitlementsService } from '../src/modules/billing/entitlements.service
 import { creditsService } from '../src/modules/credits/credits.service.js';
 import { billingService } from '../src/modules/billing/billing.service.js';
 import { accountTools } from '../src/modules/mcp/account-tools.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Org-beneficiary billing', () => {
   let app: FastifyInstance;

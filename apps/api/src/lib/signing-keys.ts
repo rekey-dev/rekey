@@ -111,9 +111,6 @@ export function __resetForTests(): void {
   envKey = undefined;
 }
 
-/** @deprecated Use `__resetForTests`, kept so existing call sites compile. */
-export const _clearSigningKeyCacheForTests = __resetForTests;
-
 function resolveEnvKey(): ActiveSigningKey | null {
   if (envKey !== undefined) return envKey;
   envKey = env.JWT_RS256_PRIVATE_KEY

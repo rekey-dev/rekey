@@ -19,6 +19,7 @@ import { generateSecretKey, hashKey } from '../../lib/keys.js';
 import { forgetVerifiedKey } from '../../lib/rate-limit.js';
 import type { ApiKey, Application } from '@prisma/client';
 import { API_KEY_SCOPES, isApiKeyScope } from '@rekey.dev/shared-types';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 /**
  * Public-safe shape of an API key, `keyHash` stripped. The hash isn't
@@ -26,10 +27,10 @@ import { API_KEY_SCOPES, isApiKeyScope } from '@rekey.dev/shared-types';
  * key), but exposing it serves no caller and breaks the principle that
  * the hash never leaves the DB.
  */
-export type PublicApiKey = Omit<ApiKey, 'keyHash'>;
+export type PublicApiKey = Omit<ApiKey, 'keyHash' | 'createdByTenantUserId'>;
 
 function redact(key: ApiKey): PublicApiKey {
-  const { keyHash, ...rest } = key;
+  const { keyHash, createdByTenantUserId, ...rest } = key;
   return rest;
 }
 
@@ -43,6 +44,13 @@ export interface CreateApiKeyInput {
    * be allowed to (lib/ip-mask.ts `mayReadRawIps`). Otherwise they are masked.
    */
   revealsEndUserIps: boolean;
+  /**
+   * The operator minting the key, or null when no operator is (a seed, the
+   * super-admin). Required, so every way of minting a key has to say. An
+   * operator who has not confirmed their address is refused (the key would
+   * outlive their session), and the key remembers who minted it.
+   */
+  createdByTenantUserId: string | null;
 }
 
 export interface CreateApiKeyResult {
@@ -90,6 +98,9 @@ export const apiKeysService = {
 
   async create(input: CreateApiKeyInput): Promise<CreateApiKeyResult> {
     assertKnownScopes(input.scopes);
+    if (input.createdByTenantUserId !== null) {
+      await assertOperatorVerifiedForCredential(input.createdByTenantUserId, 'mint an API key');
+    }
     // A non-future expiry would mint a key that `verify()` immediately rejects
     // as expired, a dead-on-arrival credential the operator was told was
     // "created". Fail fast with a clear error instead.
@@ -143,6 +154,7 @@ export const apiKeysService = {
         scopes: input.scopes.length > 0 ? input.scopes : DEFAULT_SCOPES,
         revealsEndUserIps: input.revealsEndUserIps,
         ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+        createdByTenantUserId: input.createdByTenantUserId,
       },
     });
 

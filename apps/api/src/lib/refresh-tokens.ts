@@ -21,6 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma, RefreshToken } from '@prisma/client';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
+import { assertBasisHolds, lockEndUserCredentials, type SessionBasis } from './session-basis.js';
 
 const REFRESH_TOKEN_BYTES = 32;
 const REFRESH_TOKEN_LIFETIME_MS = env.END_USER_REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -85,13 +86,23 @@ export interface IssueRefreshTokenOptions {
  * The optional UA/IP are captured so `/me/sessions` can render a device
  * list. They're hints, not security primitives, cookie cloning across
  * devices won't change the stored values, so don't use them for binding.
+ *
+ * `basis` is what the session is issued on the strength of. The row is
+ * written holding the user's row, and only while that row is still the one
+ * the credential was checked against (lib/session-basis.ts). Pass `client`
+ * to write inside a transaction the caller already has open.
  */
 export async function issueRefreshToken(
   applicationId: string,
   endUserId: string,
-  options: IssueRefreshTokenOptions = {},
-  client: Prisma.TransactionClient = prisma,
+  options: IssueRefreshTokenOptions,
+  basis: SessionBasis,
+  client?: Prisma.TransactionClient,
 ): Promise<IssuedRefreshToken> {
+  if (!client) {
+    return prisma.$transaction((tx) => issueRefreshToken(applicationId, endUserId, options, basis, tx));
+  }
+  assertBasisHolds(basis, await lockEndUserCredentials(client, endUserId));
   const raw = generateRawToken();
   // Truncate UA at 512 chars, some clients send egregious strings (especially
   // mobile WebViews). 512 is generous for any real-world UA.
@@ -103,6 +114,9 @@ export async function issueRefreshToken(
       endUserId,
       tokenHash: hashRefreshToken(raw),
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS),
+      // This process's clock, the one `sessionsInvalidBefore` is written with:
+      // a replay is judged by which side of that stamp the row was created on.
+      createdAt: new Date(),
       userAgent: ua,
       ip,
       kind: options.kind ?? 'session',
@@ -143,6 +157,19 @@ export async function lookupRefreshToken(raw: string): Promise<RefreshOutcome> {
 }
 
 /**
+ * True when a refresh row belongs to a generation of sessions that was ended
+ * as a whole: it was created at or before the account's
+ * `sessionsInvalidBefore`. Replaying such a token says nothing about the
+ * sessions the account has now, so it must not be answered as theft of one.
+ *
+ * @example
+ *   if (fromEndedGeneration(presented, user.sessionsInvalidBefore)) throw refreshTokenRevoked();
+ */
+export function fromEndedGeneration(row: { createdAt: Date }, stamp: Date | null | undefined): boolean {
+  return Boolean(stamp) && row.createdAt.getTime() <= stamp!.getTime();
+}
+
+/**
  * Atomically revoke the presented token and issue a replacement under the
  * same end-user. The new token is linked back via `replacedById`.
  *
@@ -159,6 +186,10 @@ export async function rotateRefreshToken(
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS);
 
   return prisma.$transaction(async (tx) => {
+    // The user's row first, so a revocation of every session either finished
+    // before this (and the revoke below finds nothing) or waits until the
+    // replacement exists and revokes it too.
+    await lockEndUserCredentials(tx, presented.endUserId);
     // Race-safe revoke. If someone else already rotated this token in a
     // concurrent request, our update count will be 0 and we bail.
     const revoked = await tx.refreshToken.updateMany({
@@ -175,6 +206,7 @@ export async function rotateRefreshToken(
         endUserId: presented.endUserId,
         tokenHash,
         expiresAt,
+        createdAt: new Date(),
         // Carry forward the originating device fingerprint so the
         // session list stays stable across rotations. A new device hitting
         // /refresh with a stolen token wouldn't update this anyway,
@@ -232,15 +264,21 @@ export async function revokeRefreshToken(raw: string): Promise<void> {
  * Revoke every active refresh token for an end-user. Use case: password
  * change, account compromise, "sign out everywhere".
  */
-export async function revokeAllForEndUser(endUserId: string): Promise<number> {
-  // Refresh tokens are revoked row by row; the access tokens they paired with
-  // are refused from this instant by the session middleware (see
-  // EndUser.sessionsInvalidBefore), so the caller's remaining access token
-  // does not ride out its lifetime.
-  await prisma.endUser.updateMany({ where: { id: endUserId }, data: { sessionsInvalidBefore: new Date() } });
-  const result = await prisma.refreshToken.updateMany({
+export async function revokeAllForEndUser(
+  endUserId: string,
+  client?: Prisma.TransactionClient,
+): Promise<number> {
+  if (!client) return prisma.$transaction((tx) => revokeAllForEndUser(endUserId, tx));
+  // Holding the user's row: a sign-in or refresh in flight either wrote its
+  // row before this and loses it here, or looks at the row afterwards and
+  // finds the stamp moved. The access tokens the revoked rows paired with are
+  // refused from this instant by the session middleware.
+  await lockEndUserCredentials(client, endUserId);
+  const now = new Date();
+  await client.endUser.updateMany({ where: { id: endUserId }, data: { sessionsInvalidBefore: now } });
+  const result = await client.refreshToken.updateMany({
     where: { endUserId, revokedAt: null },
-    data: { revokedAt: new Date() },
+    data: { revokedAt: now },
   });
   return result.count;
 }

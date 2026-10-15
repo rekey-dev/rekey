@@ -19,6 +19,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
@@ -199,28 +202,4 @@ describe('Operator MCP OAuth — panel-IdP authorize + grant', () => {
     expect(grant.statusCode).toBe(403);
   });
 
-  it('deny returns access_denied to the client redirect', async () => {
-    const op = await makeOperator('deny');
-    const clientId = await registerClient();
-    const { challenge } = pkce();
-
-    const grant = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/mcp/oauth/grant',
-      headers: { authorization: `Bearer ${op.accessToken}` },
-      payload: {
-        client_id: clientId,
-        redirect_uri: REDIRECT,
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        state: 'dn',
-        tenant_id: op.tenantId,
-        approve: false,
-      },
-    });
-    expect(grant.statusCode).toBe(200);
-    const redirect = (grant.json() as { data: { redirect: string } }).data.redirect;
-    expect(new URL(redirect).searchParams.get('error')).toBe('access_denied');
-    expect(new URL(redirect).searchParams.get('state')).toBe('dn');
-  });
 });

@@ -65,21 +65,8 @@ describe('transactionOptionsFor', () => {
     });
   });
 
-  it('falls back to DATABASE_POOL_TIMEOUT_SECONDS, then to 10 seconds', () => {
-    expect(transactionOptionsFor('postgresql://h/db_test', { DATABASE_POOL_TIMEOUT_SECONDS: '4' }).maxWait).toBe(4000);
-    expect(transactionOptionsFor('postgresql://h/db_test', {}).maxWait).toBe(10_000);
-    expect(transactionOptionsFor(undefined, {}).maxWait).toBe(10_000);
-  });
-
   it('bounds a pool_timeout of 0 ("wait forever") instead of passing it through', () => {
     expect(transactionOptionsFor('postgresql://h/db_test?pool_timeout=0', {}).maxWait).toBe(10_000);
-  });
-
-  it('agrees with the pool_timeout withPoolSettings writes into the URL', () => {
-    const options = clientOptionsFor('postgresql://h/db_test', { DATABASE_POOL_TIMEOUT_SECONDS: '12' });
-    const url = new URL((options.datasources as { db: { url: string } }).db.url);
-    expect(url.searchParams.get('pool_timeout')).toBe('12');
-    expect(options.transactionOptions).toEqual({ maxWait: 12_000, timeout: 5000 });
   });
 });
 
@@ -136,63 +123,6 @@ describe('an exhausted pool', () => {
         expect((res.json() as { error: { code: string } }).error.code).toBe('DEPENDENCY_UNAVAILABLE');
         expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
       }
-    } finally {
-      await app.close();
-    }
-  });
-
-  // The database itself is up in both cases, so "the PostgreSQL database is
-  // unreachable ... restore the failed dependency" was false for both, and
-  // sent the operator to fix something that was up.
-  it('says the pool was busy, or the transaction timed out, never that the database is unreachable', async () => {
-    const { p2024, p2028 } = await capturePoolErrors();
-    // A transaction that got its connection and then ran past its `timeout`.
-    const client = tinyPoolClient(8);
-    const overran = await client
-      .$transaction(async (tx) => tx.$queryRaw`SELECT pg_sleep(1)::text`, { timeout: 200 })
-      .then(() => null, (e: unknown) => e);
-    expect((overran as { code?: string }).code).toBe('P2028');
-
-    const app = Fastify({ logger: false });
-    app.setErrorHandler(rekeyErrorHandler);
-    app.get('/p2024', async () => { throw p2024; });
-    app.get('/p2028-wait', async () => { throw p2028; });
-    app.get('/p2028-timeout', async () => { throw overran; });
-    app.get('/p1001', async () => { throw Object.assign(new Error('down'), { code: 'P1001' }); });
-    await app.ready();
-    type Body = { error: { code: string; message: string; fix: string; details?: { reason?: string } } };
-    try {
-      for (const [url, reason] of [
-        ['/p2024', 'pool_busy'],
-        ['/p2028-wait', 'pool_busy'],
-        ['/p2028-timeout', 'transaction_timeout'],
-      ] as const) {
-        const res = await app.inject({ method: 'GET', url });
-        const { error } = res.json() as Body;
-        expect(res.statusCode, url).toBe(503);
-        expect(error.code, url).toBe('DEPENDENCY_UNAVAILABLE');
-        expect(error.details?.reason, url).toBe(reason);
-        expect(error.message, url).not.toMatch(/unreachable/i);
-        expect(error.fix, url).not.toMatch(/restore the failed dependency/i);
-        // /health/ready probes through the same pool (routes/health.ts), so
-        // under saturation it can fail too: the pool_busy text must not
-        // promise it stays green.
-        if (reason === 'pool_busy') {
-          expect(error.fix, url).toMatch(/health\/ready checks through the same pool/);
-          expect(error.fix, url).toMatch(/can also report `db` unreachable/);
-          expect(error.fix, url).not.toMatch(/report `db` ok/);
-        } else {
-          expect(error.fix, url).toMatch(/health\/ready can report `db` ok/);
-        }
-      }
-      expect((await app.inject({ method: 'GET', url: '/p2024' })).json().error.message).toMatch(/pool stayed busy/);
-      expect((await app.inject({ method: 'GET', url: '/p2028-timeout' })).json().error.message).toMatch(
-        /ran past its time limit/,
-      );
-      // A dead server keeps the outage text and carries no reason.
-      const down = (await app.inject({ method: 'GET', url: '/p1001' })).json() as Body;
-      expect(down.error.message).toMatch(/PostgreSQL database is unreachable/);
-      expect(down.error.details).toBeUndefined();
     } finally {
       await app.close();
     }

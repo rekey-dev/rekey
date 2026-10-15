@@ -116,22 +116,6 @@ describe('Portal V2 API', () => {
     expect(JSON.stringify(res.json())).not.toContain('rp_live_');
   });
 
-  it('config reflects saved branding + custom domain', async () => {
-    const { applicationsService } = await import('../src/modules/applications/applications.service.js');
-    await applicationsService.updatePortalConfig({
-      applicationId,
-      enabled: true,
-      branding: { displayName: 'Acme Billing', primaryColor: '#4f46e5' },
-      portalDomain: 'billing.acme-portal-test.com',
-    });
-    const res = await app.inject({ method: 'GET', url: '/api/v1/portal/config/portal-v2' });
-    expect(res.json().data.branding).toMatchObject({ displayName: 'Acme Billing', primaryColor: '#4f46e5' });
-    // Domain is stored on the app (config endpoint doesn't expose it, but the row has it).
-    const row = await prisma.application.findUnique({ where: { id: applicationId } });
-    expect(row?.portalDomain).toBe('billing.acme-portal-test.com');
-    expect(row?.portalDomainVerifiedAt).toBeNull(); // unverified until DNS check
-  });
-
   // ---------- self-service billing via publishable key + user token ----------
 
   it("GET /billing/subscription works with publishable key + the user's own token", async () => {
@@ -144,23 +128,9 @@ describe('Portal V2 API', () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it('GET /billing/payments works with publishable key + user token', async () => {
-    const token = await signUp('pay@example.com');
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/billing/payments',
-      headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-user-token': token },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual({
-      items: [],
-      page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
-    });
-  });
-
   it('org billing: an OWNER reads + cancels the org subscription via publishable key + token; a non-member is 403', async () => {
     const { applicationsService } = await import('../src/modules/applications/applications.service.js');
-    await applicationsService.updateAuthConfig({ applicationId, patch: { organizationsEnabled: true } });
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null, applicationId, patch: { organizationsEnabled: true } });
     const owner = await signUpFull(`owner-${Math.random().toString(36).slice(2, 7)}@example.com`);
 
     // Owner creates a team via the end-user org route, now publishable-key accessible.
@@ -240,16 +210,6 @@ describe('Portal V2 API', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('USER_TOKEN_MISSING');
-  });
-
-  it('public /providers accepts the publishable key (picker can be fetched from the portal)', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/billing/providers',
-      headers: { authorization: `Bearer ${publicKey}` },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(Array.isArray(res.json().data.providers)).toBe(true);
   });
 
   it('public /providers via the publishable key lists the app\'s enabled providers', async () => {

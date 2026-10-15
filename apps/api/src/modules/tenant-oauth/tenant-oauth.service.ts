@@ -240,13 +240,13 @@ export const tenantOAuthService = {
         fix: 'Verify the email at the provider, then retry, or use password sign-in.',
       });
     }
-    const user = await tenantAuthService.findOrCreateOAuthOperator({
+    const { user, mailboxProven } = await tenantAuthService.findOrCreateOAuthOperator({
       email: identity.email,
       emailVerified: identity.emailVerified,
       ...(args.inviteKey !== undefined && { inviteKey: args.inviteKey }),
       ...(args.device !== undefined && { device: args.device }),
     });
-    return tenantAuthService.completeSignIn(user, args.device);
+    return tenantAuthService.completeSignIn(user, args.device, { mailboxProven });
   },
 
   /** Is this deployment configured to accept ID Token assertions? */
@@ -301,12 +301,13 @@ export const tenantOAuthService = {
     // out of here rather than waving the token through.
     if (!(await claimAssertionOnce(args.idToken, claims!.exp))) invalid();
 
-    const user = await tenantAuthService.findOrCreateOAuthOperator({
+    const { user, mailboxProven } = await tenantAuthService.findOrCreateOAuthOperator({
       email: claims!.email,
       // Guaranteed true by the verifier, an unverified email never returns.
       emailVerified: true,
+      claimNotice: 'silent',
       ...(args.device !== undefined && { device: args.device }),
     });
-    return tenantAuthService.completeSignIn(user, args.device);
+    return tenantAuthService.completeSignIn(user, args.device, { mailboxProven });
   },
 };

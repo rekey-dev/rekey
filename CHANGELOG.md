@@ -4,6 +4,407 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0
+
+**Upgrading from 2.1, or from any 2.2 release candidate: follow
+[docs/migrating-to-2.2.md](docs/migrating-to-2.2.md).** It is one guide from
+2.1.0 to 2.2.0, with what to check before, the order to upgrade in, and a
+before and after table for every changed call.
+
+The stable release of the 2.2 line. It is 2.2.0-rc.7 plus the fixes from a
+security review of the API (three to sign-up, sign-in and auth email, one to
+what an operator MCP token with write access may do, and two to how the API
+behaves toward Redis and toward webhook URLs), and it completes the billing
+money model: the columns the price rows replaced are dropped in this release.
+Each changes something your users, your forms, your agents or your database
+can see. Deploy the API, panel and portal together, and upgrade the
+`@rekey.dev/*` packages with them.
+
+**Before you upgrade:** take a database backup, run the preflight queries in
+`docs/upgrades/billing-money-model.preflight.sql`, and, if you create users
+from your server, read the first two items under Changed and decide which of
+those users your server has already verified.
+
+**Run one version of the API at a time, with clocks in sync.** Ending every
+session of an account writes a timestamp from the API instance that did it,
+and tokens that name no session (MCP access tokens, MFA challenges,
+authorization codes) are compared to it by their own issue time, taken on the
+instance that minted them. Instances whose clocks differ by more than a few
+milliseconds can let such a token minted just before the revocation outlive
+it, until it expires (an hour at most for an MCP access token; its refresh
+token is revoked regardless of clocks). Keep NTP running on every instance.
+
+### Breaking changes
+
+These are on top of the breaking changes of the release candidates, which the
+guide lists in one place.
+
+- **There is no rollback after the migrations run.** `plans.amount`,
+  `plans.currency`, `plans.price_per_unit_cents`, `coupons.amount_off`,
+  `coupons.currency` and the `currency` key of `billingConfig` are dropped,
+  and no earlier version, 2.2.0-rc.7 included, serves plans or coupons
+  without them. To go back, restore a backup taken before the upgrade and
+  start the previous images against it.
+- **Replace every API instance together.** An instance of an earlier version
+  still serving after the migrations answers 500 on every request that reads
+  a plan, a coupon or an operator. It never writes a wrong value. The table
+  of what fails after which migration is in
+  [DEPLOY.md](DEPLOY.md#replace-every-api-instance-together).
+- **The upgrade stops on a row it cannot migrate, and guesses nothing.**
+  A plan or a fixed coupon whose currency is not a three-letter code, a
+  subscription on such a plan, a plan with a negative amount, a percentage
+  coupon with a rate outside 0 to 10000, and a `billingConfig.currency` that
+  is not three letters each stop `price_and_coupon_column_drop_checks` with the table,
+  the count and what to do. So does a row where an old column and its
+  replacement disagree (a coupon amount, a plan's archived default price, a
+  subscription's currency): the migration does not pick one. That migration
+  changes nothing when it stops; the migrations before it stay applied, and
+  after correcting the rows `prisma migrate resolve --rolled-back <name>`
+  and a redeploy carry on from there. Part A of the preflight finds what can
+  be found on 2.1.0 before you deploy.
+- **`pricePerUnitCents` is kept in the plan's metadata.** The column is
+  dropped, and the figure an operator entered moves, as stored, to
+  `metadata.pricePerUnitCents` on the plan. Nothing charges it and nothing
+  reads it. An operator sees it in the plan's `metadata`; the public plan
+  list carries no metadata.
+- **The database enforces what the API already wrote.** A subscription's
+  `plan_price_id`, `currency` and `unit_amount` are all set or all null; the
+  price row is one of the subscription's own plan and cannot be deleted while
+  a subscription names it; a percentage coupon has `basis_points` and a fixed
+  one has none; a free plan has no default price; `currencies` on
+  `billing_credentials` and `coupons` is never NULL. That a subscription's
+  `currency` is its price row's currency is checked once by the upgrade and
+  kept by the API afterwards; no constraint holds it. This matters only if you
+  write to the database yourself.
+- **Reports that read the dropped columns stop working.** Read a plan's price
+  from the `plan_prices` row `plans.default_price_id` names, a fixed coupon's
+  amount from `coupon_amounts`, and a percentage coupon's rate from
+  `coupons.basis_points`.
+- **Three unused lockout columns are dropped too:** `failed_sign_in_attempts`
+  and `locked_until` on `tenant_users`, and `failed_attempts` and
+  `locked_until` on `mfa_credentials` and `tenant_mfa_credentials`. Nothing
+  has written them since lockout moved to Redis.
+- **No operator is confirmed by the upgrade.** Every operator who signed up
+  with a password confirms with the emailed link, unless they had already
+  signed in by emailed link, Google or GitHub. See "Operators confirm their
+  email address" below for what waits on it.
+- **A token that names no session, minted before the upgrade, is refused.**
+  MCP access tokens (end-user and operator) now have to carry a millisecond
+  issue time, and an MFA challenge the account state it was issued against.
+  An MCP client gets one 401 and refreshes; its refresh token and its grant
+  are untouched. A sign-in that was waiting at the second-factor step when
+  you upgraded answers 401 `MFA_CHALLENGE_INVALID`: sign in again.
+- **Fields that were optional "for an older deployment" are required, and the
+  API sends them on every route.** On `ApplicationDto`: `environment`,
+  `supportEmail`, `reportingTimezone`, `promotedAt`, `disabledAt` and
+  `disabledReason` (null where there is no value). `GET /api/v1/me` now sends
+  the last four; the operator and super-admin Application routes now send
+  `supportEmail` at the top level, which they never did; and
+  `GET /api/v1/tenant/operator/applications` sends `billingConfig` complete.
+  On `AuthResultDto`: `deviceId` and `isNewUser`. On the end-user export:
+  `endUser.bannedAt`, `profile`, `onboardingCompletedAt`,
+  `onboardingSkippedAt`, `createdVia`, and `supportCases` and `contacts`.
+  A fixture or mock of one of these types needs the fields.
+- **The panel needs the API of its own release.** It no longer reads a
+  response from an earlier API: it does not look up actor emails itself, does
+  not hide the Users tab or the reporting timezone when a field is missing,
+  and does not fall back to a build-time portal URL. Deploy the API first, as
+  before. The panel build argument `NEXT_PUBLIC_PORTAL_URL` is removed: the
+  Portal page takes the origin from the API's `PUBLIC_PORTAL_URL` only.
+- **`PUT .../email-credentials` requires `provider`.** A body without it was
+  read as Resend. Send `"provider": "resend"` or `"provider": "smtp"`.
+- **The `/end-user-roles` operator routes are removed.** They were a hidden
+  alias of `/api/v1/tenant/applications/:id/application-roles`; call that.
+- **`PLAN_CURRENCY_INVALID` is gone.** A plan stored with a malformed currency
+  cannot exist after the upgrade, so nothing answers it. Remove it from any
+  list of codes you switch on.
+
+**The 2.2.0-rc.7 `@rekey.dev/*` packages keep working against a 2.2.0 API:**
+no request or response they use changed between the two. Packages from
+2.2.0-rc.6 or earlier, and from 2.1, are refused on the plan, coupon and
+stats calls the guide lists. Upgrade them with the API.
+
+### Changed
+
+- **An unverified account belongs to whoever proves the mailbox.** Sign-up
+  asks for no proof of the address, so a password account could be registered
+  for someone else's email and kept after the real owner signed in. Now the
+  first magic-link sign-in, social sign-in (when the provider verified the
+  same address) or completed password reset on an account with
+  `emailVerified: false` marks it verified and removes everything set before
+  it: the password (a reset sets the new one), every session, passkeys, a
+  second factor, other linked providers, pending links and device bindings.
+  The user id, role, metadata, profile, subscriptions, credits, licences and
+  organization memberships stay. **What your users see:** someone who signed
+  up with a password, never clicked the confirmation link, and later uses a
+  magic link or a social button loses that password, is signed out elsewhere,
+  and gets the new `account_claimed` email telling them to set a new one. A
+  user who confirmed their address is not affected, and the confirmation link
+  itself still keeps the password. You get the security event
+  `auth.unverified_account_claimed` and a `user.updated` webhook with
+  `changed: ["emailVerified", "credentials"]`.
+- **Users your server creates are unverified unless you say otherwise.** The
+  rule above keys on `emailVerified`, not on who created the row.
+  `POST /api/v1/auth/sign-up` now takes `emailVerified: true` from a secret
+  key (a publishable key is refused with `EMAIL_VERIFIED_REQUIRES_SECRET_KEY`),
+  and `POST /api/v1/users/import` already takes it per user. Send it for
+  every address you have verified yourself. An imported user without it loses
+  the imported password and linked identities at their first magic link,
+  social sign-in or reset.
+- **Passkeys, MFA and provider linking need a verified address.**
+  `/auth/passkey/register/*`, `/auth/mfa/setup`, `/auth/mfa/setup-confirm` and
+  `/auth/oauth/:provider/link/*` answer 403 `EMAIL_NOT_VERIFIED` for a user
+  whose address is unverified, whatever `requireEmailVerification` is set to.
+  If your app offers passkey or MFA enrolment straight after sign-up, verify
+  the address first.
+- **Social sign-in now marks the address verified** when it links to an
+  existing account by a provider-verified email. It used to leave
+  `emailVerified: false`. So does a completed password reset.
+- **Operators confirm their email address, and until they do they cannot
+  create lasting access.** Operator sign-up now mails a confirmation link
+  (where the deployment can send mail), the panel shows a notice with a "Send
+  confirmation email" button on every page until the address is confirmed,
+  and `POST /api/v1/tenant/auth/resend-verification` and
+  `POST /api/v1/tenant/auth/verify-email` do the same over the API.
+  **Confirming with that link keeps everything: the password, sessions,
+  passkeys, personal access tokens and MCP grants.** It confirms the address
+  and changes nothing else. Because it keeps the password, the link works
+  only while signed in to the account it was mailed for:
+  `verify-email` needs that account's session (401 `TENANT_SESSION_MISSING`
+  without one, 403 `EMAIL_VERIFICATION_WRONG_ACCOUNT` with another
+  account's), and the panel page sends a signed-out visitor to sign in and
+  back. Someone who receives the email for an account they did not create
+  cannot sign in to it; the email and the page point them at "Email me a
+  sign-in link", which confirms the address and removes the password instead.
+  A newer confirmation email replaces the earlier ones, and after a
+  confirmation the address is mailed a short notice
+  (`operator_email_confirmed`).
+  Operators had no way to confirm an address before, so **every operator who
+  signed up with a password is unconfirmed after the upgrade** unless they
+  had already signed in by emailed link, Google or GitHub. The upgrade
+  confirms nobody: no migration marks an operator verified. Until
+  they confirm, these answer 403 `EMAIL_NOT_VERIFIED`: inviting someone,
+  changing a member's role, scopes or Application grants, creating another
+  workspace, minting an Application API key, rotating the publishable key,
+  creating or changing a webhook endpoint or rotating its secret, storing or
+  changing billing provider credentials or registering a provider webhook,
+  configuring a sign-in provider, changing `appUrl` or `redirectUrls` in
+  `authConfig`, changing the IP allowlist and CORS origins, setting an
+  Application's email credentials, sender or a built-in email template,
+  adding a passkey, turning on two-factor authentication, creating a personal
+  access token and approving an MCP client. The same holds for the operator
+  MCP tools `invite_member`, `change_member_role`, `mint_api_key`,
+  `create_webhook_endpoint`, `update_webhook_endpoint`,
+  `configure_billing_provider` and `update_auth_config` (when it changes
+  `appUrl` or `redirectUrls`). Creating Applications, plans, prices and
+  coupons, reading anything, revoking and deleting, and accepting an
+  invitation into someone else's workspace stay open. Existing personal
+  access tokens and MCP grants keep working for reads and ordinary writes;
+  **have each operator sign in, press "Send confirmation email" and confirm
+  with the link once, and nothing else changes for them.**
+  Confirming another way still replaces what was there: a magic link, a
+  Google or GitHub sign-in or a completed reset on an unconfirmed operator
+  removes the password (a reset sets the new one), sessions, passkeys, second
+  factor, personal access tokens, MCP grants and unaccepted invitations that
+  account sent, revokes the Application API keys it minted and switches off
+  the webhook endpoints it created (for keys and endpoints created from this
+  release on, which record who made them). Other workspace members are never
+  removed; the `auth.unverified_account_claimed` event and the notice email
+  (`operator_account_claimed`) name every other member of each workspace the
+  account owns or administers and count its Applications, live API keys,
+  webhook endpoints and billing providers, saying how many keys and endpoints
+  have no recorded creator and were therefore left in place, so the owner can
+  review them; the notice says where to disable an Application they did not
+  create. Impersonation sessions the account had open are ended. An operator with two-factor on is
+  neither wiped nor confirmed by those sign-ins until the code is given, and a
+  reset confirms nothing for them. A deployment with no way for an operator
+  to prove a mailbox (no deployment mail, no operator sign-in provider, no ID
+  Token handoff) refuses none of this: see docs/tenant-auth.md.
+  `GET /api/v1/tenant/auth/me` gains `emailConfirmation: { required, byEmail }`.
+  An operator provisioned by Rekey Cloud is confirmed by the sign-in handoff
+  and is not affected.
+- **A sign-in that was in flight while every session was ended gets no
+  session.** A claim, a password change or reset, and sign-out everywhere now
+  hold the account while they revoke, and a sign-in or refresh that checked
+  its credential just before one of them is refused when it tries to write
+  its session: a password answers 401 `INVALID_CREDENTIALS`, a refresh token
+  401 `REFRESH_TOKEN_REVOKED`, and a link, provider, passkey or second factor
+  the new 401 `CREDENTIAL_SUPERSEDED` ("sign in again"). A refresh that loses
+  to such a revocation no longer counts as reuse. MCP access tokens carry a
+  millisecond issue time (`iat_ms`) and one minted in the same second as a
+  claim, before it, is refused. Clients need no change beyond treating
+  `CREDENTIAL_SUPERSEDED` like any failed sign-in.
+  The same holds one step earlier, for what a sign-in leaves behind to be
+  redeemed later. An OAuth authorization code (end-user MCP and OIDC, and
+  operator MCP) is written only while the account is as it was when the
+  sign-in, consent or session behind it was checked, and one from before a
+  revocation of every session is refused at the token endpoint
+  (`invalid_grant`); the hosted authorize form shows "Your sign-in expired"
+  instead of redirecting with a code. An MFA challenge is tied to the account
+  as it was when the first factor verified, and answers 401
+  `MFA_CHALLENGE_INVALID` if every session was ended since (a ban ends
+  every session too, so a challenge from before a ban is not revived by
+  lifting it).
+- **Replaying a refresh token from before a revocation of every session no
+  longer signs anyone out.** A rotated refresh token presented again is
+  normally treated as theft and ends every session. A token created before
+  the account's last claim, password change or reset, sign-out everywhere or
+  earlier reuse now answers 401 `REFRESH_TOKEN_REVOKED` and revokes nothing:
+  whatever it belonged to was already over, and treating it as theft let
+  whoever kept one sign the account's owner out, repeatedly. Reuse of a token
+  from the current sessions still answers `REFRESH_TOKEN_REUSED` and ends
+  them all. The same rule applies to operator sessions and operator MCP
+  refresh tokens.
+- **A built-in email template test send is restricted.** `POST
+  …/email-templates/:eventKey/test-send` needs a confirmed operator address,
+  counts against the per-recipient cap (429 `AUTH_EMAIL_RECIPIENT_CAPPED`),
+  and, on an Application with no email provider of its own, sends only to the
+  calling operator's own address (403 `EMAIL_TEST_RECIPIENT_NOT_ALLOWED`
+  otherwise). It used to mail any address through the deployment's shared
+  transport. The operator actions that mail an end user a reset or a
+  verification link also wait for a confirmed operator address.
+- **A claim also cancels organization invitations the account sent and
+  replaces its licence keys.** A licence key issued to an account before
+  anyone confirmed its address stops working when the account is claimed, and
+  its activations are removed; the licence stays. `user.updated` then lists
+  `licenseKeys` in `changed`: issue the user a new key. Licences pooled to an
+  organization keep their keys.
+- **A social sign-in held for a two-factor code links the provider only once
+  the code is given**, not before.
+- **Auth email that is never sent no longer uses up an address's allowance.**
+  A request to `/auth/forgot-password`, `/auth/magic-link/request` or
+  `/auth/resend-verification` (and the operator equivalents) that mails
+  nobody, because the address has no account or nothing to verify, gives the
+  reservation back. A secret key still meets 429 `AUTH_EMAIL_RECIPIENT_CAPPED`
+  after the same number of such requests, counted separately, so the 429 does
+  not say whether the address has an account.
+- **Sign-up no longer says an address is taken when it gives no session
+  anyway.** With `authConfig.requireEmailVerification` on, a publishable-key
+  sign-up for an address that already has an account gets the same 403
+  `EMAIL_NOT_VERIFIED` as a new address, with the same body and headers, and
+  the owner is emailed instead (`signup_existing_account`, or
+  `signup_finish_setup` with a link to choose a password when the account was
+  never verified). **A sign-up form that waited for `EMAIL_ALREADY_EXISTS` to
+  say "sign in instead" must show "check your inbox" for
+  `EMAIL_NOT_VERIFIED`.** Secret keys still get the 409. With the setting off
+  (the default) the 409 is unchanged, because sign-up returns a live session
+  there; turn the setting on to close it.
+- **Browser sign-ups are limited to 30 an hour per address**, per Application,
+  on top of the existing 10 a minute, while `requireEmailVerification` is off.
+  The 31st answers 429 `RATE_LIMITED`. Secret keys are not counted.
+- **Auth email to one mailbox is capped: 5 an hour and 15 a UTC day per
+  Application**, counted by recipient across every caller and IP
+  (`AUTH_EMAIL_RECIPIENT_HOURLY_CAP`, `AUTH_EMAIL_RECIPIENT_DAILY_CAP`).
+  `a+1@` and `a+2@` are one mailbox. Over the cap, a **secret key** calling
+  `/auth/forgot-password`, `/auth/magic-link/request` or
+  `/auth/resend-verification` gets the new 429 `AUTH_EMAIL_RECIPIENT_CAPPED`
+  with `Retry-After`; so does the signed-in `/auth/send-verification` and an
+  operator sending a reset or a verification from the panel. A publishable
+  key gets the usual 200 body and nothing is sent. A sign-up over the cap
+  still answers 201; its welcome and verification mails are skipped. Security
+  notices are not counted.
+- **A publishable key no longer waits for the mail** on `/auth/forgot-password`,
+  `/auth/magic-link/request` and `/auth/resend-verification`. The response
+  comes back before the email is built, so it takes the same time whether or
+  not the address has an account. The body is unchanged.
+- **Those three routes answer 503 `DEPENDENCY_UNAVAILABLE` when Redis is
+  unreachable**, for every address, instead of sending uncounted.
+- **`recipientCapKey` treats Gmail dots and `googlemail.com` as one mailbox**,
+  which also applies to the per-recipient cap on custom sends
+  (`EMAIL_RATE_LIMITED`).
+- **Three built-in emails are new** and can be customised like the others:
+  `account_claimed`, `signup_existing_account`, `signup_finish_setup`. A
+  fourth, `operator_account_claimed`, and the two operator confirmation mails
+  (`operator_email_verification`, `operator_email_confirmed`) go from Rekey to
+  operators and have no per-Application copy. The
+  default `email_verification` copy gains a line telling the reader to confirm
+  only if they signed up themselves. A copy you saved earlier is not changed.
+- **`user.updated` has new `via` values** (`oauth`, `password_reset`, `mfa`)
+  and a new entry in `changed` (`credentials`). A handler that switches on
+  either should have a default.
+- **`EMAIL_NOT_VERIFIED`'s `fix` text changed**, and the code now has a second
+  meaning (no new sign-in method on an unverified account). Branch on the
+  code and the route you called, not on the text.
+- **Accounts verified by the old code are not changed by this upgrade.**
+  Before this release a magic-link sign-in (end users and operators) and an
+  operator Google or GitHub sign-in marked an account verified and left its
+  password in place. If someone else had registered that address first, their
+  password still works on that account. Rekey cannot tell those accounts from
+  honest ones afterwards, because sign-in, reset and verification links are
+  deleted when they expire, so nothing is wiped automatically. docs/auth.md
+  ("Accounts verified before 2.2.0") has a query that lists the accounts worth
+  a look and how to end their sessions and passwords.
+
+### Fixed
+
+- **Pre-registration account takeover (end-users and operators).** Signing up
+  with a victim's email and a password, then waiting for the victim to sign in
+  by magic link, social sign-in or reset, left the attacker's password and
+  sessions working on the account the victim now used. Turning on
+  `requireEmailVerification` did not prevent it. See the first item under
+  Changed.
+- **Mail bombing through the auth forms.** One caller on many addresses, or a
+  run of `victim+N@` sign-ups, could have an Application send unlimited reset,
+  sign-in, verification and welcome mail to one inbox.
+- **A sign-in link minted before an address had an account** now also takes
+  over an unverified account someone registered for that address in between.
+  It used to sign the link's holder in beside the registrant's password.
+- **Account enumeration through sign-up** on Applications that require a
+  verified address, and a response-time difference between known and unknown
+  addresses on the three email-request routes for publishable keys.
+### Security
+
+- **Operator MCP: write access can no longer reach admin power.** A
+  connection with write access only (an OAuth grant without
+  `mcp:operator:admin`, or any personal access token) could invite or promote a
+  workspace OWNER, change where sign-in links point, and register a webhook
+  endpoint that receives every event. It no longer can.
+  - **Breaking:** `update_auth_config`, `create_webhook_endpoint`,
+    `update_webhook_endpoint` and `change_member_role` are admin tools. An agent
+    that used them with a write-only connection must reconnect and approve
+    admin access on the consent page. A personal access token cannot call them
+    over MCP at all; use an OAuth connection or the panel.
+  - **Breaking:** `invite_member` and `remove_member` act on MEMBERs only with
+    write access. `create_organization_role`, `update_organization_role`,
+    `delete_organization_role`, `add_organization_member` and
+    `set_organization_member_role` act on MEMBER-tier roles only. Anything
+    involving an OWNER or ADMIN needs admin access.
+  - A refused call answers the new code `OPERATOR_MCP_ADMIN_REQUIRED` in the
+    tool result. The table of what each tier can do is in
+    [docs/mcp.md](docs/mcp.md#what-write-access-cannot-do).
+  - The consent page now lists what read and write access and admin access
+    each allow.
+
+- **A stalled Redis no longer hangs requests.** When Redis kept its
+  connections open and stopped answering (a paused container, a frozen host),
+  requests that touch Redis waited for ever. A Redis command now gets one
+  second. Sign-in and the other credential routes answer 503
+  `DEPENDENCY_UNAVAILABLE` naming Redis, routes that only use Redis for the
+  general rate limit keep serving, and the API recovers by itself when Redis
+  answers again. Nothing to configure.
+
+- **Production sends to your URLs only over https.** A plain `http://` URL
+  let webhook payloads, with your users' email addresses and ids, travel
+  unencrypted. A deployment running with `NODE_ENV=production` now refuses it
+  with the new code `URL_NOT_HTTPS`.
+  - **Breaking:** creating a webhook endpoint with an `http://` URL, or
+    changing one to it, answers 400 `URL_NOT_HTTPS`, over REST, in the panel
+    and through the MCP tools.
+  - **Breaking:** an endpoint already stored as `http://` receives nothing.
+    Each delivery records an error starting `URL_NOT_HTTPS:`, shown on the
+    endpoint's page in the panel and in `GET …/deliveries`. Move the receiver
+    to https, change the endpoint URL, and retry the deliveries. Nothing is
+    rewritten for you.
+  - **Breaking:** an OIDC sign-in provider whose `issuerUrl` or discovered
+    endpoints are `http://` is refused at save and at sign-in.
+  - Self-hosters who deliver to http services on their own private network
+    keep doing so with `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`. Development
+    deployments are unchanged.
+  - `GET /api/v1/tenant/applications/:id/webhooks` returns `httpsRequired`.
+  - The operator MCP webhook tools now refuse a private or loopback URL with
+    `WEBHOOK_URL_UNSAFE` at create and update, as the REST routes always did.
+    See [docs/webhooks.md](docs/webhooks.md#https-only-in-production).
+
 ## 2.2.0-rc.7
 
 A release candidate on the 2.2.0 line, and a breaking one. A plan can now be
@@ -13,9 +414,10 @@ one, and every money change is written to a billing log you can read per
 Application. To get there the price moved off the plan onto price rows, and
 several request and response shapes changed with no aliases kept.
 
-**Upgrading an existing deployment:** read
-[docs/migrating-to-2.2.0-rc.7.md](docs/migrating-to-2.2.0-rc.7.md) first. Run
-`docs/specs/billing-money-model.preflight.sql` against your database before
+**Upgrading an existing deployment:** follow
+[docs/migrating-to-2.2.md](docs/migrating-to-2.2.md), which replaced the page
+this release candidate shipped with. Run
+`docs/upgrades/billing-money-model.preflight.sql` against your database before
 you deploy: the first migration refuses to run when any plan, price,
 subscription, payment, checkout or coupon is in HUF, TWD, ISK, UGX or MGA,
 because this release changes how those amounts are sent to providers and
@@ -144,8 +546,6 @@ integration can see.
    and after tables in the migration page.
 4. Check each provider's currency list under Billing, Setup, Providers. A
    Razorpay account that sells outside INR needs its other currencies ticked.
-5. The previous API image remains a safe rollback until the constraints in
-   `docs/specs/billing-money-model.step-z.sql` ship in a later release.
 
 ## 2.2.0-rc.6
 
@@ -292,7 +692,7 @@ integration can see. Read this list before you upgrade.
   The panel already read the same `.env` key. The secret is what lets the API
   believe the visitor's browser and country that the portal forwards on a
   sign-in; without it every portal sign-in was recorded as `node`. Generate
-  one with `openssl rand -hex 32`. The split Dokploy compose files already
+  one with `openssl rand -hex 32`. The split hosted compose files already
   required it.
 
 The next seven items are the billing fixes that were written up as the 2.2.0
@@ -1514,7 +1914,7 @@ does. Same reasoning that moved this release line from 2.0.1 to 2.1.0.
 rewrite rows on tables that sign-in depends on, one builds five indexes that
 block writes to each table while the index builds, and rolling back needs one
 SQL step first. Read
-[Upgrading: 2.2.0 migrations and rollback](DEPLOY.md#upgrading-220-migrations-and-rollback)
+[Upgrading: 2.2.0 migrations and rollback](DEPLOY.md#upgrading-220-migrations)
 before you deploy. `docker-compose.prod.yml` also requires three proxy secrets
 it did not require in 2.1.x; see **Breaking changes** below.
 
@@ -1961,7 +2361,7 @@ operator panel and CLI.
   organization's pooled ones; it is member-only
   (`403 ORGANIZATION_NOT_MEMBER` otherwise).
 - **An end-user MCP connection can act for one of the user's organizations**
-  (EtherLabZ/Rekey#473 item 3, #587). When the Application has
+  (#587). When the Application has
   organizations on and the user can act for at least one, the MCP consent page
   asks, after sign-in, whether the connection acts for them personally
   (preselected) or for one of those organizations. The choice is stored on the
@@ -2547,8 +2947,8 @@ desktop product. Thank you.
   (`RATE_LIMIT_AUTHENTICATED_IP_MAX`). Both apply only to an address that is
   the client's, never to a shared proxy.
 - **`INTERNAL_CALLER_SECRET`** lets the panel and portal prove their calls
-  when they reach the API through its public origin (the split Dokploy
-  units): they send it as `X-Rekey-Caller-Secret`, and the API believes the
+  when they reach the API through its public origin (the split
+  deployment units): they send it as `X-Rekey-Caller-Secret`, and the API believes the
   one visitor address they send as `X-Rekey-Client-Ip`. Required in `docker-compose.api.yml`,
   `docker-compose.panel.yml` and `docker-compose.portal.yml`; see the Cloud
   checklist and admin-lockout recovery in DEPLOY.md.
@@ -5195,7 +5595,7 @@ previous sentence:
   `config/env.ts` deliberately does not have — and set `PANEL_URL` to a
   placeholder domain, which is worse than leaving it unset.
 - The README's Examples table had headers and no rows, and linked
-  `github.com/EtherLabZ/Rekey/issues/184`, which 404s. The `examples/` apps were
+  a tracker issue that 404s. The `examples/` apps were
   removed in #261; the README, both SDK READMEs and `docs/portal.md` now say so
   instead of linking into the hole.
 - `CONTRIBUTING.md` asked for Node 20 (`engines` says 22) and said
@@ -5850,15 +6250,15 @@ correct the ones serving real traffic **in SQL** (the UPDATE is in DEPLOY.md)
 before minting new keys. Existing keys and stored credentials keep working
 either way; only the prefix of newly minted keys depends on it.
 
-### Breaking: `RELIPAY_*` environment-variable fallback removed
+### Breaking: pre-1.1.2 environment-variable names no longer read
 
-1.1.2 renamed every environment variable `RELIPAY_*` → `REKEY_*` and kept the
+1.1.2 renamed every environment variable to the `REKEY_*` prefix and kept the
 old name as a fallback read, noting the fallback would go in the next major.
 This is that major.
 
-- **`RELIPAY_URL`, `RELIPAY_SECRET`, `RELIPAY_OPERATOR_TOKEN`,
-  `NEXT_PUBLIC_RELIPAY_URL` and `NEXT_PUBLIC_RELIPAY_PUBLIC_KEY` are no longer
-  read anywhere.** Set the `REKEY_*` equivalent. Affected surfaces: the panel
+- **Only `REKEY_URL`, `REKEY_SECRET`, `REKEY_OPERATOR_TOKEN`,
+  `NEXT_PUBLIC_REKEY_URL` and `NEXT_PUBLIC_REKEY_PUBLIC_KEY` are read.** The
+  pre-1.1.2 names are ignored. Affected surfaces: the panel
   (`apps/panel`, incl. the audit-log and end-user export proxies), the admin app,
   the hosted portal, `@rekey.dev/nextjs` (both `/server` and `/client`),
   `@rekey.dev/cli` and `@rekey.dev/mcp`.
@@ -5869,7 +6269,7 @@ This is that major.
   safe to remove: the panel raises `PANEL_API_URL_MISSING`, the admin app
   `ADMIN_API_URL_MISSING`, the portal and `@rekey.dev/nextjs` throw on first use,
   the MCP server exits 1 with a message naming `REKEY_URL`, and the CLI reports
-  the missing `--api-url`. There is no path where a stale `RELIPAY_*` name
+  the missing `--api-url`. There is no path where a stale pre-1.1.2 name
   silently points at the wrong thing.
 
 ### Breaking: deprecated billing-credential helpers removed
@@ -6145,396 +6545,7 @@ close both halves, each settable from Panel → Application → Auth, the
   implemented it, and nothing ever called it — outbound providers are built by
   `getProviderForApplication` in `providers/index.ts`, which was never migrated
   onto the hook. Internal only: no published type, endpoint or payload changes.
-- Environment variables renamed `RELIPAY_*` → `REKEY_*` across the API, panel, admin, portal, SDKs, CLI, and MCP server. As of 2.0.0 the old names are no longer read — see the breaking entry above.
-- CI test database renamed `relipay_test` → `rekey_test`; default transactional-email from-name is now "Rekey".
+- Environment variables use the `REKEY_*` prefix across the API, panel, admin, portal, SDKs, CLI, and MCP server. As of 2.0.0 the pre-1.1.2 names are no longer read; see the breaking entry above.
+- CI test database renamed to `rekey_test`; default transactional-email from-name is now "Rekey".
 - Removed a dead `seoTags` block from the marketing site's content data. It was superseded by `landingContent.seo` and had no readers.
 
-## 1.1.2
-
-ReliPay is now **Rekey**. This release moves the SDK packages to their new
-home: install `@rekey.dev/node`, `@rekey.dev/react`, `@rekey.dev/nextjs`,
-`@rekey.dev/cli`, `@rekey.dev/mcp`, `@rekey.dev/shared-types`. The old
-`@relipay/*` packages are deprecated on npm and will receive no further
-updates.
-
-### Breaking changes (relative to `@relipay/*` 1.1.1)
-
-- **Package scope**: `@relipay/<name>` → `@rekey.dev/<name>`. Update imports
-  and dependencies; APIs are otherwise unchanged in this release.
-- **Exported names**: `RelipayError` → `RekeyError` (plus the matching
-  `RekeyErrorShape`/`RekeyErrorSchema`/`RekeyErrorPayload` types),
-  `RelipayProvider` → `RekeyProvider`, `relipayMiddleware` →
-  `rekeyMiddleware`, `relipayBrowser` → `rekeyBrowser`, and the `Relipay`
-  client class is now `Rekey`. `instanceof` checks and named imports need the
-  new names.
-- **User-token header**: the SDK now sends `X-Rekey-User-Token` and servers
-  from this version onward read only that header. A 1.1.1 (`@relipay/*`) SDK
-  talking to a 1.1.2+ server will get 401s on per-user routes — upgrading the
-  package is the fix.
-- **CLI binaries**: `relipay` → `rekey`, `relipay-mcp` → `rekey-mcp`.
-
-Self-hosters: your deployment domains, environment variable names
-(`RELIPAY_URL` etc.), cookie names, and docker-compose service names are
-unchanged in this release.
-
-## 1.1.1
-
-A follow-up pass on the parts of 1.1.0 that were still failing open, plus the
-panel bugs people reported. One behaviour change on an operator endpoint is worth
-reading before you upgrade.
-
-### Changed behaviour
-
-**Deleting an end-user now fails if the payment provider will not cancel their
-subscription.** It used to delete anyway and log the failure. The problem with
-that is timing: once the record is gone there is nothing left to retry from, so a
-card kept being charged for a user the operator could no longer see. The endpoint
-now answers 502 `PROVIDER_CANCEL_FAILED`, leaves the user in place, and records
-the blocked attempt so you can see why.
-
-Erasure is deliberately different. `?erasure=true` still succeeds even when the
-provider call fails, because it answers a legal request with a deadline and
-blocking that on a third party being down is the worse outcome. The tombstone
-keeps the row, so the subscription stays findable. If you need to satisfy an
-erasure request while a provider is down, use the erase path.
-
-### Security
-
-**A Redis outage no longer switches off brute-force protection.** Every Redis
-error in the lockout code was being swallowed and read as "no failures, not
-locked". Two things followed from that. Failed sign-ins stopped being counted, so
-password guessing was unlimited. And an account that had already tripped a
-lockout read as unlocked, so an attacker who had been locked out was let back in.
-
-Credential endpoints now answer 503 when that store is unavailable. Sign-in is
-briefly unavailable instead of unprotected. Reads and everything that is not an
-auth endpoint keep working, so an outage degrades the product rather than opening
-it or taking it down.
-
-The rate limiter's auth tier fails closed for the same reason. That one matters
-for `forgot-password` and `magic-link/request`, which have no lockout behind them
-because they are not sign-in attempts, so a skipped limiter left them unbounded
-and each request sends an email. The general limiter still fails open on purpose:
-it protects throughput, not credentials, and failing it closed would turn a Redis
-restart into a full outage.
-
-**You can now see when this is happening.** The panel shows a banner naming the
-unreachable dependency, and says plainly that credential endpoints are refusing
-requests on purpose so nobody goes hunting for a bug that is not there. The
-outage is also recorded in the security log with a start time, throttled to one
-entry per dependency every five minutes.
-
-**Plan and coupon changes are now audited.** Forty-seven kinds of operator action
-were already recorded, including billing credential changes, but plans and
-coupons were not, so a price change left no trail at all. During a billing
-dispute nobody could say who moved a price or when.
-
-### Fixed
-
-**A browser can read its own user's profile.** `GET /users/me` accepts the
-publishable key now. 1.1.0 opened MFA enrollment, password change, OAuth linking
-and organization management to browser apps but left profile reads behind, so an
-app could sign a user in and then not display their name.
-
-`GET /me` stays server-only, deliberately. It returns the whole Application
-including its auth and billing configuration, which is operator setup rather than
-user data.
-
-**Two panel bugs.** The delete confirmation dialog was not reliably centred: it
-depended on a browser default rather than saying where it should sit, so it
-landed off-centre for some people. Centring is now explicit. And the focus
-outline on the End-users tab was being clipped by the scrolling tab strip, which
-made it look broken for keyboard users. Focus rings on both tab rows are also
-full-strength now instead of half-transparent, which was too faint to serve as an
-indicator.
-
-While fixing the dialog we found every confirmation dialog on a list page shared
-the same element ids, so a screen reader announced the first row's name no matter
-which row you were deleting. On a delete confirmation.
-
-**`Idempotency-Key` works on `POST /usage/record`.** That route already deduped
-retries through a body field; it now also accepts the header, so a client that
-retries the same way everywhere does not need to know which mechanism each route
-uses.
-
-## 1.1.0
-
-This release is mostly the result of turning the tooling on ourselves. We ran
-adversarial reviews against a running instance instead of only reading the code,
-and that found things a code review had missed twice, including a shipped
-account takeover. Everything below is fixed and verified.
-
-If you self-host, read the breaking changes first. Two of them need action
-before you upgrade.
-
-### Breaking changes
-
-**Postgres and Redis passwords are now required.** `docker-compose.yml` used to
-default Postgres to the password `relipay` and publish both datastores on
-`0.0.0.0`. That put a database with a known credential on the public internet
-for anyone running on a VPS without a host firewall. Both now bind to
-`127.0.0.1`, and `POSTGRES_PASSWORD` and `REDIS_PASSWORD` are required with no
-fallback. Compose refuses to start rather than quietly using a shared password.
-
-Upgrading an existing deployment takes one extra step, because the Postgres
-image only applies `POSTGRES_PASSWORD` when it initialises an empty data
-directory. Your existing volume keeps the old password, so compose will start
-while the API fails to authenticate. Rotate it in place instead:
-
-```bash
-NEW_PW=$(openssl rand -hex 24)
-docker compose exec postgres \
-  psql -U relipay -d relipay -c "ALTER USER relipay WITH PASSWORD '$NEW_PW';"
-# then put $NEW_PW in POSTGRES_PASSWORD and DATABASE_URL in .env
-```
-
-Full instructions are in DEPLOY.md.
-
-**`X-Forwarded-For` is no longer trusted by default.** It used to be trusted
-whenever `NODE_ENV=production`, from any peer, which meant a client could rotate
-that header to get an unlimited number of rate limit buckets. We measured 60 out
-of 60 requests bypassing the limiter that way. If you run behind a reverse
-proxy, set `TRUSTED_PROXIES` to a hop count or an IP and CIDR list. If you do
-not set it, `request.ip` is the real socket peer, which is what you want.
-
-**`/health` now reports the truth.** It used to return `200 OK` while the
-database was down, which is exactly wrong for the endpoint people wire into a
-load balancer. Health is now split three ways. `/health/live` never touches a
-dependency and is what a container healthcheck should use, because restarting
-the API cannot fix a database outage. `/health/ready` checks Postgres and Redis.
-`/health` is dependency aware and returns 503 naming whichever dependency is
-unreachable. The healthy response still says `status: "ok"`, so existing
-monitors that match on that keep working.
-
-**Self-service auth flows now accept the publishable key.** Accepting an
-invitation, enrolling MFA, linking an OAuth provider, changing a password and
-validating a coupon used to require a secret key, even though every one of them
-already required an end user session. That made them unreachable from a browser,
-so a portal could create an invitation but never accept one, and an app could
-challenge a user for MFA they had no way to enroll.
-
-The part that needs your attention: secret keys are restricted by IP allowlist,
-publishable keys by origin allowlist, and these are not equivalent controls.
-`Origin` is a request header that any non browser client sets freely, while an
-IP allowlist constrains a network position. Both treat an empty list as open. So
-if you were relying on `ipAllowlist` to fence these flows to your own backend,
-they are now reachable from anywhere with a leaked end user token. Passkey
-enrollment deliberately stayed on secret keys only, because a passkey bypasses
-the MFA challenge and enrolling one is a persistent takeover.
-
-**Disabling MFA from a browser now requires a current code.** The endpoint used
-to require nothing beyond a session. Server side callers using a secret key keep
-the old behaviour, so `disableMfa(accessToken)` in `@relipay/node` is unchanged.
-
-**Rate limit responses changed shape.** A 429 used to carry
-`code: "BAD_REQUEST"` with a message telling you to check your request body,
-which no client could act on. It now carries `code: "RATE_LIMITED"` and a
-`retryAfterSeconds` field that agrees with the `Retry-After` header.
-
-**Requests with the wrong content type now return 415.** Sending a form encoded
-body used to produce a 400 complaining that a field was missing when you had in
-fact sent it. The MCP OAuth endpoints that legitimately accept form bodies are
-unaffected.
-
-### Security fixes
-
-**A publishable key could take over any end user account.** This is the one that
-matters. The publishable key is designed to ship in browser bundles, and our own
-docs said it grants nothing on its own. But when no email transport was
-configured, which is the default, `forgot-password` returned the raw reset token
-in the response body to any caller. Three requests took over an account: get the
-token, reset the password, sign in. The same leak existed on
-`magic-link/request`, where it is worse, because a magic link token is a session
-and needs no password change at all.
-
-The operator surface had the same bug with no credential required whatsoever.
-`/tenant/auth/forgot-password` and `/tenant/auth/magic-link/request` are
-unauthenticated by necessity, and they returned raw operator tokens, so knowing
-an operator's email address was enough to take over their entire workspace.
-
-**A failed email send handed back the token too.** A send failure was treated
-identically to having no transport configured. So the moment a Resend key
-expired or hit quota, every reset and magic link request started returning a
-live credential into your request logs while still answering 200. Send failures
-now withhold the token and record a security event you can see in the panel.
-
-**The operator MCP introspection endpoint was unauthenticated.** It answered
-token validity questions for anyone who asked, returning the operator id,
-workspace id and scopes for any live token, with no rate limit. Its per
-application equivalent had always required a secret key. It now requires an
-operator token, is rate limited, and only answers about tokens in the caller's
-own workspace.
-
-**Pooled license keys were revealed through the URL.** The operator panel put
-the raw key in a query string, which means browser history, referrer headers and
-access logs. It now uses a short lived httpOnly cookie, matching how the
-licenses page already worked.
-
-**One attacker could lock out every user of an application.** Sign in rate
-limiting was keyed on the API key alone, so all end users of an app shared a
-single budget of ten attempts per minute. Ten failed logins a minute is ordinary
-traffic for a modest user base, and an attacker who triggered them locked
-everyone out for the window. Limits are now per identity, with a separate per
-application ceiling so one app still cannot exhaust global capacity.
-
-**A Redis outage took down every route.** Including `/health` and reads that
-only touch Postgres. The rate limiter failed closed on a store error, which
-meant a routine Redis restart was a full outage. It now fails open, and health
-endpoints are exempt entirely.
-
-**Smaller ones.** Operator branding could set a `javascript:` logo URL that
-rendered in customers' browsers. Internal hostnames could leak into client HTML
-through an environment variable fallback. The post login `next` parameter is now
-validated as a local path across every sign in method, including passkeys,
-OAuth and the MFA step, so it cannot be used as an open redirect. Token expiry
-checks were inconsistent about the boundary instant and are now uniform.
-
-### One issue we are naming rather than hiding
-
-`POST /auth/forgot-password` does not fully hide whether an email address has an
-account. The status code and response shape are constant and the timing is
-padded, but the `delivered` field is `false` for an unknown address and `true`
-for a known one. This endpoint accepts the publishable key, so anyone who reads
-your JS bundle can use it to test whether a given address is registered.
-
-This is long standing behaviour that the response contract exposes, and the
-docblock claiming otherwise has been corrected. We did not quietly change the
-field, because clients read it. `magic-link/request` has the same property, but
-only under `invite_only` or `secret_only` signup: under the default `public`
-mode an unknown address is auto created, so the two cases are genuinely
-identical. If you need enumeration resistance today, put these endpoints behind
-your own backend with a secret key and return a constant response.
-
-### Added
-
-**Adding a payment provider is now one directory.** It used to take changes in
-roughly sixteen places across the API, shared types, the panel, the portal and
-both SDKs. A provider is now a single self describing module: it declares its
-credentials, how to verify its webhooks and how to translate its events, and the
-registry derives the routes, validation, credential forms and SDK labels from
-that. Stripe, PayPal and Razorpay all run through it, and every bespoke webhook
-handler is gone. There is a guide at docs/billing-providers.md.
-
-We deliberately did not add npm plugin loading. This code path moves money and
-holds decrypted processor keys, so providers stay in tree where they get review
-and test coverage. The reasoning is written up in the design doc.
-
-**Provider discovery endpoints.** `GET /billing/providers` now includes each
-provider's label, docs URL and capabilities, and there is a tenant scoped
-version that returns the credential fields a provider needs so the panel can
-build its own form. Credential values are never returned.
-
-**The customer portal stopped dead ending.** It had no password recovery, no
-path for accounts with two factor auth enabled, no billing history and an error
-message that told people to contact support without giving them any way to do
-so. All four are now handled. Operators can set a support email or URL in
-branding and it appears in the portal.
-
-**Better failure diagnostics.** Connection failures to Postgres or Redis now
-return a 503 that names the subsystem instead of a generic 500 that told you to
-contact support, which is unhelpful when you are the one running it. Request ids
-are now UUIDs and appear on every response, so quoting one actually identifies a
-request. They used to be small sequential counters that restarted from one on
-every boot.
-
-### Fixed
-
-**`disableMfa()` would have broken on upgrade.** Adding the step up code to
-`POST /auth/mfa/disable` introduced a body schema, and Fastify validates a
-missing body against it, so a request with no body at all got
-`400 body must be object`. That is exactly what `disableMfa(accessToken)` in
-`@relipay/node` 1.0.0 sends, since it passes no body and therefore no
-`Content-Type`. Every published SDK caller would have broken on upgrade. The
-route now accepts the bodyless shape. We checked the other seven SDK call sites
-that send no body and none of them were affected.
-
-The operator panel and customer portal got a pass for the states people actually
-hit. The portal used to show a raw framework 404 page to paying customers
-whenever an app's portal was switched off, discarding the perfectly good
-explanation the API was already returning. The panel sign in page told every
-operator that data may be reset without notice and pointed them at Discord to
-request production access, on every deployment, including production ones. That
-notice is now opt in for demo instances only.
-
-Beyond that: the password reset form had a single password field, so one typo
-locked you out of the account you were recovering, and now has a confirmation
-field. Pages with a missing or invalid token used to show a terse sentence
-written for developers with no way forward. Around fifty hand rolled alert boxes
-were replaced with one component so error and success messages are announced
-correctly to screen readers. A large number of focus rings were invisible
-because of a Tailwind quirk where an opacity modifier on a CSS variable silently
-compiles to nothing, so keyboard users had no focus indicator at all.
-
-Also fixed: the billing section of the navigation disappeared once billing was
-disabled, which hid the switch to turn it back on. Plan prices are entered in
-cents and now show a running dollar preview, because it was easy to type 50 and
-create a fifty cent plan. Activity logs paginate. Container logs rotate, which
-matters because a webhook worker retry loop during a Redis outage could write
-enough to fill a small disk and take Postgres with it.
-
-### Docs
-
-The OpenAPI document at `/docs` used to declare only two credentials, a super
-admin key and an application secret key, while the API actually accepts eight.
-That meant the machine readable schema was wrong for most authenticated routes,
-telling integrators to use a secret key where a publishable key was expected.
-All 267 routes are now annotated with what they really accept, and routes that
-are genuinely public say so explicitly rather than leaving it to be inferred.
-
-`docs/auth.md` was a release behind and documented a `token` field that does not
-exist, called several shipped features unbuilt, and stated that ReliPay does not
-send email, which it does. The error catalogue now lists every code the API can
-emit, and every code it lists is one the API actually emits.
-
-The quickstart's headline command did not work. `docker compose up` only started
-the datastores, because the API, panel and portal sit behind a compose profile.
-It now says `docker compose --profile full up`.
-
-### Internal
-
-The test suite was throttling itself. The global rate limiter never got the test
-mode escape hatch the per route limiters already had, and because every injected
-request reports the same IP, one bucket counted an entire test file. Any file
-over a hundred requests started failing partway through with 429s inside its
-fixtures, surfacing as an unrelated assertion failure further down. Redis state
-now gets cleared between tests alongside the Postgres truncate, which also
-removes a source of cross file flakiness that had been blamed on transient
-infrastructure.
-
-Install:
-
-```bash
-npm install @relipay/node
-```
-
-## 1.0.0
-
-First stable release. All `@rekey.dev/*` packages publish under the `latest`
-dist-tag. `npm install @rekey.dev/node` (no tag) now resolves.
-
-Since `1.0.0-rc.1`: operator MCP write/operate tools (plan entitlements,
-member management, credentials, end-user + mode controls, scoped + audited),
-new Rekey brand/logo across the apps, panel MCP-consent and passkey
-sign-in fixes, and marketing self-host guide + SEO updates.
-
-Install:
-
-```bash
-npm install @rekey.dev/node
-```
-
-## 1.0.0-rc.1
-
-First release candidate for the 1.0 line. Published under the `beta` npm
-dist-tag (pre-release) so it can be smoke-tested end-to-end before `1.0.0`
-stable promotes to `latest`.
-
-- Cut the first public release from the new OSS home, `rekey-dev/rekey`.
-- No API changes versus `0.1.0-beta.4`; this is a version-line bump to exercise
-  the public release pipeline (clean mirror → GitHub Release → npm publish).
-
-Install:
-
-```bash
-npm install @rekey.dev/node@beta
-```

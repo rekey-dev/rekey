@@ -34,12 +34,15 @@ import {
 import { storeChallenge, consumeChallenge } from '../../lib/webauthn-challenge.js';
 import { issueTenantAccessToken } from '../../lib/tenant-jwt.js';
 import { issueTenantRefreshToken } from '../../lib/tenant-refresh-tokens.js';
+import { sessionBasis } from '../../lib/session-basis.js';
+import { operatorCredentialSuperseded } from '../../lib/session-refusals.js';
 import type {
   AuthSessionResult,
   MembershipSummary,
   PublicTenantUser,
   TenantDeviceContext,
 } from '../tenant-auth/tenant-auth.service.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 export interface PasskeyRow {
   id: string;
@@ -126,6 +129,7 @@ export const tenantPasskeysService = {
     response: Parameters<typeof verifyTenantRegistration>[0]['response'];
     deviceName?: string;
   }): Promise<PasskeyRow> {
+    await assertOperatorVerifiedForCredential(args.tenantUserId, 'add a passkey');
     // Burn the challenge first (single-use, bound to this operator) so a
     // captured registration response can't be replayed.
     await consumeChallenge({
@@ -251,6 +255,21 @@ export const tenantPasskeysService = {
     const user = await prisma.tenantUser.findUniqueOrThrow({
       where: { id: credential.tenantUserId },
     });
+    // Read again after the account row: a claim removes passkeys and moves
+    // the stamp together, so either the passkey is already gone here, or the
+    // session below is refused because the stamp is no longer the one read.
+    const stillRegistered = await prisma.tenantWebAuthnCredential.findUnique({
+      where: { id: credential.id },
+      select: { id: true },
+    });
+    if (!stillRegistered) {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'PASSKEY_UNKNOWN',
+        message: 'No operator account matches that passkey.',
+        fix: 'Register the passkey via the panel first (Account → Passkeys).',
+      });
+    }
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
       throw new RekeyError({
@@ -261,11 +280,15 @@ export const tenantPasskeysService = {
       });
     }
     const active = memberships[0]!;
-    const refresh = await issueTenantRefreshToken(user.id, {
-      userAgent: args.device?.userAgent ?? null,
-      ip: args.device?.ip ?? null,
-      activeTenantId: active.tenantId,
-    });
+    const refresh = await issueTenantRefreshToken(
+      user.id,
+      {
+        userAgent: args.device?.userAgent ?? null,
+        ip: args.device?.ip ?? null,
+        activeTenantId: active.tenantId,
+      },
+      sessionBasis(user, operatorCredentialSuperseded),
+    );
     const access = issueTenantAccessToken(user.id, active.tenantId, active.role, {
       sessionId: refresh.record.sessionId,
     });

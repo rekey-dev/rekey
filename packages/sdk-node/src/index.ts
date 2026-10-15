@@ -1071,7 +1071,23 @@ class AuthClient {
    * `verifyMagicLink` set it only when that call created the account, so one
    * check routes new users to onboarding whichever way they arrived.
    *
+   * An account stays unverified until its owner confirms the address. Until
+   * then it cannot register a passkey, enrol MFA or link a provider, and the
+   * first magic-link sign-in, social sign-in or password reset for that
+   * address removes the password set here: whoever proves the mailbox owns
+   * the account. If your server has already verified the address, pass
+   * `emailVerified: true` (secret key only) and none of that applies.
+   *
    * @throws {RekeyError} `EMAIL_ALREADY_EXISTS` (409) if the email is taken in this Application.
+   *   A secret key always gets this. A publishable key gets it only while the
+   *   Application signs new accounts straight in; with
+   *   `authConfig.requireEmailVerification` on, a taken address answers
+   *   `EMAIL_NOT_VERIFIED` exactly like a new one, so show "check your inbox".
+   * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) when the Application sets
+   *   `authConfig.requireEmailVerification`. The account exists (or already
+   *   did) and an email is on its way; no session is issued.
+   * @throws {RekeyError} `EMAIL_VERIFIED_REQUIRES_SECRET_KEY` (403) if a
+   *   publishable key sends `emailVerified: true`.
    * @throws {RekeyError} `PASSWORD_TOO_SHORT` (400) if shorter than the Application's `passwordMinLength`.
    * @throws {RekeyError} `AUTH_METHOD_DISABLED` (400) if the Application doesn't have `"password"` enabled.
    */
@@ -1126,6 +1142,10 @@ class AuthClient {
    * shape whether the email exists or not. When the Application has
    * email transport configured, the link is sent and `magicLinkToken`
    * is null; otherwise the raw token is returned for you to forward.
+   *
+   * @throws {RekeyError} `AUTH_EMAIL_RECIPIENT_CAPPED` (429, secret key only)
+   *   when this address has been sent its hourly or daily share of sign-in
+   *   email. Wait `retryAfterSeconds`. A publishable key gets the usual body.
    */
   requestMagicLink(input: {
     email: string;
@@ -1184,6 +1204,10 @@ class AuthClient {
    * Forward `options` to `navigator.credentials.create(...)`; store
    * `expectedChallenge` in session; POST both back via
    * `verifyPasskeyRegistration(...)`.
+   *
+   * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) until the user has
+   *   confirmed their email address. Do not offer passkey enrolment straight
+   *   after sign-up: verify the address first.
    */
   startPasskeyRegistration(accessToken: string): Promise<{
     options: unknown;
@@ -1372,6 +1396,10 @@ class AuthClient {
    *   await sendgrid.send({ to: email, subject: 'Reset', text: `link: ${url(resetToken)}` });
    * }
    * ```
+   *
+   * @throws {RekeyError} `AUTH_EMAIL_RECIPIENT_CAPPED` (429, secret key only)
+   *   when this address has been sent its hourly or daily share of sign-in
+   *   email. Wait `retryAfterSeconds`. A publishable key gets the usual body.
    */
   requestPasswordReset(input: ForgotPasswordRequest): Promise<ForgotPasswordResultDto> {
     return this.client.send('POST', '/api/v1/auth/forgot-password', input);
@@ -1421,6 +1449,9 @@ class AuthClient {
    *
    * Pass `verifyUrl` containing `{token}` to template the link target
    * (e.g. `https://app.example.com/verify?t={token}`).
+   *
+   * @throws {RekeyError} `AUTH_EMAIL_RECIPIENT_CAPPED` (429) when this address
+   *   has been sent its hourly or daily share of sign-in email.
    */
   sendVerificationEmail(
     accessToken: string,
@@ -1463,6 +1494,10 @@ class AuthClient {
    * }
    * // Always render the same neutral "if that address needs verifying, we sent a link".
    * ```
+   *
+   * @throws {RekeyError} `AUTH_EMAIL_RECIPIENT_CAPPED` (429, secret key only)
+   *   when this address has been sent its hourly or daily share of sign-in
+   *   email. Wait `retryAfterSeconds`. A publishable key gets the usual body.
    */
   resendVerificationEmail(input: {
     email: string;
@@ -1536,6 +1571,9 @@ class AuthClient {
    * Begin TOTP enrollment: mints a secret (as an `otpauthUrl` for the QR) and
    * 10 single-show backup codes. **Not enrolled until `confirmMfaSetup(...)`.**
    * Only SHA-256 hashes of the backup codes are stored, show them once.
+   *
+   * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) until the user has
+   *   confirmed their email address. Verify first, then offer enrolment.
    */
   mfaSetup(accessToken: string): Promise<{
     otpauthUrl: string;
@@ -1645,7 +1683,12 @@ class AuthClient {
     });
   }
 
-  /** Begin linking a provider to the *currently authenticated* user. */
+  /**
+   * Begin linking a provider to the *currently authenticated* user.
+   *
+   * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) until the user has
+   *   confirmed their email address. Verify first, then offer linking.
+   */
   startOAuthLink(
     accessToken: string,
     provider: string,

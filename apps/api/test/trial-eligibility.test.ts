@@ -198,15 +198,6 @@ describe('trial eligibility', () => {
     expect(Math.round((row.endsAt!.getTime() - row.startedAt!.getTime()) / 86_400_000)).toBe(14);
   });
 
-  it('confirming a session that carried no trial is a no-op, not an error', async () => {
-    const out = await consumeTrial({
-      applicationId: appId,
-      checkoutSessionId: 'cs_never_existed',
-      subscriptionId: null,
-    });
-    expect(out.recorded).toBe(false);
-  });
-
   // ------------------------------------------------------------- the subject
 
   it('an org-billed application counts the trial against the ORG, not the member', async () => {

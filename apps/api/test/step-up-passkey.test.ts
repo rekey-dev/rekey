@@ -72,6 +72,7 @@ describe('passkey enrollment step-up', () => {
         payload: { email: `eu-${slug}@example.com`, password: PASSWORD },
       })
       .then((r) => (r.json().data as { accessToken: string }).accessToken);
+    await prisma.endUser.updateMany({ where: { email: `eu-${slug}@example.com` }, data: { emailVerified: true } });
   });
 
   const start = (key: string, body?: Record<string, unknown>) =>

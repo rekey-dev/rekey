@@ -28,8 +28,8 @@ export interface EndUserInsightsDto {
   activity: {
     lastActiveOn: string | null;
     last30: boolean[];
-    /** The whole 63-day window, oldest first. Absent from an API older than the field. */
-    last63?: boolean[];
+    /** The whole 63-day window, oldest first. */
+    last63: boolean[];
     activeDaysLast7: number;
     activeDaysLast30: number;
   };
@@ -40,16 +40,14 @@ export interface EndUserInsightsDto {
     fields: ProfileField[];
     answers: Record<string, ProfileValue>;
     onboardingCompletedAt: string | null;
-    /** Absent from an API older than onboarding skip. */
-    onboardingSkippedAt?: string | null;
-    onboardingStatus?: 'pending' | 'completed' | 'skipped';
+    onboardingSkippedAt: string | null;
+    onboardingStatus: 'pending' | 'completed' | 'skipped';
     missingRequired: string[];
   };
 }
 
 /**
- * Null on failure (an older API without the route, a grant that does not
- * cover it), so each tile can say it could not be read instead of claiming
+ * Null on failure (a grant that does not cover it), so each tile can say it could not be read instead of claiming
  * zero sign-ins. A busy API is rethrown for the retrying error boundary.
  */
 export function getEndUserInsights(applicationId: string, euid: string): Promise<EndUserInsightsDto | null> {

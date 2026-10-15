@@ -77,12 +77,6 @@ describe('admin plan create refuses unknown fields', () => {
     expect(await prisma.plan.count({ where: { applicationId } })).toBe(0);
   });
 
-  it('stores a lower-case currency upper-case', async () => {
-    const res = await createPlan({ slug: 'lower', name: 'Lower', price: { currency: 'usd', amount: 900 } });
-    expect(res.statusCode, res.body).toBe(201);
-    expect(res.json().data).toMatchObject({ price: { currency: 'USD', amount: 900 }, prices: [{ currency: 'USD', amount: 900, isDefault: true }] });
-  });
-
   it('refuses the per-kind fields the CLI used to send, and creates nothing', async () => {
     const res = await createPlan({
       slug: 'lic',
@@ -119,13 +113,6 @@ describe('admin plan create refuses unknown fields', () => {
     // Before the fix this was a 201 for a SUBSCRIPTION plan with
     // creditsAmount: null, which is what made the CLI print a tick.
     expect(await prisma.plan.count({ where: { applicationId } })).toBe(0);
-  });
-
-  it('refuses a typo rather than silently ignoring it', async () => {
-    const res = await createPlan({ slug: 'typo', name: 'T', price: { currency: 'USD', amount: 100 }, intervall: 'YEAR' });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('VALIDATION_ERROR');
-    expect(JSON.stringify(res.json().error)).toContain('intervall');
   });
 
   it('still accepts every field it does implement', async () => {

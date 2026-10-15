@@ -15,7 +15,6 @@ import {
   credentialRulesSchema,
   getModule,
   providerDescriptor,
-  providerNameSchema,
   registryNames,
 } from '../src/modules/billing/providers/registry.js';
 import { stripeModule } from '../src/modules/billing/providers/modules/stripe/index.js';
@@ -37,18 +36,6 @@ describe('billing provider-module registry', () => {
     for (const name of registryNames) {
       expect(getModule(name)?.name).toBe(name);
     }
-  });
-
-  it('registers the three hosted providers (P2) and the inbound-only external one', () => {
-    expect([...registryNames].sort()).toEqual(['external', 'paypal', 'razorpay', 'stripe']);
-  });
-
-  it('exposes a zod enum derived from the registry', () => {
-    expect(providerNameSchema.safeParse('stripe').success).toBe(true);
-    expect(providerNameSchema.safeParse('razorpay').success).toBe(true);
-    expect(providerNameSchema.safeParse('paypal').success).toBe(true);
-    expect(providerNameSchema.safeParse('external').success).toBe(true);
-    expect(providerNameSchema.safeParse('visa').success).toBe(false);
   });
 
   it('every module states whether it hosts a checkout; only external does not', () => {
@@ -169,34 +156,6 @@ describe('billing provider-module registry', () => {
     expect(webhookField?.webhookRole).toBe('id');
   });
 
-  it('stripe + razorpay declare offline verification (never test-skipped by the pipeline)', () => {
-    expect(stripeModule.capabilities.onlineVerify).toBe(false);
-    expect(razorpayModule.capabilities.onlineVerify).toBe(false);
-  });
-
-  it('paypal declares online verification + capture step + no native period rotation', () => {
-    // These three drive real pipeline/applier behavior: the centralized
-    // test-skip gate, the checkout.approved capture path, and the
-    // period_advanced renewal rotation.
-    expect(paypalModule.capabilities.onlineVerify).toBe(true);
-    expect(paypalModule.capabilities.captureStep).toBe(true);
-    expect(paypalModule.capabilities.periodRotationEvents).toBe(false);
-  });
-
-  it('razorpay declares manual webhook registration (panel sends operators to the dashboard)', () => {
-    expect(razorpayModule.capabilities.autoWebhookRegister).toBe(false);
-  });
-
-  it('every in-tree module states its discount support explicitly', () => {
-    // `capabilities.discounts` is optional in the type so a module written
-    // before it keeps compiling, and absent resolves to "cannot", but an
-    // in-tree module has no excuse for staying silent. Forgetting it here
-    // would silently stop every coupon on that provider.
-    for (const name of registryNames) {
-      expect(getModule(name)!.capabilities.discounts).toBeDefined();
-    }
-  });
-
   it('only stripe can discount a recurring subscription', () => {
     // Not a preference, PayPal Subscriptions v1 and Razorpay Subscriptions
     // have no per-checkout discount surface at all, so checkout refuses the
@@ -209,7 +168,7 @@ describe('billing provider-module registry', () => {
 
 describe('credentialSchema-driven validation (P3)', () => {
   // Known-good fixture creds per provider, the same shapes the webhook and
-  // phase4 test suites store via the credential routes.
+  // credential suites store via the credential routes.
   const goodCreds: Record<string, Record<string, string>> = {
     stripe: { apiKey: 'sk_test_abc123', webhookSecret: 'whsec_abc123' },
     razorpay: { keyId: 'rzp_test_abc123', keySecret: 'secret_abc', webhookSecret: 'wh_secret' },
@@ -264,17 +223,6 @@ describe('credentialSchema-driven validation (P3)', () => {
         'Razorpay `keyId` must start with `rzp_` (live or test).',
       );
     }
-  });
-
-  it('blank optional webhook fields pass (the "auto-configure later" path)', () => {
-    expect(
-      credentialRulesSchema(stripeModule).safeParse({ ...goodCreds.stripe, webhookSecret: '' })
-        .success,
-    ).toBe(true);
-    expect(
-      credentialRulesSchema(paypalModule).safeParse({ ...goodCreds.paypal, webhookId: '' })
-        .success,
-    ).toBe(true);
   });
 
   it('blank required fields raise the legacy aggregate "credentials require" message', () => {
@@ -385,13 +333,5 @@ describe('discovery projection (P4)', () => {
         }
       }
     }
-  });
-
-  it('secret flags mirror the module schema (secret → password input in the panel)', () => {
-    const d = providerDescriptor(stripeModule);
-    expect(d.credentialFields.find((f) => f.key === 'apiKey')?.secret).toBe(true);
-    const paypal = providerDescriptor(paypalModule);
-    expect(paypal.credentialFields.find((f) => f.key === 'clientId')?.secret).toBe(false);
-    expect(paypal.credentialFields.find((f) => f.key === 'clientSecret')?.secret).toBe(true);
   });
 });

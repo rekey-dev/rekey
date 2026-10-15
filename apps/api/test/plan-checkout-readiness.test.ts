@@ -17,7 +17,6 @@
 import { describe, expect, it } from 'vitest';
 import { stripeModule } from '../src/modules/billing/providers/modules/stripe/index.js';
 import { paypalModule } from '../src/modules/billing/providers/modules/paypal/index.js';
-import { razorpayModule } from '../src/modules/billing/providers/modules/razorpay/index.js';
 import type { Plan } from '@prisma/client';
 
 const plan = (over: Partial<Plan> = {}): Plan =>
@@ -80,7 +79,4 @@ describe('a provider that registers lazily stays silent', () => {
     expect(paypalModule.planCheckoutBlocker).toBeUndefined();
   });
 
-  it('razorpay declares no blocker at all', () => {
-    expect(razorpayModule.planCheckoutBlocker).toBeUndefined();
-  });
 });

@@ -8,13 +8,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
+import type { EndUser } from '@prisma/client';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import type { CheckoutDiscount, CheckoutSessionInput, PricedPlan } from '../src/modules/billing/providers/types.js';
 import { computeDiscount, type CouponRecord } from '../src/modules/coupons/coupon-terms.js';
-import { pricedPlanFixture } from './priced-plan-fixture.js';
+import { pricedPlanFixture, type FixturePlan } from './priced-plan-fixture.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const stripeStub = vi.hoisted(() => ({ coupons: [] as Record<string, unknown>[], sessions: [] as Record<string, unknown>[] }));
 
@@ -66,7 +69,7 @@ function plan(currency: string, amount: number, kind: 'SUBSCRIPTION' | 'CREDIT')
     interval: 'MONTH',
     kind,
     metadata: { stripe: { priceId: 'price_1' } },
-  } as unknown as Plan);
+  } as unknown as FixturePlan);
 }
 
 const FIFTEEN_PERCENT = { discountType: 'PERCENT', basisPoints: 1500, currencies: [], amounts: [] } as unknown as CouponRecord;

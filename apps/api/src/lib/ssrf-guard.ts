@@ -156,6 +156,42 @@ export interface SafeUrlOptions {
   allowPrivate?: boolean;
 }
 
+/**
+ * Security: over plain http the payload (end-user emails, ids, tokens, the
+ * credentials sent with it) crosses the public internet in clear, so a
+ * production deployment sends only over TLS. A deployment that allows private
+ * targets keeps http, for services on its own network.
+ *
+ * Reads `process.env.NODE_ENV` rather than the parsed `env`, as
+ * `lib/brute-force.ts` does, so a test can put one call in production.
+ *
+ * @example
+ * if (isPlainHttp(url) && plainHttpRefused()) throw urlNotHttps('The webhook URL');
+ */
+export function plainHttpRefused(options: SafeUrlOptions = {}): boolean {
+  const allowPrivate = options.allowPrivate ?? env.WEBHOOK_ALLOW_PRIVATE_TARGETS;
+  return process.env.NODE_ENV === 'production' && !allowPrivate;
+}
+
+/** True for an `http:` URL. False for https, another scheme, or text that is not a URL. */
+export function isPlainHttp(rawUrl: string): boolean {
+  try {
+    return new URL(rawUrl).protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/** The refusal for a plain http URL where `plainHttpRefused` holds. `what` names the URL, as in "The webhook URL". */
+export function urlNotHttps(what: string): RekeyError {
+  return new RekeyError({
+    statusCode: 400,
+    code: 'URL_NOT_HTTPS',
+    message: `${what} is plain http, and this deployment sends data only over https.`,
+    fix: 'Use an https:// URL. A self-hosted deployment that sends to http services on its own private network sets WEBHOOK_ALLOW_PRIVATE_TARGETS=true.',
+  });
+}
+
 function blocked(reason: string): RekeyError {
   return new RekeyError({
     statusCode: 400,
@@ -232,6 +268,7 @@ export async function assertSafeUrlResolved(
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw blocked(`scheme "${parsed.protocol}" is not allowed; use http(s).`);
   }
+  if (parsed.protocol === 'http:' && plainHttpRefused(options)) throw urlNotHttps('This URL');
   const allowPrivate = options.allowPrivate ?? env.WEBHOOK_ALLOW_PRIVATE_TARGETS;
   if (allowPrivate) return [];
 

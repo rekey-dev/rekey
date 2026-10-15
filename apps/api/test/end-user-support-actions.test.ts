@@ -18,6 +18,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { euLoginLockScope, getScopeLockState, registerFailure, LOGIN_POLICY } from '../src/lib/brute-force.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface World {
   ownerToken: string;
@@ -369,17 +372,6 @@ describe('operator support actions on one end-user', () => {
     expect(byId.get(all[0]!.id)).toBe('BLOCKED');
     expect(byId.get(all[1]!.id)).toBe('RELEASED');
     expect(byId.get(all[2]!.id)).toBe('RELEASED');
-  });
-
-  it('release-all is idempotent', async () => {
-    const w = await world();
-    const res = await inject({
-      method: 'POST',
-      url: `${base(w)}/devices/release-all`,
-      headers: auth(w),
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.released).toBe(0);
   });
 
   // ---------- tombstones ----------

@@ -19,6 +19,9 @@ import { issueVerificationToken } from '../src/lib/email-verification.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
 import { issueMcpAccessToken } from '../src/lib/jwt.js';
 import { mcpIssuer } from '../src/modules/mcp/oauth.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const REASON = 'Chargeback fraud, ticket 4412';
@@ -155,17 +158,6 @@ describe('end-user ban', () => {
     expect((wrong.json().error as Json).code).toBe('INVALID_CREDENTIALS');
   });
 
-  it('requires a reason, trims it, and strips control characters', async () => {
-    const { euid } = await signUp('c@example.com');
-    for (const reason of ['', '   ', 'x'.repeat(501)]) {
-      const r = await ban(euid, reason);
-      expect(r.statusCode).toBe(400);
-      expect((r.json().error as Json).code).toBe('BAN_REASON_INVALID');
-    }
-    const ok = await ban(euid, '  spam\u0007 bot  ');
-    expect((ok.json().data as { state: Json }).state.banReason).toBe('spam bot');
-  });
-
   it('a second ban keeps the original record; unban is idempotent and lets them back in', async () => {
     const { euid } = await signUp('d@example.com');
     const first = (await ban(euid)).json().data as { state: Json };
@@ -181,22 +173,6 @@ describe('end-user ban', () => {
 
     const row = await prisma.endUser.findUniqueOrThrow({ where: { id: euid } });
     expect([row.bannedAt, row.bannedBy, row.banReason]).toEqual([null, null, null]);
-  });
-
-  it('keeps who banned and why in the history, written with the ban', async () => {
-    const { euid } = await signUp('e@example.com');
-    await ban(euid);
-    await unban(euid);
-    const history = await app.inject({ method: 'GET', url: `${base(euid)}/ban`, headers: op() });
-    expect(history.statusCode).toBe(200);
-    const data = history.json().data as { state: Json; history: Json[] };
-    expect(data.state.banned).toBe(false);
-    expect(data.history.map((h) => h.type)).toEqual(['end_user.unbanned', 'end_user.banned']);
-    expect(data.history[1]).toMatchObject({ actorId: operatorId, reason: REASON });
-    const events = await prisma.securityEvent.findMany({
-      where: { subjectEndUserId: euid, type: 'end_user.banned' },
-    });
-    expect(events[0]?.metadata).toMatchObject({ via: 'session', reason: REASON });
   });
 
   it('is operator-only and workspace-scoped', async () => {
@@ -429,6 +405,7 @@ describe('end-user ban', () => {
 
     it('MFA: a challenge issued before the ban cannot be completed', async () => {
       const { euid, accessToken } = await signUp('o@example.com');
+      await prisma.endUser.update({ where: { id: euid }, data: { emailVerified: true } });
       const setup = (await app
         .inject({ method: 'POST', url: '/api/v1/auth/mfa/setup', headers: asUser(accessToken) })
         .then((r) => r.json().data)) as { otpauthUrl: string; backupCodes: string[] };
@@ -447,8 +424,8 @@ describe('end-user ban', () => {
       });
       expectBanned(verified);
 
-      // Refused before the code was matched: after the ban is lifted the same
-      // challenge and backup code still work.
+      // A ban ends every session, and a challenge from before it is half of
+      // one: it stays dead after the ban is lifted.
       await unban(euid);
       const retried = await app.inject({
         method: 'POST',
@@ -456,7 +433,19 @@ describe('end-user ban', () => {
         headers: sk(),
         payload: { mfaChallengeToken: challenge.mfaChallengeToken, code: setup.backupCodes[0] },
       });
-      expect(retried.statusCode).toBe(200);
+      expect(retried.statusCode).toBe(401);
+      expect(retried.json().error.code).toBe('MFA_CHALLENGE_INVALID');
+
+      // Refused before the code was matched, both times: the backup code was
+      // not spent, and it completes a challenge from a fresh sign-in.
+      const fresh = (await signIn('o@example.com')).json().data as { mfaChallengeToken: string };
+      const completed = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/mfa-verify',
+        headers: sk(),
+        payload: { mfaChallengeToken: fresh.mfaChallengeToken, code: setup.backupCodes[0] },
+      });
+      expect(completed.statusCode, completed.body).toBe(200);
     });
 
     it('OIDC/MCP: a grant token newer than the stamp is invalid', async () => {

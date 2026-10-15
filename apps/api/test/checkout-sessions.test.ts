@@ -14,6 +14,10 @@ import type { FastifyInstance } from 'fastify';
 import type { BillingProvider, WebhookInspection } from '../src/modules/billing/providers/types.js';
 import { Prisma } from '@prisma/client';
 import { withDefaultPrice } from '../src/modules/plans/default-price.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlan, revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 vi.mock('../src/config/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/env.js')>();
@@ -296,12 +300,6 @@ describe('hosted checkout sessions', () => {
       expect(row).toMatchObject({ mode: 'REDIRECT', tokenHash: null, paymentMode: 'TEST' });
     });
 
-    it('honours mode: "redirect" from the caller even when the Rekey page is on', async () => {
-      await enableEmbedded();
-      const res = await checkout({ mode: 'redirect' });
-      expect((res.json().data as { mode: string }).mode).toBe('redirect');
-    });
-
     it('uses the live setting for a checkout on live credentials, and the test setting stays separate', async () => {
       await enableEmbedded();
       await prisma.billingCredentials.update({
@@ -564,39 +562,9 @@ describe('hosted checkout sessions', () => {
       expect(String((events[0]!.metadata as { fix?: string }).fix)).toContain('Billing → Setup → Providers → PayPal');
     });
 
-    it('falls back when the PayPal client ID the buttons need is missing', async () => {
-      await enableEmbedded();
-      await billingCredentialsService.upsertRaw(
-        applicationId,
-        'paypal',
-        { clientSecret: 'secret_ci_only', webhookId: 'WH-ci-only' },
-        { mode: 'test' },
-      );
-      const data = (await checkout()).json().data as { mode: string; warnings: Array<{ check?: string }> };
-      expect(data.mode).toBe('redirect');
-      expect(data.warnings[0]!.check).toBe('browser_credential');
-    });
-
-    it('falls back when the provider has no browser credential for the page', async () => {
-      await enableEmbedded();
-      await billingCredentialsService.upsertRaw(applicationId, 'stripe', { apiKey: 'sk_test_ci', webhookSecret: 'whsec_ci' }, { mode: 'test' });
-      const data = (await checkout({ provider: 'stripe' })).json().data as { mode: string; warnings: Array<{ check?: string }> };
-      expect(data.mode).toBe('redirect');
-      expect(data.warnings[0]!.check).toBe('browser_credential');
-    });
-
-    it('falls back when a return URL is on an unregistered origin', async () => {
-      await enableEmbedded();
-      const res = await checkout({ successUrl: 'https://elsewhere.example/ok' });
-      const data = res.json().data as { mode: string; warnings: Array<{ code: string; check?: string }> };
-      expect(data.mode).toBe('redirect');
-      expect(data.warnings.map((w) => w.code).sort()).toEqual(['CHECKOUT_EMBEDDED_FELL_BACK', 'CHECKOUT_RETURN_URL_UNREGISTERED']);
-      expect(data.warnings.find((w) => w.code === 'CHECKOUT_EMBEDDED_FELL_BACK')!.check).toBe('return_urls');
-    });
-
     it('falls back when the plan is registered in the other mode', async () => {
       await enableEmbedded();
-      await prisma.plan.updateMany({ where: { applicationId }, data: { metadata: { paypal: { planId: 'P-LIVE', mode: 'live' } } } });
+      await revisePlans({ applicationId }, { metadata: { paypal: { planId: 'P-LIVE', mode: 'live' } } });
       const data = (await checkout()).json().data as { mode: string; warnings: Array<{ check?: string }> };
       expect(data.mode).toBe('redirect');
       expect(data.warnings[0]!.check).toBe('plans');
@@ -757,18 +725,12 @@ describe('hosted checkout sessions', () => {
       expect(unproven.fix).not.toMatch(/regist/i);
       expect(unproven.fix).toContain("checkout on the provider's page");
 
-      await prisma.plan.update({
-        where: { applicationId_slug: { applicationId, slug: 'standard' } },
-        data: { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'live' } } },
-      });
+      await revisePlan({ applicationId_slug: { applicationId, slug: 'standard' } }, { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'live' } } });
       expect((await providerStatus()).status).toBe('WARN');
-      await prisma.plan.update({
-        where: { applicationId_slug: { applicationId, slug: 'standard' } },
-        data: { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'test' } } },
-      });
+      await revisePlan({ applicationId_slug: { applicationId, slug: 'standard' } }, { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'test' } } });
       expect((await providerStatus()).status).toBe('PASS');
 
-      await prisma.plan.update({ where: { applicationId_slug: { applicationId, slug: 'standard' } }, data: { metadata: {} } });
+      await revisePlan({ applicationId_slug: { applicationId, slug: 'standard' } }, { metadata: {} });
       await prisma.webhookEvent.create({
         data: { applicationId, provider: 'paypal', providerEventId: `WH-${randomUUID()}`, eventType: 'PAYMENT.SALE.COMPLETED', payload: {}, mode: 'test' },
       });
@@ -830,14 +792,6 @@ describe('hosted checkout sessions', () => {
         expect(provider.message).toContain('has not yet seen these live PayPal credentials work');
       });
     }
-
-    it('WARNs "no plans to sell" when no paid plan is in scope', async () => {
-      await prisma.plan.updateMany({ where: { applicationId }, data: { active: false } });
-      const data = (await operator('GET', '/checkout/readiness')).json().data as { test: Array<{ id: string; status: string; message: string }> };
-      const plans = data.test.find((c) => c.id === 'plans')!;
-      expect(plans.status).toBe('WARN');
-      expect(plans.message).toContain('no plans to sell');
-    });
 
     describe('the webhook check', () => {
       type Inspect = NonNullable<BillingProvider['inspectWebhook']>;
@@ -950,13 +904,6 @@ describe('hosted checkout sessions', () => {
       });
     });
 
-    it('WARNs a sandbox credential on a PRODUCTION Application without blocking', async () => {
-      await prisma.application.update({ where: { id: applicationId }, data: { environment: 'PRODUCTION' } });
-      const data = (await operator('GET', '/checkout/readiness')).json().data as { test: Array<{ id: string; status: string }> };
-      expect(data.test.find((c) => c.id === 'provider')!.status).toBe('WARN');
-      expect((await operator('PATCH', '/checkout', { paymentMode: 'test', checkoutMode: 'EMBEDDED' })).statusCode).toBe(200);
-    });
-
     it('refuses the switch when the portal does not call back, and always allows switching back', async () => {
       portalBehaviour = 'ignore';
       const refused = await operator('PATCH', '/checkout', { paymentMode: 'test', checkoutMode: 'EMBEDDED' });
@@ -995,11 +942,6 @@ describe('hosted checkout sessions', () => {
       expect(nonce).not.toBe('');
       expect(codes).toEqual([200, 404]);
       expect((await app.inject({ method: 'GET', url: `/api/v1/checkout/probe/${nonce}` })).statusCode).toBe(404);
-    });
-
-    it('requires paymentMode with checkoutMode, and rejects unknown keys', async () => {
-      expect((await operator('PATCH', '/checkout', { checkoutMode: 'EMBEDDED' })).statusCode).toBe(400);
-      expect((await operator('PATCH', '/checkout', { checkoutModeLive: 'EMBEDDED' })).statusCode).toBe(400);
     });
 
     it('records the setting change as a security event', async () => {

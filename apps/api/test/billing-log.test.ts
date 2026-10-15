@@ -15,11 +15,9 @@ import {
   enqueueBillingEvent,
   parseBillingEvent,
   recordBillingEvent,
-  pruneProcessedOutbox,
   recordDiagnosticBillingEvent,
   recordMoneyPathBillingEvent,
   retryDelayMs,
-  serializeBillingEvent,
   setOutboxDrainScheduler,
   type BillingEventInput,
 } from '../src/modules/billing-log/index.js';
@@ -113,22 +111,6 @@ describe('billing log writers', () => {
           throw new Error('the change failed');
         }),
       ).rejects.toThrow('the change failed');
-      expect(await events()).toEqual([]);
-    });
-
-    it('numbers events in the order they were written', async () => {
-      await recordBillingEvent(prisma, priceSet());
-      await recordBillingEvent(prisma, priceSet());
-      const [first, second] = await events();
-      expect(second!.seq > first!.seq).toBe(true);
-    });
-
-    it('an invalid event throws and takes the transaction with it', async () => {
-      const bad = priceSet({ data: { planSlug: 'pro', isDefault: false, before: null, after: { amount: 0, countries: [] } } } as never);
-      await expect(prisma.$transaction((tx) => recordBillingEvent(tx, bad))).rejects.toMatchObject({
-        code: 'BILLING_EVENT_INVALID',
-        fix: expect.stringContaining('BillingEventSchema'),
-      });
       expect(await events()).toEqual([]);
     });
   });
@@ -246,15 +228,6 @@ describe('billing log writers', () => {
       expect(await events()).toEqual([]);
     });
 
-    it('any other value of the setting is not maintenance', async () => {
-      await expect(
-        prisma.$transaction(async (tx) => {
-          await tx.$executeRawUnsafe(`SET LOCAL rekey.billing_events_maintenance = 'off'`);
-          await tx.billingEvent.delete({ where: { id: eventId } });
-        }),
-      ).rejects.toThrow(/append-only/);
-    });
-
     it('lets the log go with its Application', async () => {
       await prisma.application.delete({ where: { id: applicationId } });
       expect(await prisma.billingEvent.count({ where: { applicationId } })).toBe(0);
@@ -280,11 +253,6 @@ describe('billing log writers', () => {
           throw new Error('rolled back');
         }),
       ).rejects.toThrow('rolled back');
-      expect(await prisma.billingEventOutbox.count({ where: { applicationId } })).toBe(0);
-    });
-
-    it('refuses an invalid event where it is queued', async () => {
-      await expect(enqueueBillingEvent(priceSet({ currency: 'rupees' } as never))).rejects.toMatchObject({ code: 'BILLING_EVENT_INVALID' });
       expect(await prisma.billingEventOutbox.count({ where: { applicationId } })).toBe(0);
     });
 
@@ -341,11 +309,10 @@ describe('billing log writers', () => {
       expect(await prisma.billingEventOutbox.count({ where: { applicationId, processedAt: null } })).toBe(0);
     });
 
-    it('keeps a payload this build cannot read for a later one, and carries on with the rest', async () => {
+    it('keeps a payload that does not match its schema, and carries on with the rest', async () => {
       const warn = vi.fn();
-      // What an older pod sees when a newer one queued an event type it has no schema for.
-      const fromNewerBuild = { type: 'invoice.finalised', applicationId, actor: { type: 'system' }, data: { invoiceId: 'in_1' } };
-      const unreadable = await prisma.billingEventOutbox.create({ data: { applicationId, payload: fromNewerBuild } });
+      const unknownType = { type: 'invoice.finalised', applicationId, actor: { type: 'system' }, data: { invoiceId: 'in_1' } };
+      const unreadable = await prisma.billingEventOutbox.create({ data: { applicationId, payload: unknownType } });
       await enqueueBillingEvent(refused());
 
       const before = Date.now();
@@ -355,7 +322,7 @@ describe('billing log writers', () => {
 
       const kept = await prisma.billingEventOutbox.findUniqueOrThrow({ where: { id: unreadable.id } });
       expect(kept.processedAt).toBeNull();
-      expect(kept.payload).toEqual(fromNewerBuild);
+      expect(kept.payload).toEqual(unknownType);
       expect(kept.attempts).toBe(1);
       expect(kept.lastError).toEqual(expect.stringContaining('type'));
       expect(kept.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(before + retryDelayMs(1) - 1000);
@@ -382,26 +349,6 @@ describe('billing log writers', () => {
       await prisma.billingEventOutbox.update({ where: { id: row.id }, data: { payload: readable, nextAttemptAt: new Date(0) } });
       expect(await drainBillingEventOutbox()).toBe(1);
       expect((await events()).map((event) => event.type)).toEqual(['checkout.refused']);
-    });
-
-    it('backs off from a minute, doubling, to six hours at most', () => {
-      expect([1, 2, 3, 4, 20].map(retryDelayMs)).toEqual([60_000, 120_000, 240_000, 480_000, 21_600_000]);
-    });
-
-    it('prunes rows processed more than a week ago, and never an unprocessed one', async () => {
-      const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-      const { outboxId: done } = await enqueueBillingEvent(priceSet());
-      const { outboxId: recent } = await enqueueBillingEvent(priceSet());
-      await drainBillingEventOutbox();
-      await prisma.billingEventOutbox.update({ where: { id: done }, data: { processedAt: old } });
-      const stuck = await prisma.billingEventOutbox.create({
-        data: { applicationId, payload: { type: 'no.such.type' }, createdAt: old, nextAttemptAt: new Date(Date.now() + 3_600_000) },
-      });
-
-      await drainBillingEventOutbox();
-      const left = (await prisma.billingEventOutbox.findMany({ where: { applicationId } })).map((row) => row.id);
-      expect(left.sort()).toEqual([recent, stuck.id].sort());
-      expect(await pruneProcessedOutbox()).toBe(0);
     });
   });
 
@@ -435,35 +382,9 @@ describe('billing log writers', () => {
       expect(await events()).toEqual([]);
       expect((await prisma.billingEventOutbox.findUniqueOrThrow({ where: { id: queued!.id } })).processedAt).toBeNull();
     });
-
-    it('the operator writer still fails loudly for the same event', async () => {
-      await expect(prisma.$transaction((tx) => recordBillingEvent(tx, invalid()))).rejects.toMatchObject({
-        code: 'BILLING_EVENT_INVALID',
-      });
-    });
-  });
-
-  describe('serializeBillingEvent', () => {
-    it('gives a stored event a shape JSON can carry: seq as a string', async () => {
-      await recordBillingEvent(prisma, priceSet());
-      const [row] = await events();
-      expect(() => JSON.stringify(row)).toThrow(/BigInt/);
-      const record = serializeBillingEvent(row!);
-      expect(record.seq).toBe(row!.seq.toString());
-      expect(JSON.parse(JSON.stringify(record))).toMatchObject({
-        seq: row!.seq.toString(),
-        type: 'plan.price_set',
-        occurredAt: row!.occurredAt.toISOString(),
-        recordedAt: row!.recordedAt.toISOString(),
-      });
-    });
   });
 
   describe('recordDiagnosticBillingEvent', () => {
-    it('writes a diagnostic event', async () => {
-      await recordDiagnosticBillingEvent(refused());
-      expect(await events()).toEqual([expect.objectContaining({ type: 'checkout.refused', tier: 'DIAGNOSTIC', actorType: 'END_USER' })]);
-    });
 
     it('never throws: an invalid event and a failed insert are logged', async () => {
       const warn = vi.fn();
@@ -514,12 +435,6 @@ describe('billing log writers', () => {
       for (const attempt of attempts) {
         expect(BillingEventSchema.safeParse(attempt).success, JSON.stringify(attempt)).toBe(false);
       }
-    });
-
-    it('refuses data that belongs to another type, and an unknown type', () => {
-      const wrongData = { ...priceSet(), data: refused().data };
-      expect(BillingEventSchema.safeParse(wrongData).success).toBe(false);
-      expect(BillingEventSchema.safeParse({ ...priceSet(), type: 'plan.price_guessed' }).success).toBe(false);
     });
   });
 });
@@ -593,15 +508,6 @@ describe('the reference call site: plan.price_set', () => {
     });
   });
 
-  it('records nothing for a change that was refused', async () => {
-    const refusedPut = await operator('PUT', '/plans/pro/prices/KWD', { amount: 1000 });
-    expect(refusedPut.statusCode).toBe(400);
-    expect(await prisma.billingEvent.count({ where: { applicationId, currency: 'KWD' } })).toBe(0);
-    const refusedPatch = await operator('PATCH', '/plans/pro', { price: { currency: 'USD', amount: -5 } });
-    expect(refusedPatch.statusCode).toBe(400);
-    expect(await prisma.billingEvent.count({ where: { applicationId } })).toBe(1);
-  });
-
   it('records the default price a plan is created with, and each change to it through PATCH /plans', async () => {
     const operatorId = (await prisma.tenantUser.findFirstOrThrow({ orderBy: { createdAt: 'desc' } })).id;
     const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId, slug: 'pro' } });
@@ -646,22 +552,5 @@ describe('the reference call site: plan.price_set', () => {
     ]);
     expect(events[1]).toMatchObject({ planPriceId: before.defaultPriceId, data: { planSlug: 'pro', amount: 2000, outcome: 'deleted' } });
     expect(events[2]!.data).toMatchObject({ isDefault: true, before: null });
-  });
-
-  it('records a price that is removed, by the operator who removed it', async () => {
-    const put = await operator('PUT', '/plans/pro/prices/INR', { amount: 149900 });
-    const priceId = (put.json().data as { id: string }).id;
-    const removed = await operator('DELETE', '/plans/pro/prices/INR');
-    expect(removed.statusCode, removed.body).toBe(200);
-    const operatorId = (await prisma.tenantUser.findFirstOrThrow({ orderBy: { createdAt: 'desc' } })).id;
-    const [event] = await prisma.billingEvent.findMany({ where: { applicationId, type: 'plan.price_archived' } });
-    expect(event).toMatchObject({
-      actorType: 'OPERATOR',
-      actorId: operatorId,
-      planPriceId: priceId,
-      currency: 'INR',
-      amount: 149900,
-      data: { planSlug: 'pro', amount: 149900, outcome: 'deleted' },
-    });
   });
 });

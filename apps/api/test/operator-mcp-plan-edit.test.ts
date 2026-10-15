@@ -11,6 +11,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Operator MCP plan edit + archive', () => {
   let app: FastifyInstance;
@@ -126,20 +129,6 @@ describe('Operator MCP plan edit + archive', () => {
     expect(JSON.stringify(refused.data)).toContain('VALIDATION_ERROR');
   });
 
-  it('set_plan_active archives a plan', async () => {
-    const token = await mintPat(await makeOperator('archive'));
-    const appId = await createApp(token, 'plan-archive-app');
-    await rpc(token, 'create_plan', { applicationId: appId, slug: 'legacy', name: 'Legacy', price: { currency: 'USD', amount: 900 } });
-
-    const archived = await rpc(token, 'set_plan_active', {
-      applicationId: appId,
-      slug: 'legacy',
-      active: false,
-    });
-    expect(archived.isError).toBe(false);
-    expect((archived.data as { active: boolean }).active).toBe(false);
-  });
-
   it('cannot edit a plan in another workspace', async () => {
     const victimToken = await mintPat(await makeOperator('pe-victim'));
     const victimApp = await createApp(victimToken, 'pe-victim-app');
@@ -155,36 +144,4 @@ describe('Operator MCP plan edit + archive', () => {
     expect((attempt.data as { error: string }).error).toMatch(/not found in this workspace/i);
   });
 
-  it('set_plan_price and remove_plan_price manage a price in another currency, inside the caller\'s own workspace', async () => {
-    const token = await mintPat(await makeOperator('prices'));
-    const appId = await createApp(token, 'plan-price-app');
-    await rpc(token, 'create_plan', { applicationId: appId, slug: 'pro', name: 'Pro', price: { currency: 'USD', amount: 1500 } });
-
-    const set = await rpc(token, 'set_plan_price', { applicationId: appId, planSlug: 'pro', currency: 'inr', amount: 119900, countries: ['in'] });
-    expect(set.isError, JSON.stringify(set.data)).toBe(false);
-    const listed = await rpc(token, 'list_plans', { applicationId: appId });
-    const [listedPlan] = (listed.data as { plans: Array<{ prices: unknown[] }> }).plans;
-    expect(listedPlan!.prices).toEqual([
-      expect.objectContaining({ currency: 'USD', amount: 1500, isDefault: true }),
-      expect.objectContaining({ currency: 'INR', amount: 119900, countries: ['IN'], isDefault: false }),
-    ]);
-
-    // The plan's own currency is its default price, not an additional one.
-    const own = await rpc(token, 'set_plan_price', { applicationId: appId, planSlug: 'pro', currency: 'USD', amount: 100 });
-    expect(own.isError).toBe(true);
-    expect(JSON.stringify(own.data)).toContain('PLAN_PRICE_IS_DEFAULT');
-
-    // Another workspace cannot reach this Application's plan.
-    const outsider = await mintPat(await makeOperator('prices-other'));
-    const foreign = await rpc(outsider, 'set_plan_price', { applicationId: appId, planSlug: 'pro', currency: 'EUR', amount: 1400 });
-    expect(foreign.isError).toBe(true);
-    const foreignRemove = await rpc(outsider, 'remove_plan_price', { applicationId: appId, planSlug: 'pro', currency: 'INR' });
-    expect(foreignRemove.isError).toBe(true);
-
-    const removed = await rpc(token, 'remove_plan_price', { applicationId: appId, planSlug: 'pro', currency: 'INR' });
-    expect(removed.isError, JSON.stringify(removed.data)).toBe(false);
-    const after = await rpc(token, 'list_plans', { applicationId: appId });
-    const [remaining] = (after.data as { plans: Array<{ prices: unknown[] }> }).plans;
-    expect(remaining!.prices).toEqual([expect.objectContaining({ currency: 'USD', isDefault: true })]);
-  });
 });

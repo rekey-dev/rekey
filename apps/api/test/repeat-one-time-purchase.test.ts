@@ -39,6 +39,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const WEBHOOK_SECRET = 'whsec_ci_only';

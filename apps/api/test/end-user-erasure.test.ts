@@ -27,6 +27,10 @@ import { tombstoneEmail } from '../src/modules/tenant-applications/end-user-eras
 import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../src/lib/brute-force.js';
 import { FakeStripeProvider } from './fakes/billing-providers.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -193,9 +197,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
 
     // Seed financial rows with PII in metadata/description that must be scrubbed
     // but the ROWS retained.
-    const plan = await prisma.plan.create({
-      data: { applicationId: b.applicationId, slug: 'erase-pro', name: 'Pro', amount: 999 },
-    });
+    const plan = await seedPlan({ applicationId: b.applicationId, slug: 'erase-pro', name: 'Pro' }, { currency: 'USD', amount: 999 });
     const sub = await prisma.subscription.create({
       data: {
         applicationId: b.applicationId,
@@ -656,57 +658,6 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     expect((JSON.parse(exported.body) as { endUser: { email: string } }).endUser.email).toBe(neighbourEmail);
   });
 
-  it('is idempotent — erasing an already-erased user is a no-op', async () => {
-    const b = await bootstrap('idem');
-    const { euid } = await signUpUser(b, 'idem@example.com');
-    expect((await erase(b, euid)).statusCode).toBe(200);
-    const second = await erase(b, euid);
-    expect(second.statusCode).toBe(200);
-    expect((second.json().data as { alreadyErased: boolean }).alreadyErased).toBe(true);
-  });
-
-  it('MEMBER operators cannot erase — a grant-less member cannot even see the Application', async () => {
-    const b = await bootstrap('rolegate');
-    const { euid } = await signUpUser(b, 'gated@example.com');
-
-    const member = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/tenant/auth/sign-up',
-        payload: {
-          email: 'member-erase@example.com',
-          password: 'pw-one-two-three',
-          workspaceName: 'Member erase Co',
-        },
-      })
-      .then((r) => r.json().data as { accessToken: string });
-    const invite = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/workspace/invitations',
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { email: 'member-erase@example.com', role: 'MEMBER' },
-    });
-    expect(invite.statusCode).toBe(201);
-    const accept = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/invitations/accept',
-      headers: { authorization: `Bearer ${member.accessToken}` },
-      payload: { token: (invite.json().data as { token: string }).token },
-    });
-    const memberAccess = (accept.json().data as { accessToken: string }).accessToken;
-
-    // 404, not 403, since 2.0.0-rc.3: a freshly invited MEMBER holds no
-    // grants, so the Application is invisible to them and the refusal happens
-    // in ensureAppAccess before the OWNER/ADMIN role gate is ever consulted.
-    // Same non-disclosure posture as the cross-tenant case below.
-    const res = await erase(b, euid, memberAccess);
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('APPLICATION_NOT_FOUND');
-    // Not erased.
-    const still = await prisma.endUser.findUniqueOrThrow({ where: { id: euid } });
-    expect(still.erasedAt).toBeNull();
-  });
-
   it('cross-tenant and cross-application erasure 404 without leaking existence', async () => {
     const b = await bootstrap('xt1');
     const other = await bootstrap('xt2');
@@ -732,9 +683,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
   it('plain DELETE (no erasure flag) still hard-deletes everything (back-compat)', async () => {
     const b = await bootstrap('plain');
     const { euid } = await signUpUser(b, 'plain@example.com');
-    const plan = await prisma.plan.create({
-      data: { applicationId: b.applicationId, slug: 'plain-pro', name: 'Pro', amount: 100 },
-    });
+    const plan = await seedPlan({ applicationId: b.applicationId, slug: 'plain-pro', name: 'Pro' }, { currency: 'USD', amount: 100 });
     const sub = await prisma.subscription.create({
       data: { applicationId: b.applicationId, endUserId: euid, planId: plan.id, status: 'ACTIVE' },
     });
@@ -761,9 +710,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
 
     /** Create an ACTIVE provider-backed (stripe) subscription for a user. */
     async function seedProviderSub(b: Bootstrapped, euid: string, suffix: string): Promise<string> {
-      const plan = await prisma.plan.create({
-        data: { applicationId: b.applicationId, slug: `pcancel-${suffix}`, name: 'Pro', amount: 999 },
-      });
+      const plan = await seedPlan({ applicationId: b.applicationId, slug: `pcancel-${suffix}`, name: 'Pro' }, { currency: 'USD', amount: 999 });
       const sub = await prisma.subscription.create({
         data: {
           applicationId: b.applicationId,

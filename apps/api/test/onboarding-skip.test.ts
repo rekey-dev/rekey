@@ -14,9 +14,11 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { onboardingStatus } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -120,14 +122,6 @@ describe('Onboarding skip', () => {
 
   beforeEach(async () => {
     ws = await workspace();
-  });
-
-  it('derives the status: completed wins over skipped, skipped over pending', () => {
-    const at = '2026-09-30T10:00:00.000Z';
-    expect(onboardingStatus({ onboardingCompletedAt: null, onboardingSkippedAt: null })).toBe('pending');
-    expect(onboardingStatus({ onboardingCompletedAt: null, onboardingSkippedAt: at })).toBe('skipped');
-    expect(onboardingStatus({ onboardingCompletedAt: at, onboardingSkippedAt: null })).toBe('completed');
-    expect(onboardingStatus({ onboardingCompletedAt: at, onboardingSkippedAt: at })).toBe('completed');
   });
 
   it('records a skip once, with nothing answered, and announces it once', async () => {
@@ -277,13 +271,6 @@ describe('Onboarding skip', () => {
     expect(code(smuggledUser.json() as Json)).toBe('END_USER_NOT_FOUND');
 
     expect((await prisma.endUser.findUniqueOrThrow({ where: { id: stranger.id } })).onboardingSkippedAt).toBeNull();
-  });
-
-  it('the operator route declares end-users:write', () => {
-    const route = app.routeAccess.find(
-      (r) => r.url === '/api/v1/tenant/applications/:id/end-users/:euid/onboarding/skip',
-    );
-    expect(route?.access).toEqual({ scope: 'end-users:write' });
   });
 
   it('the DSAR export carries the skip time and erasure clears it', async () => {

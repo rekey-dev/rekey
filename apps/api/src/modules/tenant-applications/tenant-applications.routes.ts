@@ -65,6 +65,7 @@ import { listApiRequests } from '../../lib/request-log.js';
 import type { LicenseKind } from '@prisma/client';
 import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema, ONBOARDING_STATUSES, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema, onboardingStatus } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
+import { isPlainHttp, plainHttpRefused, urlNotHttps } from '../../lib/ssrf-guard.js';
 import { hashPassword } from '../../lib/passwords.js';
 import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
@@ -85,7 +86,7 @@ import {
   appAccessScope,
   redactApplicationForBilling,
   withBillingDefaults,
-  stripApplicationSecrets,
+  applicationPayload,
   type AppAccess,
 } from '../../lib/app-access.js';
 import {
@@ -126,6 +127,8 @@ import { endUserListOrder } from '../end-users/list-order.js';
 import { mayReadRawIps, operatorIpProjection } from '../../lib/ip-mask.js';
 import { END_USER_LIST_FILTER_JSON_SCHEMA, EndUserListFilterQuery, endUserListWhere } from '../end-users/list-filters.js';
 import { billingEventsForExport, eraseEndUserFromBillingLog } from '../billing-log/index.js';
+import { authEmailCappedError } from '../email/auth-email-caps.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 const ImportRunBody = z.object({
   provider: z.string().min(1).max(40),
@@ -875,7 +878,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             const scopes = effectiveApplicationScopes(ctx, level);
             const summary = summaryFor(a.id);
             const row = { ...withBillingDefaults(a), access: { level, scopes: [...scopes].sort() }, ...(summary && { summary }) };
-            return stripApplicationSecrets(
+            return applicationPayload(
               scopes.has('auth-config:read') ? row : redactApplicationForBilling(row),
             );
           }),
@@ -1045,7 +1048,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // role, so a member restricted by scopes gets the same redaction.
       return {
         success: true,
-        data: stripApplicationSecrets(
+        data: applicationPayload(
           access.scopes.has('auth-config:read') ? data : redactApplicationForBilling(data),
         ),
       };
@@ -1272,7 +1275,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       });
       return reply
         .status(201)
-        .send({ success: true, data: stripApplicationSecrets(withBillingDefaults(created)) });
+        .send({ success: true, data: applicationPayload(created) });
     },
   );
 
@@ -1335,7 +1338,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         metadata: { slug: promoted.slug },
       });
-      return { success: true, data: stripApplicationSecrets(withBillingDefaults(promoted)) };
+      return { success: true, data: applicationPayload(promoted) };
     },
   );
 
@@ -1401,7 +1404,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         // incident; the security log records THAT one was given, not what it said.
         metadata: { slug: disabled.slug, reasonGiven: body.reason !== undefined },
       });
-      return { success: true, data: stripApplicationSecrets(withBillingDefaults(disabled)) };
+      return { success: true, data: applicationPayload(disabled) };
     },
   );
 
@@ -1453,7 +1456,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...requestContext(req),
         metadata: { slug: enabled.slug },
       });
-      return { success: true, data: stripApplicationSecrets(withBillingDefaults(enabled)) };
+      return { success: true, data: applicationPayload(enabled) };
     },
   );
 
@@ -1669,6 +1672,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const updated = await applicationsService.updateAuthConfig({
         applicationId: id,
         patch: body,
+        actorTenantUserId: req.tenantUser!.id,
       });
       // Audit the auth-config mutation, security-sensitive (toggles auth
       // methods, signup, MFA policy, and the token signing alg). Record the
@@ -1944,6 +1948,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         name: body.name,
         scopes: body.scopes,
         revealsEndUserIps: mayReadRawIps(minter.role, minter.scopes),
+        createdByTenantUserId: req.tenantUser!.id,
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });
       void recordSecurityEvent({
@@ -2839,6 +2844,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'store billing provider credentials');
       const params = z
         .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
@@ -2951,6 +2957,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'change billing provider credentials');
       const params = z
         .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
@@ -3107,6 +3114,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'register a billing provider webhook');
       const params = z
         .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
@@ -3770,13 +3778,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'Confirmation, clientSecret is never echoed back.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR: `provider` unsupported, or a field failed schema validation.',
+            400:
+              'VALIDATION_ERROR: `provider` unsupported, or a field failed schema validation; or ' +
+              'URL_NOT_HTTPS: `issuerUrl` is plain http and the deployment runs in production ' +
+              'without `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`.',
             ...APP_WRITE_ERRORS,
           }),
         },
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'configure a sign-in provider');
       const SUPPORTED = ['google', 'github', 'microsoft', 'discord', 'gitlab', 'slack', 'oidc'] as const;
       const { id, provider } = z
         .object({ id: z.string().min(1), provider: z.enum(SUPPORTED) })
@@ -3794,6 +3806,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // OIDC requires an issuerUrl; everything else ignores it.
       if (provider === 'oidc' && !body.issuerUrl) {
         throw new Error('OIDC provider requires `issuerUrl`.');
+      }
+      // Security: the client secret and every sign-in code are posted to the
+      // endpoints this issuer names, so it gets the same https rule as a webhook.
+      if (body.issuerUrl !== undefined && isPlainHttp(body.issuerUrl) && plainHttpRefused()) {
+        throw urlNotHttps('The issuer URL');
       }
       await oauthService.setProviderConfig({
         applicationId: id,
@@ -5565,6 +5582,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'send an end user a verification email');
       const params = z.object({ id: z.string().min(1), euid: z.string().min(1) }).parse(req.params);
       const body = SupportReasonBody.parse(req.body ?? {});
       await ensureAppAccess(req, params.id, 'write');
@@ -5582,11 +5600,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         });
       }
       const application = await prisma.application.findUniqueOrThrow({ where: { id: params.id } });
-      const result = await deliverVerificationEmail({
+      const { cappedForSeconds, ...result } = await deliverVerificationEmail({
         application,
         endUser: { id: full.id, email: full.email },
         requireResolvableUrl: true,
+        allowance: 'reserve',
       });
+      if (cappedForSeconds !== undefined) throw authEmailCappedError(cappedForSeconds);
 
       void recordSecurityEvent({
         type: 'end_user.verification_resent',
@@ -5662,6 +5682,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'send an end user a password reset email');
       const params = z.object({ id: z.string().min(1), euid: z.string().min(1) }).parse(req.params);
       const body = SupportReasonRequiredBody.parse(req.body ?? {});
       await ensureAppAccess(req, params.id, 'write');
@@ -6973,6 +6994,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'rotate the publishable key');
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = RotatePublicKeyBody.parse(req.body ?? {});
@@ -7332,6 +7354,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'change which origins and addresses may call this Application');
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = AccessConfigBody.parse(req.body ?? {});
@@ -7358,9 +7381,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
   );
 
-  // The request schemas the canonical routes and the deprecated `/end-user-roles`
-  // aliases BOTH use. Shared rather than copied: the alias first shipped without
-  // them, and the difference was not cosmetic. Fastify's route-level check
+  // The request schemas of the role routes. Declared once, because a route
+  // without them is not a cosmetic difference. Fastify's route-level check
   // answers BAD_REQUEST, the handler's zod parse answers VALIDATION_ERROR, so
   // the same malformed request got two different error codes depending on which
   // path the caller used. An alias that behaves differently from the route it
@@ -7401,9 +7423,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // `/:id/organization-roles` below, feeding OrganizationMembership.role.
   // Conflating the two is the mistake this naming exists to prevent.
   //
-  // Served at `/:id/application-roles`. The former `/:id/end-user-roles` path
-  // is still registered (hidden, undocumented) so existing panel builds and
-  // scripts keep working; see the alias block after the DELETE handler. The
+  // Served at `/:id/application-roles`. The
   // END_USER_ROLE_* error codes are deliberately UNCHANGED. They are wire
   // contract that integrators match on, and renaming them would break callers
   // for no gain beyond tidiness.
@@ -7617,84 +7637,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         name: params.name,
         ...(q.reassignTo !== undefined && { reassignTo: q.reassignTo }),
       });
-      return { success: true, data: result };
-    },
-  );
-
-  // ---------- Deprecated path alias: /end-user-roles ----------
-  //
-  // The catalog moved to `/:id/application-roles` when it was renamed to say
-  // which axis it governs. These four re-register the old URLs against the same
-  // service so nothing that already shipped breaks. Hidden from the OpenAPI doc
-  // so the surface reads as one path, not two.
-
-  const legacyRoleAlias = { hide: true, tags: ['Tenant · End-users'] } as const;
-
-  app.get('/:id/end-user-roles', { config: { access: { scope: 'organizations:read' } }, schema: legacyRoleAlias }, async (req) => {
-    const { id } = AppParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    return { success: true, data: await applicationRolesService.list(id) };
-  });
-
-  app.post(
-    '/:id/end-user-roles',
-    { config: { access: { scope: 'organizations:write' } }, schema: { ...legacyRoleAlias, body: APPLICATION_ROLE_CREATE_BODY } },
-    async (req, reply) => {
-    const { id } = AppParam.parse(req.params);
-    await ensureAppAccess(req, id, 'write');
-    const body = z
-      .object({
-        name: z.string().min(2).max(40),
-        description: z.string().max(240).optional(),
-        isDefault: z.boolean().optional(),
-      })
-      .strict()
-      .parse(req.body);
-    const created = await applicationRolesService.create({
-      applicationId: id,
-      name: body.name,
-      ...(body.description !== undefined && { description: body.description }),
-      ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
-    });
-    return reply.status(201).send({ success: true, data: created });
-    },
-  );
-
-  app.patch(
-    '/:id/end-user-roles/:name',
-    { config: { access: { scope: 'organizations:write' } }, schema: { ...legacyRoleAlias, body: APPLICATION_ROLE_PATCH_BODY } },
-    async (req) => {
-    const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
-    await ensureAppAccess(req, params.id, 'write');
-    const body = z
-      .object({
-        description: z.string().max(240).nullable().optional(),
-        isDefault: z.boolean().optional(),
-      })
-      .strict()
-      .parse(req.body ?? {});
-    const updated = await applicationRolesService.update({
-      applicationId: params.id,
-      name: params.name,
-      ...(body.description !== undefined && { description: body.description }),
-      ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
-    });
-      return { success: true, data: updated };
-    },
-  );
-
-  app.delete(
-    '/:id/end-user-roles/:name',
-    { config: { access: { scope: 'organizations:write' } }, schema: { ...legacyRoleAlias, querystring: APPLICATION_ROLE_DELETE_QUERY } },
-    async (req) => {
-    const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
-    const q = z.object({ reassignTo: z.string().min(1).max(40).optional() }).parse(req.query);
-    await ensureAppAccess(req, params.id, 'write');
-    const result = await applicationRolesService.remove({
-      applicationId: params.id,
-      name: params.name,
-      ...(q.reassignTo !== undefined && { reassignTo: q.reassignTo }),
-    });
       return { success: true, data: result };
     },
   );

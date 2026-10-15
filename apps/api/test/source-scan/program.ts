@@ -21,7 +21,17 @@ export interface SourceProgram {
   at(node: ts.Node): string;
 }
 
-let cached: SourceProgram | null = null;
+/**
+ * Parsing and binding `src` takes several seconds, so it is done once per
+ * run: the unplanted program is kept on `globalThis`, which outlives the
+ * module reset between test files, and a planted program reuses its parsed
+ * files through `oldProgram`. Nothing here is written to after it is built.
+ */
+interface Built {
+  scan: SourceProgram;
+  program: ts.Program;
+}
+const shared = globalThis as typeof globalThis & { __rekeySourceScanProgram?: Built };
 
 /**
  * The program, built once per test worker. `planted` adds source files that
@@ -33,7 +43,7 @@ let cached: SourceProgram | null = null;
  * const withBug = sourceProgram({ 'src/modules/billing/__planted__.ts': 'export const x = 1;' });
  */
 export function sourceProgram(planted?: Readonly<Record<string, string>>): SourceProgram {
-  if (planted === undefined && cached !== null) return cached;
+  if (planted === undefined && shared.__rekeySourceScanProgram) return shared.__rekeySourceScanProgram.scan;
   const configPath = path.join(API_ROOT, 'tsconfig.json');
   const config = ts.readConfigFile(configPath, (file) => ts.sys.readFile(file));
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, API_ROOT);
@@ -49,7 +59,12 @@ export function sourceProgram(planted?: Readonly<Record<string, string>>): Sourc
   };
   const exists = host.fileExists.bind(host);
   host.fileExists = (fileName) => extra.has(path.normalize(fileName)) || exists(fileName);
-  const program = ts.createProgram({ rootNames: [...parsed.fileNames, ...extra.keys()], options, host });
+  const program = ts.createProgram({
+    rootNames: [...parsed.fileNames, ...extra.keys()],
+    options,
+    host,
+    ...(shared.__rekeySourceScanProgram && { oldProgram: shared.__rekeySourceScanProgram.program }),
+  });
   const relative = (file: ts.SourceFile): string => path.relative(API_ROOT, file.fileName).split(path.sep).join('/');
   const files = program
     .getSourceFiles()
@@ -65,7 +80,7 @@ export function sourceProgram(planted?: Readonly<Record<string, string>>): Sourc
       return `${relative(file)}:${line + 1}`;
     },
   };
-  if (planted === undefined) cached = built;
+  if (planted === undefined) shared.__rekeySourceScanProgram = { scan: built, program };
   return built;
 }
 

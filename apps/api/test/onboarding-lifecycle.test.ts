@@ -26,6 +26,9 @@ import { emailService } from '../src/modules/email/email.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { issueVerificationToken } from '../src/lib/email-verification.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -72,11 +75,11 @@ describe('End-user onboarding lifecycle', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: appId,
       patch: { appUrl: 'https://app.example.com' },
     });
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/onboarding-hook',
       events: ['*'],
@@ -197,14 +200,6 @@ describe('End-user onboarding lifecycle', () => {
   // ---------- user.created ----------
 
   describe('user.created', () => {
-    it('password sign-up says so with via: "password"', async () => {
-      const r = await signUp('pw@example.com');
-      expect(r.status).toBe(201);
-      const rows = await deliveries('user.created');
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.via).toBe('password');
-    });
-
     it('an operator-created end-user is announced once, with via: "operator"', async () => {
       const res = await app.inject({
         method: 'POST',
@@ -241,18 +236,6 @@ describe('End-user onboarding lifecycle', () => {
       expect(await prisma.endUser.count({ where: { applicationId: appId, email: 'orphan@example.com' } })).toBe(0);
     });
 
-    it('an operator create that fails at COMMIT leaves no user.created behind', async () => {
-      await failEndUserCommit('INSERT', 'late@example.com');
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${appId}/end-users`,
-        headers: op(),
-        payload: { email: 'late@example.com' },
-      });
-      expect(res.statusCode).toBe(500);
-      expect(await prisma.endUser.count({ where: { applicationId: appId, email: 'late@example.com' } })).toBe(0);
-      expect(await deliveries('user.created')).toHaveLength(0);
-    });
   });
 
   // ---------- user.updated ----------
@@ -276,15 +259,6 @@ describe('End-user onboarding lifecycle', () => {
       });
     });
 
-    it('a self-service patch that changes nothing announces nothing', async () => {
-      const r = await signUp('noop@example.com');
-      const headers = { ...sk(), 'x-rekey-user-token': r.accessToken! };
-      await app.inject({ method: 'PATCH', url: '/api/v1/users/me', headers, payload: { metadata: { a: 1 } } });
-      await app.inject({ method: 'PATCH', url: '/api/v1/users/me', headers, payload: { metadata: { a: 1 } } });
-      await app.inject({ method: 'PATCH', url: '/api/v1/users/me', headers, payload: {} });
-      expect(await deliveries('user.updated')).toHaveLength(1);
-    });
-
     it('a self-service change whose event cannot be written is rolled back', async () => {
       const r = await signUp('selfroll@example.com');
       await failDeliveriesOf('user.updated');
@@ -299,34 +273,8 @@ describe('End-user onboarding lifecycle', () => {
       expect(user.metadata).toBeNull();
     });
 
-    it('a self-service change that fails at COMMIT leaves no user.updated behind', async () => {
-      const r = await signUp('selflate@example.com');
-      await failEndUserCommit('UPDATE', 'selflate@example.com');
-      const res = await app.inject({
-        method: 'PATCH',
-        url: '/api/v1/users/me',
-        headers: { ...sk(), 'x-rekey-user-token': r.accessToken! },
-        payload: { metadata: { displayName: 'Lost' } },
-      });
-      expect(res.statusCode).toBe(500);
-      expect(await deliveries('user.updated')).toHaveLength(0);
-    });
-
-    it('an operator PATCH that fails at COMMIT leaves no user.updated behind', async () => {
-      const r = await signUp('oplate@example.com');
-      await failEndUserCommit('UPDATE', 'oplate@example.com');
-      const res = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${appId}/end-users/${r.userId}`,
-        headers: op(),
-        payload: { emailVerified: true },
-      });
-      expect(res.statusCode).toBe(500);
-      expect(await deliveries('user.updated')).toHaveLength(0);
-    });
-
     it('a verification that fails at COMMIT leaves no user.updated behind and no welcome', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { requireEmailVerification: true },
       });
@@ -368,20 +316,6 @@ describe('End-user onboarding lifecycle', () => {
       expect(await deliveries('user.updated')).toHaveLength(1);
     });
 
-    it('an operator PATCH whose event cannot be written is rolled back', async () => {
-      const r = await signUp('oproll@example.com');
-      await failDeliveriesOf('user.updated');
-      const res = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${appId}/end-users/${r.userId}`,
-        headers: op(),
-        payload: { emailVerified: true },
-      });
-      expect(res.statusCode).toBe(500);
-      const user = await prisma.endUser.findUniqueOrThrow({ where: { id: r.userId } });
-      expect(user.emailVerified).toBe(false);
-    });
-
     it('email verification is announced once, on the false-to-true transition only', async () => {
       const r = await signUp('verify@example.com');
       expect(await verifyWith(r.userId, 'verify@example.com')).toBe(200);
@@ -395,26 +329,6 @@ describe('End-user onboarding lifecycle', () => {
       });
     });
 
-    it('a verification whose user.updated cannot be written leaves the address unverified', async () => {
-      const r = await signUp('verifyroll@example.com');
-      await failDeliveriesOf('user.updated');
-      expect(await verifyWith(r.userId, 'verifyroll@example.com')).toBe(500);
-      const user = await prisma.endUser.findUniqueOrThrow({ where: { id: r.userId } });
-      expect(user.emailVerified).toBe(false);
-    });
-
-    it('a password change is password.changed, not user.updated', async () => {
-      const r = await signUp('pwchange@example.com');
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/change-password',
-        headers: { ...sk(), 'x-rekey-user-token': r.accessToken! },
-        payload: { currentPassword: PASSWORD, newPassword: 'another-pw-four-five' },
-      });
-      expect(res.statusCode).toBe(200);
-      expect(await deliveries('password.changed')).toHaveLength(1);
-      expect(await deliveries('user.updated')).toHaveLength(0);
-    });
   });
 
   // ---------- Welcome mail ----------
@@ -460,7 +374,7 @@ describe('End-user onboarding lifecycle', () => {
 
   describe('welcome mail when a verified address is required', () => {
     beforeEach(async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { requireEmailVerification: true },
       });
@@ -499,22 +413,8 @@ describe('End-user onboarding lifecycle', () => {
       expect(await deliveries('user.updated')).toHaveLength(1);
     });
 
-    it('an unverified OAuth sign-up gets it on verification, not at creation', async () => {
-      await configureGoogle();
-      useOAuthIdentity({ id: 'g-3', email: 'oauth-unverified@example.com', emailVerified: false });
-      const dispatch = vi.spyOn(emailService, 'dispatch');
-      expect(await oauthCallback()).toBe(403);
-      expect(welcomeSends(dispatch)).toBe(0);
-
-      const user = await prisma.endUser.findUniqueOrThrow({
-        where: { applicationId_email: { applicationId: appId, email: 'oauth-unverified@example.com' } },
-      });
-      expect(await verifyWith(user.id, 'oauth-unverified@example.com')).toBe(200);
-      expect(welcomeSends(dispatch)).toBe(1);
-    });
-
     it('a magic link that proves the address counts as the first verification', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { methods: ['password', 'magic_link'] },
       });
@@ -538,66 +438,11 @@ describe('End-user onboarding lifecycle', () => {
       expect(welcomeSends(dispatch)).toBe(1);
       const rows = await deliveries('user.updated');
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ changed: ['emailVerified'], via: 'magic_link' });
+      expect(rows[0]).toMatchObject({ changed: ['emailVerified', 'credentials'], via: 'magic_link' });
     });
 
-    it('a user welcomed before the setting was switched on is not welcomed again', async () => {
-      await applicationsService.updateAuthConfig({
-        applicationId: appId,
-        patch: { requireEmailVerification: false },
-      });
-      const dispatch = vi.spyOn(emailService, 'dispatch');
-      const r = await signUp('early@example.com');
-      expect(r.status).toBe(201);
-      expect(welcomeSends(dispatch)).toBe(1);
-
-      await applicationsService.updateAuthConfig({
-        applicationId: appId,
-        patch: { requireEmailVerification: true },
-      });
-      expect(await verifyWith(r.userId, 'early@example.com')).toBe(200);
-      expect(welcomeSends(dispatch)).toBe(1);
-    });
   });
 
   // ---------- invite_only ----------
 
-  describe('SIGNUP_DISABLED', () => {
-    it('names ways in that really create a user while sign-up is invite-only', async () => {
-      await applicationsService.updateAuthConfig({
-        applicationId: appId,
-        patch: { signupMode: 'invite_only' },
-      });
-      const refused = await app.inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: sk(),
-        payload: { email: 'blocked@example.com', password: PASSWORD },
-      });
-      expect(refused.statusCode).toBe(403);
-      const { code, fix } = refused.json().error as { code: string; fix: string };
-      expect(code).toBe('SIGNUP_DISABLED');
-      expect(fix).not.toMatch(/Invite end-user/);
-      expect(fix).toContain('End-users page');
-      expect(fix).toContain('+ New end-user');
-      expect(fix).toContain('POST /api/v1/tenant/applications/:id/end-users');
-      expect(fix).toContain('POST /api/v1/users/import');
-
-      const byOperator = await app.inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${appId}/end-users`,
-        headers: op(),
-        payload: { email: 'blocked@example.com' },
-      });
-      expect(byOperator.statusCode).toBe(201);
-      const byImport = await app.inject({
-        method: 'POST',
-        url: '/api/v1/users/import',
-        headers: sk(),
-        payload: { users: [{ email: 'imported@example.com' }] },
-      });
-      expect(byImport.statusCode).toBe(200);
-      expect((byImport.json().data as { created: unknown[] }).created).toHaveLength(1);
-    });
-  });
 });

@@ -101,7 +101,7 @@ export default async function SupportModePage({
     ).catch(unlessBusy(() => null)),
     getSupportCapabilities(id),
   ]);
-  const canWrite = hasScope(application.access?.scopes ?? null, 'end-users:write');
+  const canWrite = hasScope(application.access.scopes, 'end-users:write');
   const showingClosed = status === 'closed';
 
   return (

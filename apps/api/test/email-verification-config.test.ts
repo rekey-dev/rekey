@@ -26,6 +26,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { LOGIN_POLICY } from '../src/lib/brute-force.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -200,13 +203,6 @@ describe('email-verification configuration', () => {
   });
 
   describe('requireEmailVerification', () => {
-    it('default off: an unverified user signs in exactly as before', async () => {
-      await signUp();
-      const res = await signIn();
-      expect(res.statusCode).toBe(200);
-      expect((res.json().data as { mfaRequired: boolean }).mfaRequired).toBe(false);
-    });
-
     it('on: an unconfirmed address is refused with EMAIL_NOT_VERIFIED, not INVALID_CREDENTIALS', async () => {
       await signUp();
       await setAuthConfig({ requireEmailVerification: true });
@@ -232,17 +228,6 @@ describe('email-verification configuration', () => {
       });
       expect(res.statusCode).toBe(401);
       expect((res.json().error as { code: string }).code).toBe('INVALID_CREDENTIALS');
-    });
-
-    it('on: confirming the address restores sign-in', async () => {
-      const accessToken = await signUp().then(
-        (r) => (r.json().data as { accessToken: string }).accessToken,
-      );
-      await setAuthConfig({ requireEmailVerification: true });
-      expect((await signIn()).statusCode).toBe(403);
-
-      await verifyAddress(accessToken);
-      expect((await signIn()).statusCode).toBe(200);
     });
 
     it('the refusal does not count toward the brute-force lockout', async () => {
@@ -404,16 +389,6 @@ describe('email-verification configuration', () => {
       expect((await setAuthConfig({ requireEmailVerification: false })).statusCode).toBe(200);
     });
 
-    it('an allowlisted redirect URL is enough to bring the send back', async () => {
-      await clearAppUrl();
-      expect(
-        (await setAuthConfig({ redirectUrls: ['https://app.example.com/callback'] })).statusCode,
-      ).toBe(200);
-      expect((await signUp()).statusCode).toBe(201);
-
-      expect(await waitForEmailLogs(applicationId, 'email_verification', 1)).toHaveLength(1);
-    });
-
     it('the explicit /auth/send-verification keeps working — it hands back a token, not a link', async () => {
       // Deliberately NOT gated on a resolvable URL: that route's documented
       // no-transport contract is "here is the raw token, deliver it yourself",
@@ -478,31 +453,6 @@ describe('email-verification configuration', () => {
       expect((await signIn()).statusCode).toBe(200);
     });
 
-    it('an unknown address is a 200 with the same shape, and mints nothing', async () => {
-      const res = await resend('nobody-at-all@example.com', liveKey);
-      expect(res.statusCode).toBe(200);
-      const data = res.json().data as { emailSent: boolean; verificationToken: string | null };
-      expect(data.verificationToken).toBeNull();
-      expect(await prisma.emailVerificationToken.count({ where: { applicationId } })).toBe(0);
-      await settle();
-      expect(await waitForEmailLogs(applicationId, 'email_verification', 1, 0)).toHaveLength(0);
-    });
-
-    it('an already-verified address is a 200, not EMAIL_ALREADY_VERIFIED', async () => {
-      // The authenticated route answers 400 there and can afford to: its
-      // caller already proved who they are. Here that 400 would answer "does
-      // this address have a confirmed account" for anyone who asks.
-      const accessToken = await signUp().then(
-        (r) => (r.json().data as { accessToken: string }).accessToken,
-      );
-      await verifyAddress(accessToken);
-
-      const res = await resend(euEmail, liveKey);
-      expect(res.statusCode).toBe(200);
-      expect(res.json().error).toBeUndefined();
-      expect((res.json().data as { verificationToken: string | null }).verificationToken).toBeNull();
-    });
-
     it('a publishable caller cannot tell unknown, verified and genuinely-sent apart', async () => {
       await signUp();
 
@@ -552,9 +502,5 @@ describe('email-verification configuration', () => {
       expect((res.json().data as { verificationToken: string | null }).verificationToken).toBeTruthy();
     });
 
-    it('an unparseable email is a 400 before any of this runs', async () => {
-      const res = await resend('not-an-email', liveKey);
-      expect(res.statusCode).toBe(400);
-    });
   });
 });

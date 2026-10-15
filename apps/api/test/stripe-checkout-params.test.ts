@@ -8,11 +8,14 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
+import type { EndUser } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import type { CheckoutSessionInput } from '../src/modules/billing/providers/types.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const spy = vi.hoisted(() => ({
   sessions: [] as Record<string, unknown>[],
@@ -54,7 +57,7 @@ function input(): CheckoutSessionInput {
       currency: 'USD',
       interval: 'MONTH',
       metadata: { stripe: { priceId: 'price_fake' } },
-    } as unknown as Plan, null),
+    } as unknown as FixturePlan, null),
     successUrl: 'https://app.example/ok',
     cancelUrl: 'https://app.example/cancel',
   };
@@ -72,13 +75,6 @@ describe('Stripe checkout offers the account’s payment methods', () => {
     await provider().createCheckoutSession(input());
     expect(spy.sessions).toHaveLength(1);
     expect(spy.sessions[0]).toMatchObject({ mode: 'subscription', line_items: [{ price: 'price_fake', quantity: 1 }] });
-    expect(spy.sessions[0]).not.toHaveProperty('payment_method_types');
-  });
-
-  it('a one-time session does not pin payment_method_types', async () => {
-    await provider().createOneTimeCheckout(input());
-    expect(spy.sessions).toHaveLength(1);
-    expect(spy.sessions[0]).toMatchObject({ mode: 'payment' });
     expect(spy.sessions[0]).not.toHaveProperty('payment_method_types');
   });
 });

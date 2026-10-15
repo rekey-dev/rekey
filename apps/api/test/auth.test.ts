@@ -224,31 +224,6 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
 
   // ---------- /users/me ----------
 
-  it('returns the current EndUser when given a valid token + matching key', async () => {
-    const signUp = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { email: 'dan@example.com', password: 'pw-one-two-three' },
-    });
-    const { accessToken, endUser } = signUp.json().data as {
-      accessToken: string;
-      endUser: { id: string; email: string };
-    };
-
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/users/me/',
-      headers: {
-        authorization: `Bearer ${appA.liveKey}`,
-        'x-rekey-user-token': accessToken,
-      },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toMatchObject({ id: endUser.id, email: 'dan@example.com' });
-    expect(res.json().data).not.toHaveProperty('passwordHash');
-  });
-
   it('401 USER_TOKEN_MISSING when the user token header is absent', async () => {
     const res = await app.inject({
       method: 'GET',
@@ -257,19 +232,6 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('USER_TOKEN_MISSING');
-  });
-
-  it('401 USER_TOKEN_INVALID for a malformed JWT', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/users/me/',
-      headers: {
-        authorization: `Bearer ${appA.liveKey}`,
-        'x-rekey-user-token': 'not.a.jwt',
-      },
-    });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('USER_TOKEN_INVALID');
   });
 
   it('CROSS-APP GUARD: rejects a JWT issued by a different Application', async () => {

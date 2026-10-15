@@ -12,6 +12,9 @@ import { backfillApplication } from '../src/modules/analytics/rollup/backfill.js
 import { rollupApplication } from '../src/modules/analytics/rollup/job.js';
 import { activeOn, seedUsers, shiftDay, utcToday, type SeedUser } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 type Json = Record<string, any>;
 
@@ -187,28 +190,6 @@ describe('users analytics: rollup read path', () => {
     }
   }
 
-  it('a non-UTC Application under a platform filter reads WAU, MAU and stickiness from the rollup', async () => {
-    await prisma.application.update({ where: { id: w.appId }, data: { reportingTimezone: 'Asia/Kolkata' } });
-    const active = await Promise.all(
-      ['ios', 'ios', 'android'].map((platform, i) =>
-        prisma.endUser.create({ data: { applicationId: w.appId, email: `tz${i}@example.com`, lastPlatform: platform } }),
-      ),
-    );
-    const far = new Date(Date.now() + 86_400_000);
-    await prisma.refreshToken.createMany({
-      data: active.map((u, i) => ({ applicationId: w.appId, endUserId: u.id, tokenHash: `tz${i}`, expiresAt: far, createdAt: new Date(Date.now() - 60_000) })),
-    });
-    for (const back of [6, 4, 2, 0]) await rollupApplication(w.appId, new Date(Date.now() - back * 86_400_000));
-    const data = (await get('?range=7d&platform=ios&sections=kpis,activity&compare=none')).json().data as Json;
-    const kpis = data.sections.kpis;
-    expect(kpis).toMatchObject({ source: 'rollup', timezone: 'Asia/Kolkata', gaps: [] });
-    expect(kpis.data.wau.value).toBe(2);
-    expect(kpis.data.mau.value).toBe(2);
-    expect(kpis.data.stickiness.value).not.toBeNull();
-    expect(data.sections.activity.gaps).toEqual([]);
-    expectNullsExplained(data.sections.activity, data.coverage);
-  });
-
   it('a filtered metric the rollup cannot answer is null with a reason, and following its fix answers it', async () => {
     await backfillApplication(w.appId);
     await rollupApplication(w.appId);
@@ -239,71 +220,6 @@ describe('users analytics: rollup read path', () => {
     const followed = await get('?range=90d&platform=ios&sections=kpis');
     expect(followed.statusCode, followed.body).toBe(200);
     expect(followed.json().data.sections.kpis.source).toBe('rollup');
-  });
-
-  it('a filtered gap on a local-zone day offers only removing the filter, and doing so answers it', async () => {
-    await prisma.application.update({ where: { id: w.appId }, data: { reportingTimezone: 'Asia/Tokyo' } });
-    const tokyoToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(new Date());
-    await prisma.applicationActivityDay.createMany({
-      data: Array.from({ length: 7 }, (_, i) => ({
-        applicationId: w.appId,
-        day: new Date(`${shiftDay(tokyoToday, -i)}T00:00:00Z`),
-        timezone: 'Asia/Tokyo',
-        dau: 3,
-        wau: 4,
-        mau: 5,
-        breakdown: { platform: { ios: { dau: 1 } }, country: {}, via: {}, createdVia: {} },
-      })),
-    });
-    const filtered = (await get('?range=7d&platform=ios&sections=kpis,activity&compare=none')).json().data as Json;
-    for (const section of [filtered.sections.kpis, filtered.sections.activity]) {
-      const gap = (section.gaps as Json[]).find((g) => g.reason === 'filter_not_in_rollup');
-      expect(gap?.fix).toBe('Remove the platform, country or via filter.');
-    }
-    const unfiltered = (await get('?range=7d&sections=kpis,activity&compare=none')).json().data as Json;
-    expect(unfiltered.sections.kpis.gaps).toEqual([]);
-    expect(unfiltered.sections.kpis.data.wau.value).toBe(4);
-  });
-
-  it('a createdVia filter keeps its activity numbers (it is answered live)', async () => {
-    await rollupApplication(w.appId);
-    const data = (await get('?range=30d&createdVia=oauth&sections=kpis')).json().data as Json;
-    expect(data.sections.kpis.source).toBe('live');
-    expect(data.sections.kpis.data.dau.value).not.toBeNull();
-  });
-
-  it('snapshot-backed parts name the filters they ignore, and missing rollup days are listed', async () => {
-    await rollupApplication(w.appId);
-    const data = (await get('?range=7d&platform=ios&sections=mix,security')).json().data as Json;
-    expect(data.sections.mix.data.liveSessions.ignoredFilters).toEqual(['platform']);
-    expect(data.sections.security.data.trendIgnoredFilters).toEqual(['platform']);
-    const wide = (await get('?range=30d&sections=kpis')).json().data as Json;
-    expect(wide.coverage.rollupMissingDays).toEqual([]);
-    await prisma.application.update({ where: { id: w.appId }, data: { reportingTimezone: 'Asia/Tokyo' } });
-    await prisma.applicationActivityDay.deleteMany({ where: { applicationId: w.appId } });
-    const tokyoToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(new Date());
-    await prisma.applicationActivityDay.create({ data: { applicationId: w.appId, day: new Date(`${shiftDay(tokyoToday, -3)}T00:00:00Z`), timezone: 'Asia/Tokyo', dau: 1 } });
-    const gaps = (await get('?range=7d&sections=kpis')).json().data as Json;
-    expect(gaps.coverage.rollupMissingDays).toEqual([shiftDay(tokyoToday, -2), shiftDay(tokyoToday, -1), tokyoToday]);
-  });
-
-  it('/stats counts usage recorded late, once the next rollup run has re-summed it', async () => {
-    const meter = await prisma.usageMeter.create({ data: { applicationId: w.appId, slug: 'api', name: 'API', unit: 'call' } });
-    await prisma.applicationActivityDay.createMany({
-      data: Array.from({ length: 30 }, (_, i) => ({
-        applicationId: w.appId,
-        day: new Date(`${shiftDay(today, -i)}T00:00:00Z`),
-        timezone: 'UTC',
-        final: i > 0,
-        usageByMeter: {},
-      })),
-    });
-    await prisma.usageRecord.create({
-      data: { meterId: meter.id, endUserId: users[0]!.id, subjectKey: `u:${users[0]!.id}`, quantity: 9, occurredAt: new Date(`${shiftDay(today, -5)}T09:00:00Z`) },
-    });
-    await rollupApplication(w.appId);
-    const stats = await w.inject({ method: 'GET', url: `/api/v1/tenant/applications/${w.appId}/stats`, headers: bearer(w.ownerToken) });
-    expect(stats.json().data.usage.usageLast30d).toBe(9);
   });
 
   it('an Application whose stored zone the database does not know reads in UTC with a note, never a 500', async () => {

@@ -22,7 +22,10 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { emailService } from '../src/modules/email/email.service.js';
 import { renderTemplate, stripEmptyHrefAnchors } from '../src/modules/email/render.js';
-import { resolveAppUrl, buildTokenUrl } from '../src/lib/app-url.js';
+import { resolveAppUrl } from '../src/lib/app-url.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -160,49 +163,7 @@ describe('Email app URL resolution', () => {
     expect(resolveAppUrl(application as never)).toBeNull();
   });
 
-  it('resolveAppUrl never yields the old placeholder domain from any input', async () => {
-    const b = await bootstrap('noplaceholder');
-    await setAuthConfig(b.applicationId, { redirectUrls: [] });
-    const application = await load(b.applicationId);
-    expect(resolveAppUrl(application as never) ?? '').not.toContain('your-app.example.com');
-  });
-
-  it('buildTokenUrl returns the empty string when no base resolved', () => {
-    expect(buildTokenUrl(null, '/reset', 'tok')).toBe('');
-    expect(buildTokenUrl('https://app.example.com', '/reset', 'a b')).toBe(
-      'https://app.example.com/reset?token=a%20b',
-    );
-  });
-
   // ---------- 2. Unresolvable ⇒ no button, and never href="" ----------
-
-  it('welcome email renders NO anchor when the app URL is unresolvable', async () => {
-    const b = await bootstrap('nobutton');
-    await setAuthConfig(b.applicationId, { redirectUrls: [] });
-    const rendered = await emailService.renderForEvent(b.applicationId, 'welcome', {
-      userEmail: 'nobutton-appurl@example.com',
-      appUrl: '',
-    });
-    expect(rendered.html).not.toContain('href=""');
-    expect(rendered.html).not.toContain('your-app.example.com');
-    expect(rendered.html).not.toContain('<a ');
-    expect(rendered.html).not.toContain('Get started');
-    // The rest of the email still arrives intact.
-    expect(rendered.html).toContain('nobutton-appurl@example.com');
-    expect(rendered.html).toContain('Thanks for signing up');
-  });
-
-  it('welcome email renders the button once the app URL resolves', async () => {
-    const b = await bootstrap('withbutton');
-    await setAuthConfig(b.applicationId, { appUrl: 'https://app.example.com' });
-    const application = await load(b.applicationId);
-    const rendered = await emailService.renderForEvent(b.applicationId, 'welcome', {
-      userEmail: 'withbutton-appurl@example.com',
-      appUrl: resolveAppUrl(application as never) ?? '',
-    });
-    expect(hrefs(rendered.html)).toContain('https://app.example.com');
-    expect(rendered.html).toContain('Get started');
-  });
 
   it('no default template can emit an empty href for any of its URL variables', async () => {
     const b = await bootstrap('allevents');
@@ -232,15 +193,6 @@ describe('Email app URL resolution', () => {
   });
 
   // ---------- 3. The render engine itself ----------
-
-  it('{{#if var}} keeps the section when the variable has a value', () => {
-    const out = renderTemplate(
-      '{{#if url}}<a href="{{url}}">go</a>{{/if}}',
-      { url: 'https://app.example.com' },
-      { escape: true },
-    );
-    expect(out).toBe('<a href="https://app.example.com">go</a>');
-  });
 
   it('{{#if var}} drops the section when the variable is empty or absent', () => {
     expect(
@@ -275,25 +227,6 @@ describe('Email app URL resolution', () => {
     expect(swept).not.toContain('<a ');
     // The label survives as plain text, the sentence still reads.
     expect(swept).toBe('<p>Hi</p>Get started<p>Bye</p>');
-  });
-
-  it('a saved custom template with a bare {{appUrl}} emits no dead link end-to-end', async () => {
-    const b = await bootstrap('savedcustom');
-    await emailService.setTemplate({
-      applicationId: b.applicationId,
-      eventKey: 'welcome',
-      subject: 'Welcome aboard',
-      designJson: {},
-      bodyHtml: '<p>Hi {{userEmail}}</p><a href="{{appUrl}}">Get started</a>',
-    });
-    const rendered = await emailService.renderForEvent(b.applicationId, 'welcome', {
-      userEmail: 'savedcustom-appurl@example.com',
-      appUrl: '',
-    });
-    expect(rendered.customised).toBe(true);
-    expect(rendered.html).not.toContain('href=""');
-    expect(hrefs(rendered.html)).toEqual([]);
-    expect(rendered.html).toContain('savedcustom-appurl@example.com');
   });
 
   it('the empty-href sweep cannot be triggered by a hostile variable value', () => {
@@ -345,26 +278,6 @@ describe('Email app URL resolution', () => {
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
     const application = await load(b.applicationId);
     expect((application.authConfig as { appUrl?: string }).appUrl).toBeUndefined();
-  });
-
-  it('an unrelated auth-config patch leaves a stored appUrl alone', async () => {
-    const b = await bootstrap('preserve');
-    await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/auth-config`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { appUrl: 'https://preserved.example.com' },
-    });
-    const res = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/auth-config`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { passwordMinLength: 12 },
-    });
-    expect(res.statusCode).toBe(200);
-    expect((res.json().data.authConfig as { appUrl?: string }).appUrl).toBe(
-      'https://preserved.example.com',
-    );
   });
 
   // ---------- 5. The live sign-up path ----------

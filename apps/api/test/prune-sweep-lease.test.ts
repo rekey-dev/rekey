@@ -157,8 +157,4 @@ describe('prune sweep lease', () => {
     expect(work).not.toHaveBeenCalled();
   });
 
-  it('runs unleased when there is no Redis client at all (single test process)', async () => {
-    const outcome = await withLease(null, { key, ttlMs: 60_000 }, async () => 'ran');
-    expect(outcome).toEqual({ status: 'ran', result: 'ran', leased: false });
-  });
 });

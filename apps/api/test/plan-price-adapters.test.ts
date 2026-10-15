@@ -5,11 +5,14 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan, PlanPrice } from '@prisma/client';
+import type { EndUser, PlanPrice } from '@prisma/client';
 import { hasAnyRegistration, providerRegistration } from '../src/modules/billing/priced-plan.js';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { paymentPurchase, stripePriceIdFor } from '../src/modules/billing/providers/stripe-session-params.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const plan = {
   id: 'plan_1',
@@ -20,7 +23,7 @@ const plan = {
   currency: 'USD',
   interval: 'MONTH',
   metadata: { stripe: { priceId: 'price_usd' }, paypal: { planId: 'P-USD' }, razorpay: { planId: 'plan_usd' }, note: 'x' },
-} as unknown as Plan;
+} as unknown as FixturePlan;
 
 function inrPrice(metadata: Record<string, unknown> = {}): PlanPrice {
   return { id: 'pp_inr', currency: 'INR', amount: 149900, metadata } as unknown as PlanPrice;

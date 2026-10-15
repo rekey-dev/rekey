@@ -16,6 +16,7 @@ import type { Prisma, TenantRefreshToken } from '@prisma/client';
 import { invalidateOperatorAuth } from './operator-auth-cache.js';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
+import { assertBasisHolds, lockOperatorCredentials, type SessionBasis } from './session-basis.js';
 
 const REFRESH_TOKEN_BYTES = 32;
 // OPERATOR_REFRESH_TOKEN_TTL_DAYS (default 30), sliding like the end-user one.
@@ -48,12 +49,21 @@ export interface IssueTenantRefreshTokenOptions {
  * `client` lets a caller that is inside a transaction write the token with
  * its other changes (invitation accept), so the session commits or rolls back
  * with them and no second pool connection is taken mid-transaction.
+ *
+ * `basis` is what the session is issued on the strength of: the row is
+ * written holding the operator's row, and only while that row is still the
+ * one the credential was checked against (lib/session-basis.ts).
  */
 export async function issueTenantRefreshToken(
   tenantUserId: string,
-  options: IssueTenantRefreshTokenOptions = {},
-  client: Prisma.TransactionClient = prisma,
+  options: IssueTenantRefreshTokenOptions,
+  basis: SessionBasis,
+  client?: Prisma.TransactionClient,
 ): Promise<IssuedTenantRefreshToken> {
+  if (!client) {
+    return prisma.$transaction((tx) => issueTenantRefreshToken(tenantUserId, options, basis, tx));
+  }
+  assertBasisHolds(basis, await lockOperatorCredentials(client, tenantUserId));
   const raw = generateRawToken();
   const ua = options.userAgent ? options.userAgent.slice(0, 512) : null;
   const ip = options.ip ? options.ip.slice(0, 64) : null;
@@ -62,6 +72,9 @@ export async function issueTenantRefreshToken(
       tenantUserId,
       tokenHash: hashTenantRefreshToken(raw),
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS),
+      // This process's clock, the one `sessionsInvalidBefore` is written with:
+      // a replay is judged by which side of that stamp the row was created on.
+      createdAt: new Date(),
       userAgent: ua,
       ip,
       activeTenantId: options.activeTenantId ?? null,
@@ -101,6 +114,8 @@ export async function rotateTenantRefreshToken(
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS);
 
   return prisma.$transaction(async (tx) => {
+    // The operator's row first, see rotateRefreshToken (lib/refresh-tokens.ts).
+    await lockOperatorCredentials(tx, presented.tenantUserId);
     const revoked = await tx.tenantRefreshToken.updateMany({
       where: { id: presented.id, revokedAt: null },
       data: { revokedAt: new Date() },
@@ -112,6 +127,7 @@ export async function rotateTenantRefreshToken(
         tenantUserId: presented.tenantUserId,
         tokenHash,
         expiresAt,
+        createdAt: new Date(),
         // Carry forward UA/IP so the operator's session list stays stable.
         userAgent: presented.userAgent,
         ip: presented.ip,
@@ -144,33 +160,51 @@ export async function revokeTenantRefreshToken(raw: string): Promise<void> {
 export async function revokeAllTenantRefreshTokensForUser(
   tenantUserId: string,
 ): Promise<number> {
-  // See TenantUser.sessionsInvalidBefore: the operator's live access tokens,
-  // panel and operator MCP OAuth alike, are refused from this instant, whatever
-  // their lifetime.
-  //
-  // The operator's MCP OAuth refresh tokens are revoked here too. They are a
-  // separate table with their own chain, and until they were included a
-  // password reset or sign-out everywhere left a stolen MCP refresh token
-  // minting hour-long `op_mcp_access` tokens, write scope included. Only this
-  // revoke-everything path reaches them: a single-session revoke leaves every
-  // MCP connection alone, as it does the operator's other panel sessions.
-  // One transaction, so the stamp never lands without the revocations.
-  const now = new Date();
-  const [, panel] = await prisma.$transaction([
-    prisma.tenantUser.updateMany({ where: { id: tenantUserId }, data: { sessionsInvalidBefore: now } }),
-    prisma.tenantRefreshToken.updateMany({
-      where: { tenantUserId, revokedAt: null },
-      data: { revokedAt: now },
-    }),
-    prisma.tenantMcpRefreshToken.updateMany({
-      where: { tenantUserId, revokedAt: null },
-      data: { revokedAt: now },
-    }),
-  ]);
+  const panel = await prisma.$transaction((tx) => revokeEveryOperatorSession(tx, tenantUserId));
   // After the commit, never before: a request that re-reads between an
   // earlier invalidation and the commit would cache the pre-revoke rows.
   invalidateOperatorAuth(tenantUserId);
   // The panel session count, as before: it is what sign-out-everywhere reports.
+  return panel;
+}
+
+/**
+ * Stamp the operator and revoke every panel session and MCP grant, inside the
+ * caller's transaction. Returns the number of panel sessions ended. The
+ * caller drops the operator's cached session after it commits.
+ *
+ * The operator's live access tokens, panel and operator MCP OAuth alike, are
+ * refused from the stamp on, whatever their lifetime. The MCP refresh tokens
+ * are a separate table with their own chain and go here too, or a stolen one
+ * keeps minting hour-long tokens after a password reset. Only this
+ * revoke-everything path reaches them: a single-session revoke leaves every
+ * MCP connection alone.
+ *
+ * Takes the operator's row first, so a sign-in or refresh in flight either
+ * wrote its row before this and loses it here, or looks at the row afterwards
+ * and finds the stamp moved.
+ */
+export async function revokeEveryOperatorSession(
+  tx: Prisma.TransactionClient,
+  tenantUserId: string,
+): Promise<number> {
+  await lockOperatorCredentials(tx, tenantUserId);
+  const now = new Date();
+  await tx.tenantUser.updateMany({ where: { id: tenantUserId }, data: { sessionsInvalidBefore: now } });
+  const panel = await tx.tenantRefreshToken.updateMany({
+    where: { tenantUserId, revokedAt: null },
+    data: { revokedAt: now },
+  });
+  await tx.tenantMcpRefreshToken.updateMany({
+    where: { tenantUserId, revokedAt: null },
+    data: { revokedAt: now },
+  });
+  // And any impersonation the operator has open: its end-user token is a
+  // session of theirs under another name.
+  await tx.impersonationAudit.updateMany({
+    where: { operatorUserId: tenantUserId, endedAt: null },
+    data: { endedAt: now },
+  });
   return panel.count;
 }
 

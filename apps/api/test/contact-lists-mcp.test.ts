@@ -11,6 +11,9 @@ import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { TOOL_SCOPES, allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { contactsHarness, type ContactsWorld } from './contacts-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const tool = (name: string) => allOperatorTools.find((t) => t.name === name)!;
 

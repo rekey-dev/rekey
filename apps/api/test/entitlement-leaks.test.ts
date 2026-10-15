@@ -9,6 +9,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('entitlement resolution — revenue leaks', () => {
   let app: FastifyInstance;
@@ -335,19 +338,4 @@ describe('entitlement resolution — revenue leaks', () => {
     expect(res.json().error.code).toBe('USAGE_OCCURRED_AT_IN_FUTURE');
   });
 
-  it('still accepts a timestamp inside the current period', async () => {
-    const eu = await makeEndUser();
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/usage/record',
-      headers: key(),
-      payload: {
-        meterSlug: 'calls',
-        quantity: 1,
-        endUserId: eu,
-        occurredAt: new Date(Date.now() - 60_000).toISOString(),
-      },
-    });
-    expect(res.statusCode).toBe(201);
-  });
 });

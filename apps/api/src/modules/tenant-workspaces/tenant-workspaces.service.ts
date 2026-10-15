@@ -37,12 +37,15 @@ import {
   issueTenantAccessToken,
 } from '../../lib/tenant-jwt.js';
 import { issueTenantRefreshToken } from '../../lib/tenant-refresh-tokens.js';
+import { operatorSessionEndedMeanwhile } from '../../lib/session-refusals.js';
 import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
 import { env } from '../../config/env.js';
 import { emailService } from '../email/email.service.js';
 import { buildTokenUrl } from '../../lib/app-url.js';
 import { panelBaseUrl } from '../../lib/panel-url.js';
 import { withSavepoint } from '../../lib/savepoint.js';
+import { mayMailUnattended, OPERATOR_EMAIL_SCOPE } from '../email/auth-email-caps.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 /**
  * Deployment policy for CREATING another workspace (`WORKSPACE_CREATION`).
@@ -381,6 +384,9 @@ export const tenantWorkspacesService = {
     invitation: InvitationRow;
   }> {
     ensureCanManage(input.invitedByRole, input.role);
+    // An invitation outlives the inviter's session, and whoever accepts it
+    // keeps their place in the workspace.
+    await assertOperatorVerifiedForCredential(input.invitedById, 'invite someone to the workspace');
 
     const email = input.email.toLowerCase();
     // Block invites to existing members of this workspace, they'd just
@@ -421,30 +427,34 @@ export const tenantWorkspacesService = {
       }),
     ]);
 
-    const outcome = await emailService.dispatchSystem({
-      eventKey: 'workspace_invitation',
-      to: email,
-      tenantId: input.tenantId,
-      variables: {
-        inviteeEmail: email,
-        inviterName: inviter?.name ?? inviter?.email ?? 'A teammate',
-        workspaceName: tenant?.name ?? 'a workspace',
-        // An invitation is an OPERATOR-facing link, so its base is the panel,
-        // not a customer app: `panelBaseUrl()` (PANEL_OAUTH_REDIRECT_BASE, or
-        // inferred from CORS_ALLOWED_ORIGINS). A prior fallback to the
-        // placeholder `your-panel.example.com` mailed a live invitation token
-        // to a domain nobody owns; it now resolves to empty instead, and the
-        // template drops the button rather than rendering href="".
-        inviteUrl: input.inviteUrl
-          ? input.inviteUrl.replace('{token}', encodeURIComponent(rawToken))
-          : buildTokenUrl(panelBaseUrl(), '/accept-invite', rawToken),
-        expiresAtIso: invitation.expiresAt.toISOString(),
-      },
-    });
+    // The invitation exists either way and its link is shown to the inviter;
+    // only the mail is skipped once this mailbox has had its share.
+    const mailed = (await mayMailUnattended(OPERATOR_EMAIL_SCOPE, email))
+      ? await emailService.dispatchSystem({
+          eventKey: 'workspace_invitation',
+          to: email,
+          tenantId: input.tenantId,
+          variables: {
+            inviteeEmail: email,
+            inviterName: inviter?.name ?? inviter?.email ?? 'A teammate',
+            workspaceName: tenant?.name ?? 'a workspace',
+            // An invitation is an OPERATOR-facing link, so its base is the panel,
+            // not a customer app: `panelBaseUrl()` (PANEL_OAUTH_REDIRECT_BASE, or
+            // inferred from CORS_ALLOWED_ORIGINS). A prior fallback to the
+            // placeholder `your-panel.example.com` mailed a live invitation token
+            // to a domain nobody owns; it now resolves to empty instead, and the
+            // template drops the button rather than rendering href="".
+            inviteUrl: input.inviteUrl
+              ? input.inviteUrl.replace('{token}', encodeURIComponent(rawToken))
+              : buildTokenUrl(panelBaseUrl(), '/accept-invite', rawToken),
+            expiresAtIso: invitation.expiresAt.toISOString(),
+          },
+        })
+      : null;
 
     return {
       rawToken,
-      emailSent: outcome.kind === 'sent',
+      emailSent: mailed?.kind === 'sent',
       invitation: shapeInvitation(invitation),
     };
   },
@@ -546,6 +556,8 @@ export const tenantWorkspacesService = {
   async acceptInvitation(args: {
     rawToken: string;
     tenantUserId: string;
+    /** `req.tenantSessionStamp`: the stamp the session middleware admitted this request against. */
+    sessionStamp: Date | null;
   }): Promise<{
     membership: TenantMembership;
     accessToken: string;
@@ -648,6 +660,7 @@ export const tenantWorkspacesService = {
       const refresh = await issueTenantRefreshToken(
         args.tenantUserId,
         { activeTenantId: inv.tenantId },
+        { sessionsInvalidBefore: args.sessionStamp, refusal: operatorSessionEndedMeanwhile },
         tx,
       );
       const access = issueTenantAccessToken(args.tenantUserId, inv.tenantId, inv.role, {
@@ -921,6 +934,9 @@ export const tenantWorkspacesService = {
     actorEmail: string;
   }): Promise<{ id: string; name: string }> {
     assertWorkspaceCreationAllowed();
+    // Every operator has the workspace they signed up into. Another one is
+    // another place to hold keys and members, which waits for a confirmed address.
+    await assertOperatorVerifiedForCredential(args.tenantUserId, 'create another workspace');
     const name = args.name.trim();
     if (name.length < 2 || name.length > 80) {
       throw new RekeyError({

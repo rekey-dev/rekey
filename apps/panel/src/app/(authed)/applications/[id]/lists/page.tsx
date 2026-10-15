@@ -93,7 +93,7 @@ export default async function ListsPage({
     getApplication(id),
   ]);
   const origins = application.corsOrigins ?? [];
-  const canWrite = hasScope(application.access?.scopes ?? null, 'audience:write');
+  const canWrite = hasScope(application.access.scopes, 'audience:write');
   const lists = page ? [...page.items].sort((a, b) => Number(a.archivedAt !== null) - Number(b.archivedAt !== null)) : [];
   const activeCount = lists.filter((l) => !l.archivedAt).length;
   const archivedCount = lists.length - activeCount;

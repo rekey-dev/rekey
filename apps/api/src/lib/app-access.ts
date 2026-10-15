@@ -68,6 +68,7 @@ import {
   type AppAccessScope,
 } from './access-context.js';
 import { NO_SCOPES } from './operator-scopes.js';
+import { supportEmailOf } from './email-transport.js';
 
 // These two are the request-shaped adapters over the decision in
 // ./access-context.ts; names, signatures and observable behaviour unchanged.
@@ -179,4 +180,18 @@ export function stripApplicationSecrets<T extends Record<string, unknown>>(appli
     ...safe
   } = application as Record<string, unknown>;
   return safe as T;
+}
+
+/**
+ * An Application row as every route returns it: no credential blobs,
+ * `billingConfig` complete, and `supportEmail` at the top level where
+ * `ApplicationDto` has it.
+ *
+ * @example
+ * return { success: true, data: applicationPayload(await applicationsService.get(id)) };
+ */
+export function applicationPayload<T extends { billingConfig: unknown; emailConfig: unknown }>(
+  application: T,
+): T & { supportEmail: string | null } {
+  return { ...stripApplicationSecrets(withBillingDefaults(application)), supportEmail: supportEmailOf(application) };
 }

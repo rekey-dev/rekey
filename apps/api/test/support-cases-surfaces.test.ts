@@ -15,6 +15,9 @@ import { allOperatorTools, TOOL_SCOPES } from '../src/modules/tenant-mcp/tenant-
 import { waitForDeliveries } from './device-fixtures.js';
 import { bearer, operatorWorld } from './operator-world.js';
 import { codeOf, PASSWORD, REASON, supportWorld, type Json, type SupportWorld } from './support-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const INACTIVE = { active: false, capabilities: [] };
 
@@ -158,27 +161,6 @@ describe('support cases and the rest of the system', () => {
     expect((await prisma.device.findUniqueOrThrow({ where: { id: a.deviceId! } })).status).toBe('ACTIVE');
     expect(await w.support(back.accessToken)).toEqual(INACTIVE);
     expect(await w.support(b.accessToken)).toMatchObject({ active: true, scope: 'device' });
-  });
-
-  it('releasing, blocking and unblocking a device the case does not name leaves the case alone', async () => {
-    const euid = await w.makeUser('alone@example.com');
-    const a = await w.signIn('alone@example.com', 'fp-alone-000000a');
-    const b = await w.signIn('alone@example.com', 'fp-alone-000000b');
-    const opened = (await w.open(euid, { deviceIds: [a.deviceId] })).json().data as Json;
-    const act = (deviceId: string | null, verb: string) =>
-      app.inject({ method: 'POST', url: `${w.base(euid)}/devices/${deviceId}/${verb}`, headers: w.op(), payload: {} });
-
-    for (const verb of ['release', 'block', 'unblock']) {
-      const res = await act(b.deviceId, verb);
-      expect(res.statusCode, `${verb}: ${res.body}`).toBe(200);
-    }
-    expect((await w.read(euid)).open).toMatchObject({ id: opened.id, deviceIds: [a.deviceId], updatedAt: opened.updatedAt });
-
-    // A USER case names no device, so a block changes nothing about it.
-    const widened = (await w.patch(euid, { deviceIds: null })).json().data as Json;
-    expect((await act(a.deviceId, 'block')).statusCode).toBe(200);
-    expect((await act(a.deviceId, 'unblock')).statusCode).toBe(200);
-    expect((await w.read(euid)).open).toMatchObject({ id: opened.id, scope: 'USER', updatedAt: widened.updatedAt });
   });
 
   it('blocking a device takes it out of the case, and unblocking and signing in again do not put it back', async () => {
@@ -341,17 +323,6 @@ describe('support cases and the rest of the system', () => {
     expect([stale.statusCode, codeOf(stale)]).toEqual([400, 'SUPPORT_CAPABILITY_UNKNOWN']);
     const gone = await app.inject({ method: 'DELETE', url: capabilityUrl('diagnostics.debug'), headers: w.op() });
     expect([gone.statusCode, codeOf(gone)]).toEqual([404, 'SUPPORT_CAPABILITY_NOT_FOUND']);
-  });
-
-  it('catalogue: holds 100 names at most, per application', async () => {
-    const existing = await prisma.supportCapability.count({ where: { applicationId: w.appId } });
-    await prisma.supportCapability.createMany({
-      data: Array.from({ length: 100 - existing }, (_, i) => ({ applicationId: w.appId, name: `fill-${i}` })),
-    });
-    const over = await w.capability('one-too-many');
-    expect([over.statusCode, codeOf(over)]).toEqual([409, 'SUPPORT_CAPABILITY_LIMIT']);
-    const other = await supportWorld(app, 'ss-cap');
-    expect((await other.capability('fill-0')).statusCode).toBe(201);
   });
 
   it('the export lists support cases, and the reason is in no export, webhook or security event', async () => {

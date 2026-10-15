@@ -23,6 +23,9 @@ import { applicationsService } from '../src/modules/applications/applications.se
 import { emailService } from '../src/modules/email/email.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { POOL_SQUEEZE_TEST_TIMEOUT_MS, withPoolOf } from './pool-squeeze.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const RACERS = 8;
 
@@ -72,11 +75,11 @@ describe('Concurrent magic-link consumes for one new address', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: appId,
       patch: { methods: ['password', 'magic_link'] },
     });
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/magic-link-race',
       events: ['*'],

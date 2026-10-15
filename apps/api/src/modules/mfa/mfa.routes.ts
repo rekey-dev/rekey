@@ -26,6 +26,7 @@ import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { ok, okFlag, errs } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertVerifiedForCredential } from '../auth/user-lifecycle.js';
 
 const CodeBody = z.object({ code: z.string().min(1).max(64) });
 
@@ -187,13 +188,14 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             ...USER_SESSION_ERRORS,
             401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID: re-enrolling from a browser over an existing enrollment requires a current TOTP or backup code; or MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one.`,
-            403: `${USER_SESSION_ERRORS[403]}; or MFA_NOT_ENABLED: this Application's authConfig.mfa policy is "off"; or ${IMPERSONATION_DESC}`,
+            403: `${USER_SESSION_ERRORS[403]}; or MFA_NOT_ENABLED: this Application's authConfig.mfa policy is "off"; or EMAIL_NOT_VERIFIED: this account has not confirmed its email address, so it cannot enrol MFA yet; or ${IMPERSONATION_DESC}`,
           }),
         },
       },
     },
     async (req, reply) => {
       assertMfaEnabled(req.application!);
+      assertVerifiedForCredential(req.endUser!, 'turn on two-factor authentication');
       // Only for a browser caller, and only over a COMPLETED enrollment,
       // matching `mfaService.disable`'s posture field for field. `verify`
       // returns false for `enrolledAt: null`, so demanding a code
@@ -268,6 +270,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const body = CodeBody.parse(req.body);
+      assertVerifiedForCredential(req.endUser!, 'turn on two-factor authentication');
       const result = await mfaService.confirm({
         endUserId: req.endUser!.id,
         code: body.code,

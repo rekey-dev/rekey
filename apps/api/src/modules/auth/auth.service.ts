@@ -28,8 +28,10 @@ import type { Application, EndUser, RefreshToken } from '@prisma/client';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { prisma } from '../../lib/prisma.js';
+import { boundStamp, lockEndUserCredentials, type SessionBasis } from '../../lib/session-basis.js';
 import { RekeyError } from '../../lib/error.js';
-import { sessionEnded } from '../../lib/session-stamp.js';
+import { sessionEnded, unanchoredTokenEnded } from '../../lib/session-stamp.js';
+import { credentialSuperseded } from '../../lib/session-refusals.js';
 import { impersonationForbidden } from '../../middleware/impersonation.js';
 import type { ImpersonationContext } from '../../middleware/user-session.js';
 import { devicesService, type PreflightDeviceOutcome } from '../devices/devices.service.js';
@@ -46,6 +48,7 @@ import {
   issueRefreshToken,
   lookupRefreshToken,
   rotateRefreshToken,
+  fromEndedGeneration,
   revokeRefreshToken,
   revokeAllForEndUser,
   listActiveSessions,
@@ -98,13 +101,24 @@ import { emailService } from '../email/email.service.js';
 import { resolveAppUrl, buildTokenUrl , assertAllowedTokenUrl } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import {
+  applicationEmailScope,
+  authEmailCappedError,
+  mayMailUnattended,
+  reserveAuthEmail,
+  type AuthEmailReservation,
+} from '../email/auth-email-caps.js';
 import { judgeReplay, REFRESH_REUSE_WINDOW_MS, type ReuseReason } from '../../lib/refresh-reuse-window.js';
 import { withSavepoint } from '../../lib/savepoint.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import {
+  assertVerifiedForCredential,
   claimPendingWelcome,
+  claimUnverifiedAccount,
   enqueueSessionCreated,
   enqueueUserUpdated,
+  promoteAfterMfa,
+  sendAccountClaimedEmail,
   sendWelcomeEmail,
   userSnapshot,
   welcomeTiming,
@@ -126,6 +140,11 @@ export interface SignUpInput {
    * publishable key. Undefined is treated as non-publishable (server-side).
    */
   authKind?: AuthKind;
+  /**
+   * The caller vouches that this person owns the address. Secret keys only:
+   * a browser cannot vouch for an address it typed.
+   */
+  emailVerified?: boolean;
 }
 
 export interface SignInInput {
@@ -565,6 +584,17 @@ async function refuseRotatedReplay(
   device: DeviceContext | undefined,
   via: 'lookup' | 'rotation_race',
 ): Promise<never> {
+  // A token from before the last time every session was ended (a claim, a
+  // password change or reset, sign-out everywhere, an earlier reuse). What it
+  // belonged to is already over, so replaying it cannot show that a session
+  // the account has NOW was stolen. Answered as reuse, it would let whoever
+  // kept one sign the account's owner out everywhere with a single request,
+  // as often as they liked.
+  const owner = await prisma.endUser.findUnique({
+    where: { id: presented.endUserId },
+    select: { sessionsInvalidBefore: true },
+  });
+  if (fromEndedGeneration(presented, owner?.sessionsInvalidBefore)) throw refreshTokenRevoked();
   const successor = presented.replacedById
     ? await prisma.refreshToken.findUnique({ where: { id: presented.replacedById } })
     : null;
@@ -645,6 +675,15 @@ function refusalAfterRotation(e: unknown): unknown {
   });
 }
 
+function refreshTokenRevoked(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'REFRESH_TOKEN_REVOKED',
+    message: 'This session was revoked.',
+    fix: 'Sign the user in again to obtain a fresh session.',
+  });
+}
+
 /** Register or refresh the planned device. Throws the refusal `touch` returns. */
 async function commitDeviceBinding(
   application: Application,
@@ -673,6 +712,55 @@ export type SignInVia = 'password' | 'magic_link' | 'oauth' | 'passkey' | 'mfa';
 export interface SignInCredential {
   via: SignInVia;
   isNewUser?: boolean;
+  /**
+   * The factor proved the mailbox of an account whose address is still
+   * unconfirmed, and an enrolled second factor held the claim back. The MFA
+   * challenge carries it forward so a correct code can finish the job.
+   */
+  mailboxProven?: boolean;
+  /**
+   * With `mailboxProven`: the provider identity that did the proving. It is
+   * not linked while the claim is held, since a link written before the code
+   * is given would let that provider account in without ever proving the
+   * mailbox again. The challenge carries it and links it when the code passes.
+   */
+  pendingIdentity?: { provider: string; providerAccountId: string; email: string };
+  /**
+   * A password is what verified: the hash it verified against. The session is
+   * refused when the account no longer holds that hash by the time it is
+   * written (a claim or a reset landed in between).
+   */
+  passwordHash?: string | null;
+  /** The session comes from an MFA challenge: a stale basis answers `MFA_CHALLENGE_INVALID`. */
+  challenge?: boolean;
+}
+
+function mfaChallengeInvalid(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'MFA_CHALLENGE_INVALID',
+    message: 'MFA challenge token is invalid or expired.',
+    fix: 'Sign in again to obtain a fresh challenge token (they expire after 5 minutes).',
+  });
+}
+
+/** The answer to a password that is wrong, or that stopped being the account's while it was checked. */
+function invalidCredentials(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'INVALID_CREDENTIALS',
+    message: 'Email or password is incorrect.',
+    fix: 'Double-check the credentials. If the user signed up via OAuth, password sign-in will not work for them.',
+  });
+}
+
+function sessionEndedMeanwhile(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'USER_TOKEN_INVALID',
+    message: 'This access token predates a password change, sign-out everywhere, or a revocation of every session.',
+    fix: 'Sign in again.',
+  });
 }
 
 /**
@@ -684,7 +772,13 @@ export interface SignInCredential {
  */
 type PairOrigin =
   | { credential: SignInCredential }
-  | { session: { impersonation: ImpersonationContext | undefined } };
+  | {
+      session: {
+        impersonation: ImpersonationContext | undefined;
+        /** `sessionsInvalidBefore` as the session middleware read it when it admitted the request. */
+        stamp: Date | null;
+      };
+    };
 
 async function issuePair(
   application: Application,
@@ -731,10 +825,23 @@ async function issuePair(
     deviceId,
     client: device?.client ?? null,
   };
+  const basis: SessionBasis =
+    'credential' in origin
+      ? {
+          sessionsInvalidBefore: endUser.sessionsInvalidBefore,
+          ...(origin.credential.passwordHash !== undefined && { passwordHash: origin.credential.passwordHash }),
+          refusal:
+            origin.credential.via === 'password'
+              ? invalidCredentials
+              : origin.credential.challenge
+                ? mfaChallengeInvalid
+                : credentialSuperseded,
+        }
+      : { sessionsInvalidBefore: origin.session.stamp, refusal: sessionEndedMeanwhile };
   const { refresh, deliveryIds } =
     'credential' in origin
       ? await prisma.$transaction(async (tx) => {
-          const issued = await issueRefreshToken(application.id, endUser.id, refreshOptions, tx);
+          const issued = await issueRefreshToken(application.id, endUser.id, refreshOptions, basis, tx);
           const ids = await enqueueSessionCreated(tx, {
             endUser,
             sessionId: issued.record.sessionId,
@@ -744,7 +851,7 @@ async function issuePair(
           });
           return { refresh: issued, deliveryIds: ids };
         })
-      : { refresh: await issueRefreshToken(application.id, endUser.id, refreshOptions), deliveryIds: [] };
+      : { refresh: await issueRefreshToken(application.id, endUser.id, refreshOptions, basis), deliveryIds: [] };
   kickDeliveries(deliveryIds);
   // Honours the app's `authConfig.tokenAlg` (HS256 default, RS256 = JWKS).
   const access = await issueUserAccessTokenForApp(application, endUser.id, {
@@ -787,9 +894,25 @@ export async function issueSessionOrMfaChallenge(
   // be asked for a TOTP code and only then told to go and read their email.
   // The challenge token holds no session, so this is UX rather than a hole,
   // but a login form that asks for a factor it will not accept is its own bug.
-  ensureEmailVerified(application, endUser);
-  if (await mfaService.isEnrolled(endUser.id)) {
-    const challenge = issueMfaChallengeToken(endUser.id, application.id, application.tokenGeneration);
+  const enrolled = await mfaService.isEnrolled(endUser.id);
+  const heldForMfa = enrolled && credential.mailboxProven === true && !endUser.emailVerified;
+  if (!heldForMfa) ensureEmailVerified(application, endUser);
+  if (enrolled) {
+    const challenge = issueMfaChallengeToken(endUser.id, application.id, application.tokenGeneration, {
+      mailboxProven: heldForMfa,
+      // The row the first factor was checked against. The session the
+      // challenge turns into is issued on this, not on whatever the row
+      // holds when the code arrives.
+      basisStamp: endUser.sessionsInvalidBefore,
+      ...(heldForMfa &&
+        credential.pendingIdentity && {
+          pendingIdentity: {
+            p: credential.pendingIdentity.provider,
+            a: credential.pendingIdentity.providerAccountId,
+            e: credential.pendingIdentity.email,
+          },
+        }),
+    });
     return {
       mfaRequired: true,
       endUser: redact(endUser),
@@ -806,6 +929,30 @@ export async function issueSessionOrMfaChallenge(
     ...result,
     ...(policy === 'required' && { mfaEnrollmentRequired: true }),
   };
+}
+
+type HeldAuthEmail = Extract<AuthEmailReservation, { allowed: true }>;
+
+/**
+ * Answer a browser caller's request without waiting: send the mail, or, when
+ * `send` is null because the request mails nobody, give the reservation back.
+ * A dispatch that was attempted keeps its reservation whatever the transport
+ * said, so a failing transport cannot be used to mint links without limit.
+ */
+function sendOrGiveBack(reserved: HeldAuthEmail, send: (() => Promise<unknown>) | null): void {
+  if (send) void send().catch(() => undefined);
+  else void reserved.unsent();
+}
+
+/**
+ * A secret-key request that sends nothing gives its reservation back, and is
+ * refused once the address has had as many of those as it may have mails. A
+ * known address is refused at the cap by `reserveAuthEmail`; without this an
+ * unknown one never would be, and the 429 would say which is which.
+ */
+async function refuseQuietRequestOverCap(reserved: HeldAuthEmail): Promise<void> {
+  const quiet = await reserved.unsent();
+  if (!quiet.allowed) throw authEmailCappedError(quiet.retryAfterSeconds);
 }
 
 function ensurePasswordMethodEnabled(application: Application): void {
@@ -878,7 +1025,11 @@ function ensureMagicLinkMethodEnabled(application: Application): void {
 function ensureEmailVerified(application: Application, endUser: EndUser): void {
   const config = AuthConfigSchema.parse(application.authConfig);
   if (!config.requireEmailVerification || endUser.emailVerified) return;
-  throw new RekeyError({
+  throw emailNotVerifiedError();
+}
+
+function emailNotVerifiedError(): RekeyError {
+  return new RekeyError({
     statusCode: 403,
     code: 'EMAIL_NOT_VERIFIED',
     message: 'Confirm your email address before using this account, check your inbox for the verification link.',
@@ -890,7 +1041,33 @@ function ensureEmailVerified(application: Application, endUser: EndUser): void {
     // sent them there gave no hint why. `deliverVerificationEmail` declines to
     // mint a token when no link would resolve, which is correct, but the
     // caller has to know that to get out of the loop.
-    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address, it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
+    fix: 'The user has to open the email sent to their address. Signing up with a new address sends a verification link while this setting is on. Signing up with an address that already has an account sends that address what to do instead (sign in, or a link to choose a new password), and answers exactly like this so the response cannot be used to find out which addresses have accounts. Either mail is skipped once the address has reached its hourly email limit. If no verification link arrived, POST /api/v1/auth/resend-verification with the address, it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
+  });
+}
+
+/**
+ * Tell the owner of an address that someone tried to sign up with it. Sent
+ * only where sign-up itself must not say the address is taken, so the person
+ * who owns it still learns what to do. Counted against the recipient's
+ * allowance. A confirmed account is pointed at sign-in. An unconfirmed one
+ * gets a reset link and never another verification link: that link would
+ * ratify whatever password the first registrant set, and a reset replaces it.
+ */
+async function mailSignUpAttemptNotice(application: Application, email: string, appUrl?: string): Promise<void> {
+  const owner = await prisma.endUser.findUnique({
+    where: { applicationId_email: { applicationId: application.id, email } },
+  });
+  if (!owner || owner.erasedAt !== null || owner.bannedAt !== null) return;
+  if (!(await mayMailUnattended(applicationEmailScope(application), owner.email))) return;
+  if (!owner.emailVerified) {
+    await authService.mailPasswordReset({ application, endUser: owner, eventKey: 'signup_finish_setup' });
+    return;
+  }
+  await emailService.dispatch({
+    application,
+    eventKey: 'signup_existing_account',
+    to: owner.email,
+    variables: { userEmail: owner.email, appUrl: resolveAppUrl(application, appUrl) ?? '' },
   });
 }
 
@@ -932,7 +1109,13 @@ export async function deliverVerificationEmail(args: {
    * satisfies this on its own.
    */
   requireResolvableUrl?: boolean;
-}): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+  /**
+   * `reserve` counts this mail against the recipient's allowance here and
+   * skips it when the allowance is spent. `reserved` is for a caller that
+   * already counted it, before it looked the address up.
+   */
+  allowance: 'reserve' | 'reserved';
+}): Promise<{ emailSent: boolean; verificationToken: string | null; cappedForSeconds?: number }> {
   // Resolved BEFORE the token is minted: a send we are about to refuse should
   // not leave a live token in the table either.
   // Refuse a destination this Application has not declared, see
@@ -952,6 +1135,12 @@ export async function deliverVerificationEmail(args: {
         'No verification link could be built: set authConfig.appUrl (Panel → Application → Auth), add a redirect URL, or set DEFAULT_APP_URL.',
     });
     return { emailSent: false, verificationToken: null };
+  }
+  if (args.allowance === 'reserve') {
+    const reserved = await reserveAuthEmail(applicationEmailScope(args.application), args.endUser.email);
+    if (!reserved.allowed) {
+      return { emailSent: false, verificationToken: null, cappedForSeconds: reserved.retryAfterSeconds };
+    }
   }
   const issued = await issueVerificationToken({
     applicationId: args.application.id,
@@ -1005,6 +1194,15 @@ export const authService = {
 
     const config = AuthConfigSchema.parse(input.application.authConfig);
     assertSignupAllowed(config, input.authKind, input.email);
+    const vouched = input.emailVerified === true;
+    if (vouched && input.authKind === 'publishable') {
+      throw new RekeyError({
+        statusCode: 403,
+        code: 'EMAIL_VERIFIED_REQUIRES_SECRET_KEY',
+        message: 'Only a secret key can create an account with `emailVerified: true`.',
+        fix: 'Drop `emailVerified` from the browser call and let the user confirm the address by email, or create the account from your server with a secret key once you have verified the address yourself.',
+      });
+    }
     assertDeviceBindingSatisfiable(input.application, input.device);
     if (input.password.length < config.passwordMinLength) {
       throw new RekeyError({
@@ -1036,8 +1234,7 @@ export const authService = {
     // tenant PATCH endpoint.
     const defaultRole = await applicationRolesService.getDefault(input.application.id);
 
-    // A new password account is never verified yet.
-    const welcome = welcomeTiming(input.application, false);
+    const welcome = welcomeTiming(input.application, vouched);
     let endUser: EndUser;
     let deliveryIds: string[];
     try {
@@ -1050,6 +1247,7 @@ export const authService = {
             applicationId: input.application.id,
             email: input.email.toLowerCase(),
             passwordHash,
+            emailVerified: vouched,
             role: defaultRole.name,
             createdVia: 'password',
             welcomeEmailPending: welcome === 'pending',
@@ -1067,6 +1265,18 @@ export const authService = {
       }));
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
+        // Where a new address is refused a session anyway, a taken one gets
+        // the very same refusal: a 409 here would tell anyone holding the
+        // publishable key which addresses have accounts. The owner is told by
+        // mail instead. A secret key is the customer's own server and keeps
+        // the 409; so does an Application that hands out a session at sign-up,
+        // where a live session is an answer no refusal can imitate.
+        if (config.requireEmailVerification && input.authKind === 'publishable') {
+          void mailSignUpAttemptNotice(input.application, input.email.toLowerCase(), input.appUrl).catch(
+            () => undefined,
+          );
+          throw emailNotVerifiedError();
+        }
         throw new RekeyError({
           statusCode: 409,
           code: 'EMAIL_ALREADY_EXISTS',
@@ -1076,9 +1286,6 @@ export const authService = {
       }
       throw e;
     }
-
-    // A held welcome goes out on the first verification (`claimPendingWelcome`).
-    if (welcome === 'now') sendWelcomeEmail(input.application, endUser.email, input.appUrl);
 
     // Verification email, same fire-and-forget contract as the welcome mail
     // it rides alongside (it does not replace it). On by default: a new
@@ -1099,14 +1306,19 @@ export const authService = {
     // create accounts nobody, including their owner, could reach. (A user who
     // never got the mail can ask for another from /auth/resend-verification,
     // which needs no session.)
-    if (config.sendVerificationEmailOnSignUp || config.requireEmailVerification) {
+    if (!vouched && (config.sendVerificationEmailOnSignUp || config.requireEmailVerification)) {
       void deliverVerificationEmail({
         application: input.application,
         endUser,
         requireResolvableUrl: true,
+        allowance: 'reserve',
         ...(input.appUrl !== undefined && { appUrl: input.appUrl }),
       }).catch(() => undefined);
     }
+    // After the verification mail, which matters more when the recipient's
+    // allowance has room for only one. A held welcome goes out on the first
+    // verification (`claimPendingWelcome`).
+    if (welcome === 'now') sendWelcomeEmail(input.application, endUser.email, input.appUrl);
 
     // `user.created` was written with the row above; this only asks for the
     // first attempt now instead of at the poller's next pass.
@@ -1130,7 +1342,7 @@ export const authService = {
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     ensurePasswordMethodEnabled(input.application);
 
-    const endUser = await prisma.endUser.findUnique({
+    let endUser = await prisma.endUser.findUnique({
       where: {
         applicationId_email: {
           applicationId: input.application.id,
@@ -1154,7 +1366,7 @@ export const authService = {
     await assertNotLocked(lockScope);
 
     // Single error code, never disclose whether email or password was wrong.
-    const valid =
+    let valid =
       // The decoy variant: an unknown address, or one with no password, costs
       // the same argon2 work as a wrong password, so the response time does
       // not say which accounts exist. The operator sign-in has always done
@@ -1162,17 +1374,12 @@ export const authService = {
       (await verifyPasswordOrDecoy(endUser?.passwordHash ?? null, input.password)) && endUser !== null;
     if (valid && endUser !== null && endUser.passwordHash && needsRehash(endUser.passwordHash)) {
       // An imported bcrypt hash just verified: this is the one moment the
-      // plaintext is in hand, so upgrade to argon2id now. Best-effort, a
-      // failed upgrade leaves a working bcrypt hash for next time and must
-      // not turn a correct password into a failed sign-in.
-      try {
-        await prisma.endUser.update({
-          where: { id: endUser.id },
-          data: { passwordHash: await hashPassword(input.password) },
-        });
-      } catch {
-        /* keep the bcrypt hash; retried on the next sign-in */
-      }
+      // plaintext is in hand, so upgrade to argon2id now. Written only over
+      // the hash that verified. An unconditional write here could land after
+      // a claim or a reset and put back the password they had just removed.
+      const upgraded = await this.upgradeVerifiedHash(endUser, input.password);
+      endUser = upgraded;
+      valid = upgraded !== null;
     }
     if (!valid || endUser === null) {
       if (endUser) {
@@ -1222,12 +1429,7 @@ export const authService = {
           });
         }
       }
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'INVALID_CREDENTIALS',
-        message: 'Email or password is incorrect.',
-        fix: 'Double-check the credentials. If the user signed up via OAuth, password sign-in will not work for them.',
-      });
+      throw invalidCredentials();
     }
 
     // Success, clear the failure counter + any lock.
@@ -1239,7 +1441,37 @@ export const authService = {
     // not a failed attempt and must not push the account toward a lockout. A
     // user waiting on their confirmation link would otherwise lock themselves
     // out by retrying.
-    return issueSessionOrMfaChallenge(input.application, endUser, { via: 'password' }, input.device);
+    return issueSessionOrMfaChallenge(
+      input.application,
+      endUser,
+      { via: 'password', passwordHash: endUser.passwordHash },
+      input.device,
+    );
+  },
+
+  /**
+   * Replace a bcrypt hash that just verified with argon2id, and return the
+   * row the sign-in should carry on with. The write is conditional on the old
+   * hash. When it loses (another sign-in upgraded first, or the password was
+   * removed or changed), the row is read again and the password checked
+   * against whatever it holds now: null when it no longer verifies. A failed
+   * write keeps the working bcrypt hash for next time.
+   */
+  async upgradeVerifiedHash(endUser: EndUser, password: string): Promise<EndUser | null> {
+    const verified = endUser.passwordHash;
+    try {
+      const passwordHash = await hashPassword(password);
+      const written = await prisma.endUser.updateMany({
+        where: { id: endUser.id, passwordHash: verified },
+        data: { passwordHash },
+      });
+      if (written.count === 1) return { ...endUser, passwordHash };
+    } catch {
+      return endUser;
+    }
+    const current = await prisma.endUser.findUnique({ where: { id: endUser.id } });
+    if (!current || !(await verifyPasswordOrDecoy(current.passwordHash, password))) return null;
+    return current;
   },
 
   /**
@@ -1285,7 +1517,23 @@ export const authService = {
     // Before the code is matched, so a ban placed after the challenge was
     // issued spends no backup code.
     assertEndUserCanAuthenticate(endUser);
-    ensureEmailVerified(input.application, endUser);
+    // A challenge from before the account's sessions were all ended stands
+    // for a first factor that no longer counts.
+    const firstFactorStamp = boundStamp(claims.sib);
+    if (
+      firstFactorStamp === undefined ||
+      unanchoredTokenEnded(claims, endUser.sessionsInvalidBefore) ||
+      (firstFactorStamp?.getTime() ?? null) !== (endUser.sessionsInvalidBefore?.getTime() ?? null)
+    ) {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'MFA_CHALLENGE_INVALID',
+        message: 'MFA challenge token is invalid or expired.',
+        fix: 'Sign in again to obtain a fresh challenge token (they expire after 5 minutes).',
+      });
+    }
+    const mailboxProven = claims.mbx === true && !endUser.emailVerified;
+    if (!mailboxProven) ensureEmailVerified(input.application, endUser);
     if (await isMfaChallengeSpent(input.mfaChallengeToken)) throw mfaChallengeUsedError();
     const codeRefused = (outcome: 'invalid' | 'reused'): RekeyError =>
       outcome === 'reused'
@@ -1318,7 +1566,41 @@ export const authService = {
     const spent = await match.spend();
     if (spent !== 'accepted') throw codeRefused(spent);
     if (!(await claimMfaChallenge(input.mfaChallengeToken, claims.exp))) throw mfaChallengeUsedError();
-    return issuePair(input.application, endUser, { credential: { via: 'mfa' } }, input.device);
+    // Issued on the stamp the first factor saw. A revocation of every session
+    // between the check above and the write below is refused at the write.
+    const basisUser = { ...endUser, sessionsInvalidBefore: firstFactorStamp };
+    if (!mailboxProven) {
+      return issuePair(input.application, basisUser, { credential: { via: 'mfa', challenge: true } }, input.device);
+    }
+    const promoted = await prisma.$transaction(async (tx) => {
+      const done = await promoteAfterMfa(tx, input.application, endUser.id);
+      if (claims.lnk) {
+        // The identity that proved the mailbox, linked now that the second
+        // factor has been given. Already linked (a second challenge from the
+        // same provider account passed first) is fine.
+        await tx.oAuthIdentity.createMany({
+          data: [
+            {
+              applicationId: input.application.id,
+              endUserId: endUser.id,
+              provider: claims.lnk.p,
+              providerAccountId: claims.lnk.a,
+              email: claims.lnk.e,
+            },
+          ],
+          skipDuplicates: true,
+        });
+      }
+      return done;
+    });
+    kickDeliveries(promoted.deliveryIds);
+    if (promoted.welcome) sendWelcomeEmail(input.application, promoted.user.email);
+    return issuePair(
+      input.application,
+      { ...promoted.user, sessionsInvalidBefore: firstFactorStamp },
+      { credential: { via: 'mfa', challenge: true } },
+      input.device,
+    );
   },
 
   /**
@@ -1374,12 +1656,7 @@ export const authService = {
       // others are fine, or because it was caught in a family revocation
       // triggered elsewhere, in which case they are not. `replacedById` cannot
       // tell those apart, so the message does not guess.
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'REFRESH_TOKEN_REVOKED',
-        message: 'This session was revoked.',
-        fix: 'Sign the user in again to obtain a fresh session.',
-      });
+      throw refreshTokenRevoked();
     }
     if (outcome.kind === 'expired') {
       throw new RekeyError({
@@ -1491,6 +1768,11 @@ export const authService = {
       // returns 0). Without this catch the race propagated as an unhandled 500.
       if ((e as Error).message === 'REFRESH_TOKEN_RACE') {
         const spent = await prisma.refreshToken.findUniqueOrThrow({ where: { id: outcome.token.id } });
+        // Revoked without a successor: the session was ended (a claim, a
+        // sign-out, a password change) while this request was in flight. That
+        // is not a replay, and answering it as one would revoke the sessions
+        // of whoever now holds the account.
+        if (spent.replacedById === null) throw refreshTokenRevoked();
         await refuseRotatedReplay(application, spent, device, 'rotation_race');
       }
       throw e;
@@ -1579,13 +1861,15 @@ export const authService = {
     endUserId: string;
     activeOrganizationId: string | null;
     impersonation: ImpersonationContext | undefined;
+    /** `req.sessionStamp`: the stamp the session middleware admitted this request against. */
+    sessionStamp: Date | null;
     device?: DeviceContext;
   }): Promise<AuthResult> {
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: args.endUserId } });
     return issuePair(
       args.application,
       endUser,
-      { session: { impersonation: args.impersonation } },
+      { session: { impersonation: args.impersonation, stamp: args.sessionStamp } },
       args.device,
       args.activeOrganizationId ?? undefined,
     );
@@ -1653,6 +1937,14 @@ export const authService = {
     // Before the lookup: refusing only for a known address would tell a
     // publishable-key caller which addresses have accounts.
     assertAllowedTokenUrl(input.application, input.resetUrl, 'resetUrl');
+    const publishable = input.authKind === 'publishable';
+    // Also before the lookup, so a known and an unknown address spend the
+    // recipient's allowance alike, and a counter outage refuses both.
+    const reserved = await reserveAuthEmail(applicationEmailScope(input.application), input.email);
+    if (!reserved.allowed) {
+      if (publishable) return PUBLISHABLE_SEND_RESPONSE;
+      throw authEmailCappedError(reserved.retryAfterSeconds);
+    }
     const endUser = await prisma.endUser.findUnique({
       where: {
         applicationId_email: {
@@ -1661,22 +1953,43 @@ export const authService = {
         },
       },
     });
+    const mail = endUser && endUser.bannedAt === null
+      ? () => this.mailPasswordReset({ application: input.application, endUser, resetUrl: input.resetUrl })
+      : null;
+    if (publishable) {
+      // A browser caller gets the constant body without waiting for the mail:
+      // waiting only for addresses that have an account would time them apart
+      // from the ones that do not. A banned account is mailed nothing.
+      sendOrGiveBack(reserved, mail);
+      return PUBLISHABLE_SEND_RESPONSE;
+    }
     // A banned account gets exactly the unknown-address answer: no mail, and
     // nothing in the response that tells a caller the address is banned.
-    if (!endUser || endUser.bannedAt !== null) {
-      // Sleep a tiny constant amount to flatten timing attacks against the
-      // existence-of-email side channel. Not bulletproof (requires lots more
-      // work to fully neutralise), but raises the bar without much cost.
-      await new Promise((r) => setTimeout(r, 50));
-      // A browser caller must not be able to tell this branch from a real send.
-      if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
+    if (!mail) {
+      await refuseQuietRequestOverCap(reserved);
       return { delivered: false, emailSent: false, resetToken: null };
     }
+    return mail();
+  },
+
+  /**
+   * Mint a reset token and mail it. Returns what a SECRET-key caller is told;
+   * a publishable caller never sees this and is answered before it runs.
+   */
+  async mailPasswordReset(input: {
+    application: Application;
+    endUser: EndUser;
+    resetUrl?: string | undefined;
+    /** The built-in event to send; the sign-up notice reuses this with its own. */
+    eventKey?: 'password_reset' | 'signup_finish_setup';
+  }): Promise<{ delivered: boolean; emailSent: boolean; resetToken: string | null }> {
+    const { endUser } = input;
+    const eventKey = input.eventKey ?? 'password_reset';
     const issued = await issueResetToken(input.application.id, endUser.id);
 
     const outcome = await emailService.dispatch({
       application: input.application,
-      eventKey: 'password_reset',
+      eventKey,
       to: endUser.email,
       variables: {
         userEmail: endUser.email,
@@ -1716,7 +2029,7 @@ export const authService = {
         void recordAuthEmailDeliveryFailure({
           applicationId: input.application.id,
           tenantId: input.application.tenantId,
-          eventKey: 'password_reset',
+          eventKey,
           endUserId: endUser.id,
           reason: outcome.message,
         });
@@ -1726,7 +2039,6 @@ export const authService = {
       // through from here would reach the legacy branch that hands the RAW
       // RESET TOKEN back to the caller. Turning email off must never turn the
       // API into a token dispenser.
-      if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: true, emailSent: false, resetToken: null };
     }
     // No transport. The legacy contract hands the raw token back
@@ -1736,7 +2048,6 @@ export const authService = {
     // any end-user's password and sign in as them (full account takeover).
     // Browser-driven reset flows require configured email transport; without
     // it we report undelivered and withhold the token.
-    if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
     return { delivered: true, emailSent: false, resetToken: issued.raw };
   },
 
@@ -1820,24 +2131,48 @@ export const authService = {
     // Atomic: revoke every refresh BEFORE flipping the password hash, so a
     // crash mid-flight never leaves us with a new password + the old
     // sessions still live. Both writes commit-or-rollback together.
-    const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
-      await tx.refreshToken.updateMany({
-        where: { endUserId: outcome.token.endUserId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      const user = await tx.endUser.update({
-        where: { id: outcome.token.endUserId },
-        // A reset is the compromise-recovery path: the attacker's access token
-        // must stop now, not at its expiry.
-        data: { passwordHash, sessionsInvalidBefore: new Date() },
-      });
+    const { updated, deliveryIds, welcome, noticeDue } = await prisma.$transaction(async (tx) => {
+      // The reset link went to the mailbox and nowhere else, so completing it
+      // proves the address. On an account nobody had confirmed that is a
+      // claim: passkeys, linked providers and anything else set by whoever
+      // registered first go with the old password.
+      const claim = await claimUnverifiedAccount(
+        tx,
+        { id: outcome.token.endUserId, applicationId: input.application.id },
+        { via: 'password_reset', passwordHash },
+      );
+      let user: EndUser;
+      if (claim.kind === 'claimed') {
+        user = claim.user;
+      } else {
+        await tx.refreshToken.updateMany({
+          where: { endUserId: outcome.token.endUserId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        user = await tx.endUser.update({
+          where: { id: outcome.token.endUserId },
+          // A reset is the compromise-recovery path: the attacker's access token
+          // must stop now, not at its expiry.
+          data: { passwordHash, sessionsInvalidBefore: new Date() },
+        });
+      }
       const ids = await enqueueEvent(tx, {
         applicationId: input.application.id,
         type: 'password.changed',
         data: { userId: user.id, email: user.email, via: 'reset' },
       });
-      return { updated: user, deliveryIds: ids };
+      return {
+        updated: user,
+        deliveryIds: claim.kind === 'claimed' ? [...claim.deliveryIds, ...ids] : ids,
+        welcome: claim.kind === 'claimed' && claim.welcome,
+        noticeDue: claim.kind === 'claimed' && claim.signInMethodsRemoved,
+      };
     });
+    if (welcome) sendWelcomeEmail(input.application, updated.email);
+    // The reset replaced the password, which `password_changed` below says.
+    // When the claim also removed a passkey, a linked provider or a licence
+    // key, the address is owed the notice that says so.
+    if (noticeDue) sendAccountClaimedEmail(input.application, updated.email);
 
     // Notify the user that the password changed, security-critical event.
     // Fire-and-forget; we never let a delivery failure block the reset.
@@ -1908,18 +2243,31 @@ export const authService = {
     await ensurePasswordNotBreached(input.application, input.newPassword);
 
     const newHash = await hashPassword(input.newPassword);
+    // One transaction holding the user's row: the new hash, the stamp and the
+    // revocations land together, and a sign-in with the old password that is
+    // in flight cannot write a session after them.
     const deliveryIds = await prisma.$transaction(async (tx) => {
+      const row = await lockEndUserCredentials(tx, endUser.id);
+      // The password that was checked above is no longer the account's.
+      if (row?.passwordHash !== endUser.passwordHash) {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'INVALID_CREDENTIALS',
+          message: 'Current password is incorrect.',
+          fix: 'Verify the current password and try again.',
+        });
+      }
       await tx.endUser.update({
         where: { id: endUser.id },
         data: { passwordHash: newHash },
       });
+      await revokeAllForEndUser(endUser.id, tx);
       return enqueueEvent(tx, {
         applicationId: input.application.id,
         type: 'password.changed',
         data: { userId: endUser.id, email: endUser.email, via: 'change' },
       });
     });
-    await revokeAllForEndUser(endUser.id);
 
     void emailService
       .dispatch({
@@ -1980,6 +2328,14 @@ export const authService = {
     assertAllowedTokenUrl(input.application, input.signInUrl, 'signInUrl');
 
     const email = input.email.toLowerCase();
+    const publishable = input.authKind === 'publishable';
+    // Before the lookup, so a known and an unknown address spend the
+    // recipient's allowance alike, and a counter outage refuses both.
+    const reserved = await reserveAuthEmail(applicationEmailScope(input.application), email);
+    if (!reserved.allowed) {
+      if (publishable) return PUBLISHABLE_MAGIC_LINK_RESPONSE;
+      throw authEmailCappedError(reserved.retryAfterSeconds);
+    }
     const endUser = await prisma.endUser.findUnique({
       where: { applicationId_email: { applicationId: input.application.id, email } },
     });
@@ -1987,23 +2343,42 @@ export const authService = {
     // Refuse to mint a magic link that would auto-create a user when this
     // caller isn't allowed to create one (invite_only, secret_only reached with
     // a publishable key, or an email domain the sign-up rules refuse). Existing
-    // users still get a sign-in link.
+    // users still get a sign-in link. A banned account is answered the same
+    // way: no link is minted or mailed.
     //
-    // A banned account is answered the same way: no link is minted or mailed.
-    //
-    // For a publishable key every refusal here returns the constant reply, so
-    // it cannot tell a known, unknown or banned address apart. For a SECRET key
-    // `delivered` differs: a refused or banned address reads `false`, a sent
-    // link `true`. That is the same caveat as requestPasswordReset, and a
-    // secret key belongs to the operator's own backend, which may know.
-    if ((!endUser && !signupAllowed(config, input.authKind, email)) || endUser?.bannedAt) {
-      // Sleep to flatten the timing side channel. A publishable caller gets the
-      // constant response so this refusal is indistinguishable from a real send.
-      await new Promise((r) => setTimeout(r, 50));
-      if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
+    // For a SECRET key `delivered` differs: a refused or banned address reads
+    // `false`, a sent link `true`. A secret key belongs to the operator's own
+    // backend, which may know.
+    const refused = (!endUser && !signupAllowed(config, input.authKind, email)) || Boolean(endUser?.bannedAt);
+    if (publishable) {
+      // A browser caller gets the constant body without waiting for the mail,
+      // so a refusal, an unknown address and a real send take the same time.
+      sendOrGiveBack(
+        reserved,
+        refused
+          ? null
+          : () => this.mailMagicLink({ application: input.application, email, endUser, signInUrl: input.signInUrl }),
+      );
+      return PUBLISHABLE_MAGIC_LINK_RESPONSE;
+    }
+    if (refused) {
+      await refuseQuietRequestOverCap(reserved);
       return { delivered: false, emailSent: false, magicLinkToken: null };
     }
+    return this.mailMagicLink({ application: input.application, email, endUser, signInUrl: input.signInUrl });
+  },
 
+  /**
+   * Mint a sign-in link and mail it. Returns what a SECRET-key caller is told;
+   * a publishable caller never sees this and is answered before it runs.
+   */
+  async mailMagicLink(input: {
+    application: Application;
+    email: string;
+    endUser: EndUser | null;
+    signInUrl?: string | undefined;
+  }): Promise<{ delivered: boolean; emailSent: boolean; magicLinkToken: string | null }> {
+    const { email, endUser } = input;
     const issued = await issueMagicLinkToken({
       applicationId: input.application.id,
       endUserId: endUser?.id ?? null,
@@ -2043,7 +2418,6 @@ export const authService = {
       }
       // The RETURN stays outside that guard. A magic-link token IS a session,
       // so a suppressed send must withhold it exactly as a failed one does.
-      if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
       return { delivered: true, emailSent: false, magicLinkToken: null };
     }
     // Same rule as requestPasswordReset, and the stakes are higher: a
@@ -2052,7 +2426,6 @@ export const authService = {
     // forward via its own provider, so it is only ever safe for a secret key.
     // A publishable key lives in browser code; handing it this token is
     // instant account takeover.
-    if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
     return { delivered: true, emailSent: false, magicLinkToken: issued.raw };
   },
 
@@ -2141,12 +2514,44 @@ export const authService = {
     // Atomic: consume the token + (when needed) create the user. If
     // anything fails, the token stays unconsumed and the user isn't
     // created, operator retry is safe.
-    const { endUser, deliveryIds, welcomeNow, createdHere } = await prisma.$transaction(async (tx): Promise<{
+    const proof = {
+      via: 'magic_link' as const,
+      ip: input.device?.ip ?? null,
+      userAgent: input.device?.userAgent ?? null,
+    };
+    const { endUser, deliveryIds, welcomeNow, createdHere, claimed, mailboxProven } = await prisma.$transaction(async (tx): Promise<{
       endUser: EndUser;
       deliveryIds: string[];
       welcomeNow: boolean;
       createdHere: boolean;
+      claimed?: { noticeDue: boolean };
+      mailboxProven?: boolean;
     }> => {
+      // The link is proof of the mailbox, so an account nobody had confirmed
+      // goes to its holder with every earlier credential removed: whoever
+      // registered the address first must not keep a way in.
+      const signInTo = async (existing: EndUser) => {
+        const claim = await claimUnverifiedAccount(tx, existing, proof);
+        if (claim.kind === 'claimed') {
+          return {
+            endUser: claim.user,
+            deliveryIds: claim.deliveryIds,
+            welcomeNow: claim.welcome,
+            createdHere: false,
+            claimed: { noticeDue: claim.signInMethodsRemoved },
+          };
+        }
+        return {
+          endUser: existing.emailVerified
+            ? existing
+            : await tx.endUser.findUniqueOrThrow({ where: { id: existing.id } }),
+          deliveryIds: [],
+          welcomeNow: false,
+          createdHere: false,
+          mailboxProven: claim.kind === 'held_for_mfa',
+        };
+      };
+
       const consumed = await tx.magicLinkToken.updateMany({
         where: { id: outcome.token.id, consumedAt: null },
         data: { consumedAt: new Date() },
@@ -2175,30 +2580,7 @@ export const authService = {
             fix: 'Request a fresh magic link.',
           });
         }
-        // The user just retrieved a single-use secret we posted to that
-        // mailbox and nowhere else. That is the same proof the verification
-        // link collects, and the stale-email check above is what makes it
-        // proof of the address *currently* on the account. Recording it here
-        // is what makes the documented claim, "magic-link and OAuth sign-in
-        // each carry their own proof of the address", actually true: the
-        // create branch below always set the flag, so only the account that
-        // already existed threw the evidence away, and it kept shipping
-        // `email_verified: false` to relying parties forever afterwards.
-        const flipped = await tx.endUser.updateMany({
-          where: { id: existing.id, emailVerified: false },
-          data: { emailVerified: true },
-        });
-        if (flipped.count === 0) {
-          return { endUser: existing, deliveryIds: [], welcomeNow: false, createdHere: false };
-        }
-        const verified = await tx.endUser.findUniqueOrThrow({ where: { id: existing.id } });
-        const ids = await enqueueUserUpdated(tx, {
-          user: verified,
-          changed: ['emailVerified'],
-          via: 'magic_link',
-        });
-        const welcome = await claimPendingWelcome(tx, input.application, verified.id);
-        return { endUser: verified, deliveryIds: ids, welcomeNow: welcome, createdHere: false };
+        return signInTo(existing);
       }
 
       // New user: create with verified email + default role. Re-check the
@@ -2230,11 +2612,12 @@ export const authService = {
           }),
         );
       } catch (e) {
-        // Race: a consume of ANOTHER link for the same new address won the
-        // create (one link cannot race itself, the conditional consume above
-        // lets only one request through). This link is still a valid,
-        // now-spent proof of the mailbox, so it signs in to the winner's user.
-        // The winner announced it, so this consume enqueues no `user.created`.
+        // The address gained an account after this link was minted: another
+        // link's consume won the create, or someone signed up with a password
+        // in between. This link is still a valid, now-spent proof of the
+        // mailbox, so it signs in to that user, claiming it first when the
+        // address was unconfirmed. Whoever created the row announced it, so
+        // this consume enqueues no `user.created`.
         if ((e as { code?: string }).code === 'P2002') {
           const winner = await tx.endUser.findUniqueOrThrow({
             where: {
@@ -2244,7 +2627,7 @@ export const authService = {
               },
             },
           });
-          return { endUser: winner, deliveryIds: [], welcomeNow: false, createdHere: false };
+          return signInTo(winner);
         }
         throw e;
       }
@@ -2264,11 +2647,12 @@ export const authService = {
     // welcome sign-up held back. A consume that lost the create race to
     // another link signs in to a user it did not create.
     if (welcomeNow) sendWelcomeEmail(input.application, endUser.email);
+    if (claimed?.noticeDue) sendAccountClaimedEmail(input.application, endUser.email);
 
     return issueSessionOrMfaChallenge(
       input.application,
       endUser,
-      { via: 'magic_link', isNewUser: createdHere },
+      { via: 'magic_link', isNewUser: createdHere, ...(mailboxProven && { mailboxProven }) },
       input.device,
     );
   },
@@ -2309,11 +2693,16 @@ export const authService = {
         fix: 'No further action is required.',
       });
     }
-    return deliverVerificationEmail({
+    // The signed-in caller may not own this mailbox, so the cap applies here
+    // too. A session already says the account exists, so the refusal can.
+    const { cappedForSeconds, ...sent } = await deliverVerificationEmail({
       application: input.application,
       endUser,
+      allowance: 'reserve',
       ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
     });
+    if (cappedForSeconds !== undefined) throw authEmailCappedError(cappedForSeconds);
+    return sent;
   },
 
   /**
@@ -2334,9 +2723,11 @@ export const authService = {
    *     gets the real outcome (and the raw token when no transport is
    *     configured), because that key is the customer's own server, which can
    *     already list its own end-users.
-   *   - **Constant-ish timing.** The two short-circuit branches sleep the same
-   *     50ms the reset path does, so "no account" and "account, mail sent" are
-   *     not trivially separable by a stopwatch.
+   *   - **Same path, same time.** A publishable caller is answered before any
+   *     mail is built, so "no account" and "account, mail sent" run the same
+   *     code and cannot be told apart by a stopwatch.
+   *   - **Capped per recipient**, before the lookup, so nobody can fill an
+   *     inbox through it and the cap itself says nothing about the address.
    *   - **One status code.** Never throws for a business outcome. There is no
    *     `EMAIL_ALREADY_VERIFIED` here, the authenticated route can afford
    *     that 400 because the caller already proved who they are.
@@ -2359,6 +2750,14 @@ export const authService = {
   }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
     // Before the lookup, for the same reason as requestPasswordReset.
     assertAllowedTokenUrl(input.application, input.verifyUrl, 'verifyUrl');
+    const publishable = input.authKind === 'publishable';
+    // Also before the lookup, so a known and an unknown address spend the
+    // recipient's allowance alike, and a counter outage refuses both.
+    const reserved = await reserveAuthEmail(applicationEmailScope(input.application), input.email);
+    if (!reserved.allowed) {
+      if (publishable) return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
+      throw authEmailCappedError(reserved.retryAfterSeconds);
+    }
     const endUser = await prisma.endUser.findUnique({
       where: {
         applicationId_email: {
@@ -2367,21 +2766,27 @@ export const authService = {
         },
       },
     });
-    // No account, or nothing to verify. Same flattening sleep and the same
-    // answer for both, see the docblock.
-    if (!endUser || endUser.emailVerified || endUser.erasedAt !== null || endUser.bannedAt !== null) {
-      await new Promise((r) => setTimeout(r, 50));
-      if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
+    const nothingToVerify =
+      !endUser || endUser.emailVerified || endUser.erasedAt !== null || endUser.bannedAt !== null;
+    const send = (user: EndUser) =>
+      deliverVerificationEmail({
+        application: input.application,
+        endUser: user,
+        requireResolvableUrl: true,
+        allowance: 'reserved',
+        ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
+      });
+    if (publishable) {
+      // A browser caller gets the constant body without waiting for the mail,
+      // so "no account", "already verified" and a real send take the same time.
+      sendOrGiveBack(reserved, nothingToVerify ? null : () => send(endUser));
+      return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
+    }
+    if (nothingToVerify) {
+      await refuseQuietRequestOverCap(reserved);
       return { emailSent: false, verificationToken: null };
     }
-    const result = await deliverVerificationEmail({
-      application: input.application,
-      endUser,
-      requireResolvableUrl: true,
-      ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
-    });
-    if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
-    return result;
+    return send(endUser);
   },
 
   /**
@@ -2574,6 +2979,7 @@ export const authService = {
         fix: 'Verify the user id and the calling secret key.',
       });
     }
+    assertVerifiedForCredential(endUser, 'register a passkey');
     const existing = await prisma.webAuthnCredential.findMany({
       where: { endUserId: endUser.id },
     });
@@ -2600,6 +3006,13 @@ export const authService = {
     response: Parameters<typeof verifyRegistration>[0]['response'];
     deviceName?: string;
   }): Promise<{ credentialId: string; deviceName: string | null }> {
+    assertVerifiedForCredential(
+      await prisma.endUser.findUniqueOrThrow({
+        where: { id: input.endUserId },
+        select: { emailVerified: true },
+      }),
+      'register a passkey',
+    );
     // Burn the challenge first (single-use, bound to this app + user).
     await consumeChallenge({
       challenge: input.expectedChallenge,
@@ -2791,6 +3204,21 @@ export const authService = {
     //
     // Customers who want passkey + TOTP belt-and-braces can opt in by not
     // bypassing here in their own flow; we make the simpler trade.
+    // Read again after the account row: a claim removes passkeys and moves
+    // the stamp together, so either the passkey is already gone here, or the
+    // session below is refused because the stamp is no longer the one read.
+    const stillRegistered = await prisma.webAuthnCredential.findUnique({
+      where: { id: credential.id },
+      select: { id: true },
+    });
+    if (!stillRegistered) {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'WEBAUTHN_AUTH_INVALID',
+        message: 'Passkey authentication failed.',
+        fix: 'Use the passkey registered for this Application, or register a new one.',
+      });
+    }
     const result = await issuePair(input.application, endUser, { credential: { via: 'passkey' } }, input.device);
     return { mfaRequired: false, ...result };
   },

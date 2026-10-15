@@ -27,6 +27,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
+import { EMAIL_NOT_VERIFIED_COPY } from '@/components/ConfirmEmailNotice';
 import { cookieSecure } from '@/lib/cookie-secure';
 import type { Page } from '@/lib/paginate';
 
@@ -57,10 +58,16 @@ interface MfaSetupResp {
 
 async function setupMfa(): Promise<void> {
   'use server';
-  const result = await api<MfaSetupResp>({
-    method: 'POST',
-    path: '/api/v1/tenant/auth/mfa/setup',
-  });
+  let result: MfaSetupResp;
+  try {
+    result = await api<MfaSetupResp>({
+      method: 'POST',
+      path: '/api/v1/tenant/auth/mfa/setup',
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) redirect(`/account/security?${await errorQuery(err)}`);
+    throw err;
+  }
   // Stash the secret + backup codes in a short-lived HttpOnly cookie so
   // they don't end up in the URL bar / browser history / referer headers.
   // Path is locked to /account/security so the cookie isn't sent on
@@ -148,6 +155,7 @@ const ERR: Record<string, string> = {
   MFA_CODE_INVALID: 'That code did not verify. Make sure your authenticator clock is in sync, then enter the current 6-digit code.',
   MFA_CODE_REUSED: 'That code was already used. Wait for your authenticator to show the next code, then enter it.',
   MFA_NOT_INITIATED: 'Click "Set up MFA" first.',
+  EMAIL_NOT_VERIFIED: EMAIL_NOT_VERIFIED_COPY,
   INVALID_CREDENTIALS: 'Current password is incorrect.',
   PASSWORD_TOO_SHORT: 'New password must be at least 8 characters.',
 };
@@ -184,13 +192,13 @@ export default async function SecurityPage({
   const confirmed = sp.confirmed === '1';
   const disabled = sp.disabled === '1';
 
-  const [status, { items: sessions }, operatorEmail, passkeyCount] = await Promise.all([
+  const [status, { items: sessions }, operator, passkeyCount] = await Promise.all([
     api<MfaStatus>({ method: 'GET', path: '/api/v1/tenant/auth/mfa/status' }),
     api<Page<OperatorSessionRow>>({ method: 'GET', path: '/api/v1/tenant/auth/sessions' }),
     // For the change-password form's hidden username field, best-effort: the
     // form works without it.
     getMe()
-      .then((me) => me.user.email)
+      .then((me) => me.user)
       .catch(() => null),
     // Only the count is shown here; the list and its controls live on the
     // Passkeys page. Null on failure, so a failed read never reads as "none".
@@ -198,6 +206,7 @@ export default async function SecurityPage({
       .then((r) => r.passkeys.length)
       .catch(unlessBusy(() => null)),
   ]);
+  const operatorEmail = operator?.email ?? null;
   const sessionRevoked = sp.session_revoked === '1';
   const signedOutAll = sp.signed_out_all === '1';
 

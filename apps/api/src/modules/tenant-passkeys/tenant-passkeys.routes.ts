@@ -20,6 +20,7 @@ import { tenantMfaService } from '../tenant-mfa/tenant-mfa.service.js';
 import { authRateLimit, passkeyStartRateLimit } from '../../lib/rate-limit.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 /**
  * The 401/403 pair `requireTenantSession` (middleware/tenant-session.ts) produces, shared by
@@ -179,6 +180,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
     },
     async (req) => {
       const proof = StepUpProofBody.parse(req.body ?? {});
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'add a passkey');
       await assertTenantStepUp({
         tenantUserId: req.tenantUser!.id,
         proof,

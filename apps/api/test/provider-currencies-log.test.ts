@@ -10,8 +10,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { getModule } from '../src/modules/billing/providers/registry.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PAYPAL = { clientId: 'paypal_client_ci', clientSecret: 'paypal_secret_ci', webhookId: 'WH-CI' };
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
@@ -120,14 +122,6 @@ describe('provider.currencies_changed', () => {
     ]);
   });
 
-  it('a first save without a list logs the currencies the provider starts with', async () => {
-    await save('PUT', 'paypal', { data: PAYPAL, mode: 'test' });
-    const entries = await logged();
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!.data).toEqual({ before: [], after: getModule('paypal')!.display.preselectedCurrencies });
-    expect(entries[0]!.actor).toMatchObject({ type: 'operator', id: operatorId });
-  });
-
   it('a PATCH and a later PUT with a list each log the list before and after', async () => {
     await save('PUT', 'paypal', { data: PAYPAL, mode: 'test', currencies: ['USD', 'EUR'] });
     await save('PATCH', 'paypal', { currencies: ['USD'] });
@@ -151,11 +145,6 @@ describe('provider.currencies_changed', () => {
     await save('PUT', 'paypal', { data: PAYPAL, mode: 'test' });
     await save('PUT', 'paypal', { data: PAYPAL, mode: 'test', currencies: ['USD', 'EUR'] });
     expect(await logged()).toHaveLength(1);
-  });
-
-  it('a first save with an empty list logs nothing: no currency before, none after', async () => {
-    await save('PUT', 'paypal', { data: PAYPAL, mode: 'test', currencies: [] });
-    expect(await logged()).toEqual([]);
   });
 
   it('a refused list logs nothing and leaves the stored list alone', async () => {

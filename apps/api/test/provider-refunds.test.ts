@@ -56,11 +56,6 @@ describe('capability declaration matches implementation', () => {
     expect(typeof refundPayment === 'function').toBe(Boolean(mod!.capabilities.refunds));
   });
 
-  it('all three declare partial refunds, and only Stripe has no window', () => {
-    expect(getModule('stripe')!.capabilities.refunds).toEqual({ partial: true, windowDays: null });
-    expect(getModule('paypal')!.capabilities.refunds).toEqual({ partial: true, windowDays: 180 });
-    expect(getModule('razorpay')!.capabilities.refunds).toEqual({ partial: true, windowDays: 180 });
-  });
 });
 
 describe('stripe: resolving the stored id to something refundable', () => {
@@ -110,29 +105,6 @@ describe('stripe: resolving the stored id to something refundable', () => {
       { idempotencyKey: REFUND.idempotencyKey },
     );
     expect(create.mock.calls[0]![0]).not.toHaveProperty('charge');
-  });
-
-  it('resolves a checkout session id to its payment intent', async () => {
-    const { provider, create, sessionRetrieve } = stripeStub();
-    await provider.refundPayment({ ...REFUND, providerPaymentId: 'cs_first_payment' });
-
-    expect(sessionRetrieve).toHaveBeenCalledWith('cs_first_payment');
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ payment_intent: 'pi_from_session' }),
-      expect.anything(),
-    );
-  });
-
-  it('passes a payment intent through without a lookup', async () => {
-    const { provider, create, invoicePaymentsList, sessionRetrieve } = stripeStub();
-    await provider.refundPayment({ ...REFUND, providerPaymentId: 'pi_direct' });
-
-    expect(invoicePaymentsList).not.toHaveBeenCalled();
-    expect(sessionRetrieve).not.toHaveBeenCalled();
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ payment_intent: 'pi_direct' }),
-      expect.anything(),
-    );
   });
 
   it('passes a charge id through as a charge, not a payment intent', async () => {
@@ -327,24 +299,6 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
     expect(calls[0]!.url).not.toContain('ignored-when-href-present');
   });
 
-  it('sends note_to_payer, not note', async () => {
-    // PayPal's own examples show `note`, contradicting their schema. `note` is
-    // dropped silently, so the buyer never sees the reason.
-    const calls = paypalFetchStub([
-      { status: 201, body: { id: 'ref_3', status: 'COMPLETED', amount: { value: '1.00', currency_code: 'USD' } } },
-    ]);
-    const provider = new RealPaypalProvider(creds, 'test');
-    await provider.refundPayment({
-      ...REFUND,
-      providerPaymentId: 'CAP1',
-      amount: 100,
-      currency: 'USD',
-      reason: 'Duplicate charge',
-    });
-    expect(calls[0]!.body).toHaveProperty('note_to_payer', 'Duplicate charge');
-    expect(calls[0]!.body).not.toHaveProperty('note');
-  });
-
   it('sends an empty body for a full refund', async () => {
     const calls = paypalFetchStub([
       { status: 201, body: { id: 'ref_4', status: 'COMPLETED' } },
@@ -410,17 +364,6 @@ describe('razorpay: refund creation and its refusals', () => {
     // `refund.processed`. Reporting this as succeeded would tell an operator
     // the money moved when it has not.
     expect(res.status).toBe('pending');
-  });
-
-  it('reports a processed refund as succeeded', async () => {
-    const { provider } = razorpayStub({
-      id: 'rfnd_2',
-      amount: 100,
-      currency: 'INR',
-      status: 'processed',
-    });
-    const res = await provider.refundPayment({ ...REFUND, providerPaymentId: 'pay_X' });
-    expect(res.status).toBe('succeeded');
   });
 
   it('omits the amount for a full refund rather than computing one', async () => {

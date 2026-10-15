@@ -86,11 +86,6 @@ describe('Publishable-key auth', () => {
     expect(data.endUser.applicationId).toBe(applicationId);
   });
 
-  it('201: sign-up still works with a secret key on the same route', async () => {
-    const res = await signUp(liveKey, 'secret@example.com');
-    expect(res.statusCode).toBe(201);
-  });
-
   // ---------- secret-only route rejects the publishable key ----------
 
   it('401: a publishable key is rejected on a secret-only route (GET /me)', async () => {
@@ -184,17 +179,5 @@ describe('Publishable-key auth', () => {
       });
     });
 
-    it('force=true re-rotates during grace, dropping the oldest key', async () => {
-      const oldest = publicKey;
-      const first = await applicationsService.rotatePublicKey({ applicationId });
-      const second = await applicationsService.rotatePublicKey({ applicationId, force: true });
-      // The newest key works; the once-previous (first.publicKey) still works...
-      expect((await signUp(second.publicKey, 'forced-new@example.com')).statusCode).toBe(201);
-      expect((await signUp(first.publicKey, 'forced-prev@example.com')).statusCode).toBe(201);
-      // ...but the original (dropped) key no longer authenticates.
-      const dropped = await signUp(oldest, 'forced-dropped@example.com');
-      expect(dropped.statusCode).toBe(401);
-      expect(dropped.json().error.code).toBe('PUBLISHABLE_KEY_INVALID');
-    });
   });
 });

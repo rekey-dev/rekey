@@ -27,7 +27,7 @@ const WORD = { INHERIT: 'inherit', TRUSTED: 'trusted', OFF: 'off' } as const;
  * is written when the value is the one the plan already had.
  *
  * @example
- * await updatePlanAndDefaultPrice(plan.id, { localPrices: 'OFF' }, (tx, updated, _change, previous) =>
+ * await updatePlanAndDefaultPrice(plan.id, { localPrices: 'OFF' }, { onChange: (tx, updated, _change, previous) =>
  *   recordLocalPricesChange(tx, updated, previous, { operatorId }),
  * );
  */

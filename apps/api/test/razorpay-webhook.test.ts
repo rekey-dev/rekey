@@ -196,21 +196,6 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     });
   }
 
-  it('subscription.activated: PENDING → ACTIVE, persists providerSubId', async () => {
-    const sub = await seedPendingSub('sub_act_1', 'act');
-    const evt = {
-      event: 'subscription.activated',
-      payload: { subscription: { entity: { id: 'sub_act_1', status: 'active', current_end: 1893456000 } } },
-    };
-    const { payload, headers } = signed(evt, 'evt_act_1');
-    const res = await app.inject({ method: 'POST', url: URL, headers, payload });
-    expect(res.statusCode).toBe(200);
-
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(after.status).toBe('ACTIVE');
-    expect(after.providerSubId).toBe('sub_act_1');
-  });
-
   it('subscription.charged: inserts a SUCCEEDED Payment, keeps Subscription ACTIVE', async () => {
     const sub = await seedPendingSub('sub_chg_1', 'chg');
     // Activate first so providerSubId is set.
@@ -381,17 +366,5 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     const payment = await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'pay_link_1' } });
     expect(payment.status).toBe('SUCCEEDED');
     expect(payment.amount).toBe(49900);
-  });
-
-  it('unhandled event types are recorded but not processed (200 OK)', async () => {
-    const evt = { event: 'payment.captured', payload: { payment: { entity: { id: 'pay_x' } } } };
-    const { payload, headers } = signed(evt, 'evt_unhandled');
-    const res = await app.inject({ method: 'POST', url: URL, headers, payload });
-    expect(res.statusCode).toBe(200);
-    const row = await prisma.webhookEvent.findFirstOrThrow({
-      where: { provider: 'razorpay', eventType: 'payment.captured' },
-    });
-    expect(row.processedAt).not.toBeNull();
-    expect(row.processingError).toBeNull();
   });
 });

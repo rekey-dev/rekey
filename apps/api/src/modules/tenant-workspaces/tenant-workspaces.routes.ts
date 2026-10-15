@@ -17,6 +17,7 @@ import { recordSecurityEvent, requestContext } from '../../lib/security-events.j
 import { env } from '../../config/env.js';
 import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 /**
  * The 401/403 pair every `/api/v1/tenant/workspace/*` route shares,
@@ -604,6 +605,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'change what a member of the workspace can do');
       const { id } = MemberIdParam.parse(req.params);
       const body = MemberPatchBody.parse(req.body);
       let member;
@@ -717,6 +719,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       },
     },
     async (req) => {
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'grant a member access to an Application');
       const { id } = MemberIdParam.parse(req.params);
       const body = GrantBody.parse(req.body);
       const grant = await tenantWorkspacesService.setMemberGrant({
@@ -1021,7 +1024,11 @@ async function redeemBoundOperatorInvite(
   req: FastifyRequest,
   rawToken: string,
 ): ReturnType<typeof redeemWorkspaceInvite> {
-  const result = await redeemWorkspaceInvite({ rawToken, tenantUserId: req.tenantUser!.id });
+  const result = await redeemWorkspaceInvite({
+    rawToken,
+    tenantUserId: req.tenantUser!.id,
+    sessionStamp: req.tenantSessionStamp ?? null,
+  });
   void recordSecurityEvent({
     type: 'operator.invite_redeemed',
     actorType: 'operator',
@@ -1156,6 +1163,7 @@ export async function tenantInvitationAuthRoutes(app: FastifyInstance): Promise<
         : await tenantWorkspacesService.acceptInvitation({
             rawToken: body.token,
             tenantUserId: req.tenantUser!.id,
+            sessionStamp: req.tenantSessionStamp ?? null,
           });
       return {
         success: true,

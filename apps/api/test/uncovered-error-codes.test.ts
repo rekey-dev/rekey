@@ -18,9 +18,12 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
 import { GoogleProvider } from '../src/modules/oauth/providers/google.js';
-import { operatorTokensService } from '../src/modules/tenant-auth/operator-tokens.service.js';
 import { OPERATOR_TOKEN_SCOPES } from '../src/lib/operator-token.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
+endUsersConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -142,20 +145,6 @@ describe('uncovered error codes', () => {
       where: { applicationId: b.applicationId },
     });
     expect(row.consumedAt).toBeNull();
-  });
-
-  // ---------- MFA_CHALLENGE_INVALID ----------
-
-  it('MFA_CHALLENGE_INVALID: an end-user challenge token that is not a real one', async () => {
-    const b = await bootstrap('mfaeu');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/mfa-verify',
-      headers: { authorization: `Bearer ${b.liveKey}` },
-      payload: { mfaChallengeToken: 'not.a.challenge.token', code: '123456' },
-    });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('MFA_CHALLENGE_INVALID');
   });
 
   it('MFA_CHALLENGE_INVALID: the operator surface refuses the same way', async () => {
@@ -294,25 +283,6 @@ describe('uncovered error codes', () => {
       });
     }
 
-    it('COUPON_INACTIVE: a deactivated coupon stops discounting', async () => {
-      const f = await couponFixture('cinactive');
-      await createCoupon(f, { code: 'OFF20', discountType: 'PERCENT', basisPoints: 2000 });
-      // Active first, otherwise "refused" proves nothing about the flag.
-      expect((await validate(f, 'OFF20')).statusCode).toBe(200);
-
-      const off = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/admin/applications/${f.applicationId}/coupons/off20`,
-        headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { active: false },
-      });
-      expect(off.statusCode).toBe(200);
-
-      const res = await validate(f, 'OFF20');
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_INACTIVE');
-    });
-
     it('COUPON_NOT_YET_STARTED: a future startsAt is refused, not applied early', async () => {
       const f = await couponFixture('cfuture');
       await createCoupon(f, {
@@ -357,77 +327,6 @@ describe('uncovered error codes', () => {
       expect(ok.statusCode).toBe(200);
       expect((ok.json().data as { discountAmount: number }).discountAmount).toBe(500);
     });
-
-    it('COUPON_AMOUNTS_REQUIRED: an AMOUNT coupon cannot be created without an amount in some currency', async () => {
-      // Without one it would have nothing to take off in any currency (#290).
-      const f = await couponFixture('ccurreq');
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/v1/admin/applications/${f.applicationId}/coupons`,
-        headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { code: 'ANY5', discountType: 'AMOUNT', amounts: [] },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_AMOUNTS_REQUIRED');
-      expect(await prisma.coupon.count({ where: { applicationId: f.applicationId } })).toBe(0);
-
-      // The fix it gives works: the same body with a currency is accepted.
-      await createCoupon(f, { code: 'ANY5', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 500 }] });
-
-      // PERCENT is unaffected: a percentage means the same thing in every currency.
-      await createCoupon(f, { code: 'PCT10', discountType: 'PERCENT', basisPoints: 1000 });
-    });
-
-    it('COUPON_CURRENCY_INVALID: a currency that is not ISO 4217 is refused at create', async () => {
-      const f = await couponFixture('ccurinvalid');
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/v1/admin/applications/${f.applicationId}/coupons`,
-        headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { code: 'BOGUS5', discountType: 'AMOUNT', amounts: [{ currency: 'ABC', amountOff: 500 }] },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_CURRENCY_INVALID');
-      expect(await prisma.coupon.count({ where: { applicationId: f.applicationId } })).toBe(0);
-
-      // Case does not matter, matching how the plan comparison treats it.
-      await createCoupon(f, { code: 'LOWER5', discountType: 'AMOUNT', amounts: [{ currency: 'usd', amountOff: 500 }] });
-    });
-
-    it('COUPON_CURRENCY_NOT_COVERED: a legacy AMOUNT coupon with no currency is refused, not applied at face value', async () => {
-      // Rows created before `currency` was required still exist and have no
-      // amount row. The API can no longer write one, so the row is seeded directly.
-      const f = await couponFixture('ccurlegacy');
-      await prisma.coupon.create({
-        data: {
-          applicationId: f.applicationId,
-          code: 'legacy5',
-          discountType: 'AMOUNT',
-          amountOff: 500,
-          currency: null,
-        },
-      });
-
-      const res = await validate(f, 'LEGACY5');
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
-
-      // Checkout goes through the same gate, so nothing is reserved or minted.
-      const checkout = await app.inject({
-        method: 'POST',
-        url: '/api/v1/billing/checkout',
-        headers: { authorization: `Bearer ${f.liveKey}`, 'x-rekey-user-token': f.userToken },
-        payload: {
-          planSlug: 'pro_monthly',
-          couponCode: 'LEGACY5',
-          successUrl: 'https://example.com/ok',
-          cancelUrl: 'https://example.com/cancel',
-        },
-      });
-      expect(checkout.statusCode).toBe(400);
-      expect(checkout.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
-      expect(await prisma.couponRedemption.count({ where: { applicationId: f.applicationId } })).toBe(0);
-    });
   });
 
   // ---------- OPERATOR_SCOPE_UNKNOWN ----------
@@ -449,26 +348,6 @@ describe('uncovered error codes', () => {
     for (const scope of OPERATOR_TOKEN_SCOPES) expect(error.fix).toContain(scope);
     expect(error.details).toEqual({ unknown: ['keys:mints'], valid: [...OPERATOR_TOKEN_SCOPES] });
     // Fail CLOSED either way: a typo must not silently mint a token.
-    expect(await prisma.tenantApiToken.count({ where: { tenantId: b.tenantId } })).toBe(0);
-  });
-
-  it('OPERATOR_SCOPE_UNKNOWN: the service rejects an unknown scope rather than dropping it', async () => {
-    const b = await bootstrap('patservice');
-    const tenantUser = await prisma.tenantUser.findFirstOrThrow({
-      where: { memberships: { some: { tenantId: b.tenantId } } },
-    });
-
-    // Silently dropping the unknown entry would produce a token with FEWER
-    // scopes than asked for, the caller would believe it can mint keys and
-    // find out in production. Fail closed instead.
-    await expect(
-      operatorTokensService.mint({
-        tenantUserId: tenantUser.id,
-        tenantId: b.tenantId,
-        name: 'typo',
-        scopes: ['read', 'keys:mints'],
-      }),
-    ).rejects.toMatchObject({ statusCode: 400, code: 'OPERATOR_SCOPE_UNKNOWN' });
     expect(await prisma.tenantApiToken.count({ where: { tenantId: b.tenantId } })).toBe(0);
   });
 

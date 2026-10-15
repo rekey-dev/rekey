@@ -15,6 +15,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const SLUG = 'w-app';
@@ -528,19 +529,15 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
   it('invoice.paid: re-provisions a TIMED license — extends expiry on renewal, idempotent within a period (#73)', async () => {
     // A recurring TIMED LICENSE plan (30-day term). Inserted directly, the
     // admin plans route only accepts SUBSCRIPTION fields.
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: 'timed_lic',
         name: 'Timed License',
-        amount: 1999,
-        currency: 'USD',
         kind: 'LICENSE',
         licenseKind: 'TIMED',
         licenseDurationDays: 30,
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 1999 });
     const endUser = await prisma.endUser.findFirstOrThrow({ where: { applicationId } });
     const p1 = new Date('2026-03-31T00:00:00.000Z');
     await prisma.subscription.create({

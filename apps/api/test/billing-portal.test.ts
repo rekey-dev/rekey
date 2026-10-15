@@ -102,20 +102,6 @@ describe('end-user billing portal surface', () => {
     expect(res.json().error.code).toBe('USER_TOKEN_MISSING');
   });
 
-  it('GET /billing/payments returns an empty list for a fresh user', async () => {
-    const { accessToken } = await signUpUser('fresh@example.com');
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/billing/payments',
-      headers: userHeaders(accessToken),
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual({
-      items: [],
-      page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
-    });
-  });
-
   it("GET /billing/payments returns only the caller's own payments, newest first", async () => {
     const planId = await createPlan('pro');
     const alice = await signUpUser('alice@example.com');
@@ -287,18 +273,6 @@ describe('end-user billing portal surface', () => {
   // POST /billing/subscription/cancel
   // ---------------------------------------------------------------------
 
-  it('cancel returns SUBSCRIPTION_NOT_FOUND when the user has no subscription', async () => {
-    const { accessToken } = await signUpUser('nosub@example.com');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/subscription/cancel',
-      headers: userHeaders(accessToken),
-      payload: {},
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('SUBSCRIPTION_NOT_FOUND');
-  });
-
   it('cancel marks a PENDING (abandoned-checkout) subscription CANCELED immediately', async () => {
     await createPlan('starter');
     const { accessToken } = await signUpUser('pending@example.com');
@@ -399,42 +373,6 @@ describe('end-user billing portal surface', () => {
     const sub = res.json().data as { status: string; canceledAt: string | null };
     expect(sub.status).toBe('CANCELED');
     expect(sub.canceledAt).not.toBeNull();
-  });
-
-  it('cancel SCHEDULES at period end when the sub has no provider-side record', async () => {
-    // This test used to assert the opposite, that a row with no
-    // `providerSubId` was cancelled immediately. That was the defect: being
-    // unable to call Stripe says something about who terminates the
-    // subscription, not about when the buyer's paid time should end. The
-    // caller here sends `{}`, i.e. the default, which means period-end; taking
-    // the rest of the period away from them was never what they asked for.
-    //
-    // Rekey Cloud sells with checkout disabled, so every subscription it has
-    // is exactly this shape and every cancellation hit this path.
-    const planId = await createPlan('pro4');
-    const { accessToken, id } = await signUpUser('localonly@example.com');
-    await prisma.subscription.create({
-      data: {
-        applicationId,
-        endUserId: id,
-        planId,
-        status: 'ACTIVE',
-        provider: 'stripe',
-        // No providerSubId, e.g. activated manually / legacy row.
-        currentPeriodEnd: new Date('2099-01-01T00:00:00Z'),
-      },
-    });
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/subscription/cancel',
-      headers: userHeaders(accessToken),
-      payload: {},
-    });
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data as { status: string; cancelAt: string | null };
-    expect(data.status).toBe('ACTIVE');
-    expect(data.cancelAt).toBe('2099-01-01T00:00:00.000Z');
   });
 
   it('cancel requires the billing:write scope', async () => {

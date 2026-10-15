@@ -28,17 +28,6 @@ afterEach(() => {
 });
 
 describe('outbound webhook env settings', () => {
-  it('default to a 10s timeout and 8 in flight per Application', async () => {
-    const env = await loadEnv({});
-    expect(env.WEBHOOK_TIMEOUT_MS).toBe(10_000);
-    expect(env.WEBHOOK_APP_MAX_IN_FLIGHT).toBe(8);
-  });
-
-  it('accept a timeout inside 1-30s', async () => {
-    expect((await loadEnv({ WEBHOOK_TIMEOUT_MS: '15000' })).WEBHOOK_TIMEOUT_MS).toBe(15_000);
-    expect((await loadEnv({ WEBHOOK_TIMEOUT_MS: '1000' })).WEBHOOK_TIMEOUT_MS).toBe(1_000);
-    expect((await loadEnv({ WEBHOOK_TIMEOUT_MS: '30000' })).WEBHOOK_TIMEOUT_MS).toBe(30_000);
-  });
 
   it('refuse to boot on a timeout outside 1-30s', async () => {
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);

@@ -47,6 +47,16 @@ export interface TenantSessionClaims {
 export interface TenantMfaChallengeClaims {
   typ: 'to_mfa_challenge';
   sub: string;
+  /** The primary factor behind this challenge proved the mailbox of a still-unconfirmed account. */
+  mbx?: true;
+  /**
+   * `sessionsInvalidBefore` of the operator when the first factor verified,
+   * in milliseconds, 0 for none. The session the challenge turns into is
+   * issued on that basis.
+   */
+  sib: number;
+  /** Issue time in milliseconds (lib/session-stamp.ts). */
+  iat_ms: number;
   iat: number;
   exp: number;
 }
@@ -81,11 +91,17 @@ export function issueTenantAccessToken(
 
 export function issueTenantMfaChallengeToken(
   tenantUserId: string,
-  options: { lifetimeSeconds?: number } = {},
+  options: { lifetimeSeconds?: number; mailboxProven?: boolean; basisStamp: Date | null },
 ): { token: string; expiresAt: Date } {
   const lifetime = options.lifetimeSeconds ?? DEFAULT_MFA_CHALLENGE_LIFETIME_SECONDS;
   const token = jwt.sign(
-    { typ: 'to_mfa_challenge' as const, sub: tenantUserId },
+    {
+      typ: 'to_mfa_challenge' as const,
+      sub: tenantUserId,
+      ...(options.mailboxProven === true && { mbx: true as const }),
+      iat_ms: Date.now(),
+      sib: options.basisStamp?.getTime() ?? 0,
+    },
     env.JWT_SECRET,
     // The jti keeps two challenges minted in the same second distinct, so
     // spending one (lib/mfa-replay.ts) never spends the other.

@@ -9,7 +9,7 @@
 
 generator client {
   provider = "prisma-client-js"
-  // Match LeadSaaS targets. Linux ARM and Debian OpenSSL 3 cover prod containers.
+  // Linux ARM and Debian OpenSSL 3 cover prod containers.
   binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
@@ -95,12 +95,8 @@ model TenantUser {
   emailVerified Boolean  @default(false) @map("email_verified")
   // Display name for member lists / UI. Optional at sign-up.
   name          String?
-  // DEPRECATED / unused. Operator lockout moved to the Redis brute-force
-  // limiter (lib/brute-force.ts) — counters no longer live here, so the hot
-  // auth path doesn't write Postgres. Columns retained to avoid a destructive
-  // migration; safe to drop in a later cleanup once confirmed unused in prod.
-  failedSignInAttempts Int       @default(0) @map("failed_sign_in_attempts")
-  lockedUntil          DateTime? @map("locked_until")
+  // No failed-sign-in or lockout columns: operator lockout lives in the Redis
+  // brute-force limiter (lib/brute-force.ts).
   // See EndUser.sessionsInvalidBefore: stamped only when every session ends
   // (password change or reset, sign-out everywhere, reuse detection); the
   // session middleware refuses older access tokens.
@@ -113,6 +109,7 @@ model TenantUser {
   refreshTokens       TenantRefreshToken[]
   resetTokens         TenantPasswordResetToken[]
   magicLinkTokens     TenantMagicLinkToken[]
+  emailVerificationTokens TenantEmailVerificationToken[]
   mfaCredential       TenantMfaCredential?
   webauthnCredentials TenantWebAuthnCredential[]
   apiTokens           TenantApiToken[]
@@ -366,6 +363,27 @@ model TenantMagicLinkToken {
 
   @@index([tenantUserId])
   @@map("tenant_magic_link_tokens")
+}
+
+// The link in an operator's "confirm your email" mail. Opening it sets
+// `TenantUser.emailVerified` and changes nothing else: it ratifies the
+// sign-up, password included, where a sign-in link or a reset on an
+// unconfirmed account replaces what was there. Hash-only, single use.
+model TenantEmailVerificationToken {
+  id           String    @id @default(cuid())
+  tenantUserId String    @map("tenant_user_id")
+  // The address the link was mailed to. A link is refused once the account's
+  // address is no longer this one.
+  email        String
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@map("tenant_email_verification_tokens")
 }
 
 // Operator personal-access-tokens (PATs). A long-lived, revocable, SCOPED
@@ -1715,12 +1733,17 @@ model ApiKey {
   // key), false otherwise (masked to /24 or /48). Null for keys minted before
   // this was recorded, which keep reading them in full.
   revealsEndUserIps Boolean? @map("reveals_end_user_ips")
+  // The operator who minted the key, when one did. Lets a claim of that
+  // operator's unconfirmed account revoke the keys it minted. Null for keys
+  // from before the column, and for keys nobody signed in to create.
+  createdByTenantUserId String? @map("created_by_tenant_user_id")
   createdAt     DateTime  @default(now()) @map("created_at")
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
   // keyHash lookups ride the @unique's index — a separate @@index([keyHash])
   // was a duplicate, pure write amplification on a hot-insert table.
+  @@index([createdByTenantUserId])
   @@index([applicationId])
   @@map("api_keys")
 }
@@ -1932,11 +1955,8 @@ model MfaCredential {
   usedBackupCodeHashes String[] @default([]) @map("used_backup_code_hashes")
   // Verified at /mfa/setup-confirm. Sign-in challenges only fire when this is true.
   enrolledAt          DateTime? @map("enrolled_at")
-  // DEPRECATED / unused. MFA throttle moved to the Redis brute-force limiter
-  // (lib/brute-force.ts, scope `eu:mfa:<id>`). Columns retained to avoid a
-  // destructive migration; safe to drop in a later cleanup.
-  failedAttempts      Int       @default(0) @map("failed_attempts")
-  lockedUntil         DateTime? @map("locked_until")
+  // The MFA throttle lives in the Redis brute-force limiter
+  // (lib/brute-force.ts, scope `eu:mfa:<id>`), not on this row.
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
@@ -1951,10 +1971,7 @@ model TenantMfaCredential {
   secretCiphertext    String    @map("secret_ciphertext")
   backupCodesCiphertext String  @map("backup_codes_ciphertext")
   enrolledAt          DateTime? @map("enrolled_at")
-  // DEPRECATED / unused — see MfaCredential. Throttle moved to Redis
-  // (lib/brute-force.ts, scope `op:mfa:<id>`).
-  failedAttempts      Int       @default(0) @map("failed_attempts")
-  lockedUntil         DateTime? @map("locked_until")
+  // The MFA throttle lives in Redis (lib/brute-force.ts, scope `op:mfa:<id>`).
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
@@ -2521,12 +2538,6 @@ model Plan {
   slug          String
   name          String
   kind          PlanKind     @default(SUBSCRIPTION)
-  // Smallest currency unit (cents for USD/EUR, paise for INR, …) — never floats.
-  // For SUBSCRIPTION + LICENSE plans, this is the headline price. For USAGE
-  // plans, it's the base/recurring fee (often 0); per-unit pricing lives in
-  // `pricePerUnitCents`.
-  amount        Int
-  currency      String       @default("USD")
   interval      PlanInterval @default(MONTH)
   active        Boolean      @default(true)
 
@@ -2556,7 +2567,6 @@ model Plan {
   // catalog. We don't enforce a FK here because meters can be archived
   // independently — service-layer validation handles it.
   meterSlug          String?     @map("meter_slug")
-  pricePerUnitCents  Int?        @map("price_per_unit_cents")
   // ── CREDIT-kind config ──────────────────────────────────────────
   // Set when kind = CREDIT. Credits granted to the buyer's CreditBalance
   // on successful payment (one-off prepaid "lead pack" / top-up).
@@ -2571,12 +2581,14 @@ model Plan {
   registrationStatus PlanRegistrationStatus @default(NOT_REQUIRED) @map("registration_status")
   registrationError  String?                @map("registration_error")
   /// The plan's default price: the `PlanPrice` row a buyer pays when no other
-  /// price applies. Null for a plan with no flat price (free, or metered at
-  /// amount 0). The foreign key is on (defaultPriceId, id), so a plan can
+  /// price applies, and the only place the plan's price is stored. Null for a
+  /// plan with no flat price (free, or metered with no base fee). The foreign key is on (defaultPriceId, id), so a plan can
   /// only point at one of its own prices.
   defaultPriceId String?        @map("default_price_id")
   /// Whether the plan charges nothing at all. Explicit, because a metered plan
-  /// at amount 0 has no price row either and is not free.
+  /// with no base fee has no price row either and is not free. A free plan
+  /// has no default price: `plans_free_has_no_price` in migration
+  /// plan_prices_live_on_price_rows holds that.
   isFree        Boolean         @default(false) @map("is_free")
   /// Whether a buyer's country may select one of this plan's other prices.
   localPrices   PlanLocalPrices @default(INHERIT) @map("local_prices")
@@ -2717,13 +2729,14 @@ model Subscription {
   // create a new sub. Null only for legacy rows from before multi-provider.
   provider      String?
   status        SubscriptionStatus @default(PENDING)
-  // What this subscription costs, fixed when a payment completed its checkout:
-  // the plan's price can gain other currencies and this buyer keeps theirs.
-  // Null on a row no checkout completed (a grant, or one from before these
-  // columns); readers then use the plan's price.
+  // What this subscription costs and the price row it pays, fixed when a
+  // payment completed its checkout: the plan's price can change and this
+  // buyer keeps theirs. All three are set or all three are null
+  // (`subscriptions_price_snapshot` in migration subscription_price_snapshot_constraints). Null
+  // means the subscription has no price of its own; nothing is borrowed
+  // from the plan.
   currency      String?
   unitAmount    Int?               @map("unit_amount")
-  // The additional price the checkout charged, null for the plan's default.
   planPriceId   String?            @map("plan_price_id")
   // When the current period ends. Null until the provider tells us.
   currentPeriodEnd DateTime?       @map("current_period_end")
@@ -2760,7 +2773,9 @@ model Subscription {
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
   plan        Plan        @relation(fields: [planId], references: [id])
-  planPrice   PlanPrice?  @relation(fields: [planPriceId], references: [id], onDelete: SetNull)
+  // On (planPriceId, planId): a subscription can only name one of its own
+  // plan's prices, and that row cannot be deleted from under it.
+  planPrice   PlanPrice?  @relation(fields: [planPriceId, planId], references: [id, planId], onDelete: Restrict)
   beneficiaryOrg Organization? @relation("SubscriptionBeneficiary", fields: [beneficiaryOrgId], references: [id], onDelete: SetNull)
   payments    Payment[]
   dunningCases DunningCase[]
@@ -3222,13 +3237,10 @@ model Coupon {
   applicationId         String             @map("application_id")
   code                  String             // Stored lowercase; unique per app.
   discountType          CouponDiscountType @map("discount_type")
-  /// Not read. Written so the previous API build still sees a coupon it can
-  /// judge; dropped in the release after every unit runs the new code.
-  amountOff             Int                @map("amount_off")
-  /// Not read. See `amountOff`.
-  currency              String?
   /// PERCENT only: hundredths of a percent, 1500 is 15%. An AMOUNT coupon's
-  /// discount is its `amounts` rows.
+  /// discount is its `amounts` rows. `coupons_rate_by_kind` in migration
+  /// coupon_terms_live_on_rate_and_amount_rows holds that a PERCENT coupon has a rate and an AMOUNT
+  /// coupon has none.
   basisPoints           Int?               @map("basis_points")
   // Optional restriction to specific plan slugs. Null/empty = any plan.
   planSlugs             String[]           @map("plan_slugs")
@@ -3647,12 +3659,16 @@ model WebhookEndpoint {
   // customers verify via `X-Rekey-Signature: sha256=<hex>`.
   secret        String
   enabled       Boolean  @default(true)
+  // The operator who created the endpoint, when one did. Lets a claim of
+  // that operator's unconfirmed account switch off the endpoints it created.
+  createdByTenantUserId String? @map("created_by_tenant_user_id")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   deliveries  WebhookDelivery[]
 
+  @@index([createdByTenantUserId])
   @@index([applicationId, enabled])
   @@map("webhook_endpoints")
 }

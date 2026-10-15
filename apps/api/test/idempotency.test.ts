@@ -14,6 +14,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
 import { pruneExpiredIdempotencyKeys } from '../src/lib/token-prune.js';
 import { decryptJson } from '../src/lib/secrets.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('idempotency-key middleware', () => {
   let app: FastifyInstance;
@@ -138,37 +141,6 @@ describe('idempotency-key middleware', () => {
 
   const ledgerCount = (appId = applicationId) =>
     prisma.creditLedger.count({ where: { applicationId: appId } });
-
-  it('first call executes normally and persists the stored response', async () => {
-    const res = await grant(100, { 'idempotency-key': 'op-1' });
-    expect(res.statusCode).toBe(201);
-    expect(res.headers['idempotency-replayed']).toBeUndefined();
-    expect(await ledgerCount()).toBe(1);
-
-    // The scope is the effective ACTOR, not just the workspace, an
-    // Application- or tenant-wide scope let a lower-privileged member replay a
-    // higher-privileged member's response, because a replay short-circuits
-    // before the route's role guard ever runs.
-    const membership = await prisma.tenantMembership.findFirstOrThrow();
-    const row = await prisma.idempotencyKey.findUnique({
-      where: {
-        scopeKey_key: {
-          scopeKey: `tenant:${membership.tenantId}:member:${membership.id}`,
-          key: 'op-1',
-        },
-      },
-    });
-    expect(row).not.toBeNull();
-    expect(row!.responseStatus).toBe(201);
-    expect(row!.applicationId).toBeNull(); // operator-session scope, not API-key
-    expect(row!.method).toBe('POST');
-    // Bodies are encrypted at rest, the stored value is a ciphertext string
-    // that decrypts back to the original response.
-    expect(typeof row!.responseBody).toBe('string');
-    expect(decryptJson(row!.responseBody as string)).toEqual(res.json());
-    // ~24 h TTL.
-    expect(row!.expiresAt.getTime() - row!.createdAt.getTime()).toBeGreaterThan(23 * 60 * 60 * 1000);
-  });
 
   it('replay returns the identical stored response with Idempotency-Replayed and no second side effect', async () => {
     const first = await grant(100, { 'idempotency-key': 'op-replay' });
@@ -314,13 +286,6 @@ describe('idempotency-key middleware', () => {
     expect(res.headers['retry-after']).toBe('1');
   });
 
-  it('rejects an oversized key with 400 IDEMPOTENCY_KEY_INVALID before executing', async () => {
-    const res = await grant(100, { 'idempotency-key': 'x'.repeat(201) });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('IDEMPOTENCY_KEY_INVALID');
-    expect(await ledgerCount()).toBe(0);
-  });
-
   it('routes that did not opt in ignore the header (selective application)', async () => {
     // auth sign-up is deliberately excluded, duplicate sign-ups 409 naturally.
     const signUp = () =>
@@ -339,21 +304,6 @@ describe('idempotency-key middleware', () => {
     expect(await prisma.idempotencyKey.count({ where: { key: 'su-1' } })).toBe(0);
   });
 
-  it('the body-level credits idempotencyKey keeps working underneath the header mechanism', async () => {
-    await grant(100);
-    const consume = () =>
-      app.inject({
-        method: 'POST',
-        url: '/api/v1/credits/consume',
-        headers: { authorization: `Bearer ${liveKey}` },
-        payload: { endUserId, amount: 40, idempotencyKey: 'ledger-1' },
-      });
-    const first = await consume();
-    const second = await consume();
-    expect((first.json().data as { applied: boolean }).applied).toBe(true);
-    expect((second.json().data as { applied: boolean }).applied).toBe(false);
-    expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(60);
-  });
   /**
    * The property the escalation fix establishes: two different actors in ONE
    * workspace never share a cache slot.

@@ -43,6 +43,9 @@ import {
   slotLeaseMs,
   type EndpointGate,
 } from '../src/modules/webhooks/endpoint-gate.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Receiver {
   url: string;
@@ -171,8 +174,8 @@ describe('webhook endpoint isolation (delivery path)', () => {
     try {
       const appA = await application('hung');
       const appB = await application('healthy');
-      const { endpoint: epA } = await webhookService.createEndpoint({ applicationId: appA, url: hung.url, events: ['*'] });
-      const { endpoint: epB } = await webhookService.createEndpoint({ applicationId: appB, url: healthy.url, events: ['*'] });
+      const { endpoint: epA } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appA, url: hung.url, events: ['*'] });
+      const { endpoint: epB } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appB, url: healthy.url, events: ['*'] });
       // The hung endpoint's rows are OLDER, so they come first in the poll's
       // order, the worst case for the healthy tenant.
       await dueRows(appA, epA.id, 20, 120_000);
@@ -227,7 +230,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
     sink.setHandler(ok);
     try {
       const appId = await application('wait');
-      const { endpoint } = await webhookService.createEndpoint({ applicationId: appId, url: sink.url, events: ['*'] });
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: sink.url, events: ['*'] });
       const [id] = await dueRows(appId, endpoint.id, 1, 1_000);
       await prisma.webhookDelivery.update({ where: { id: id! }, data: { attempts: 2 } });
 
@@ -258,7 +261,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
     });
     try {
       const appId = await application('breaker');
-      const { endpoint } = await webhookService.createEndpoint({ applicationId: appId, url: sink.url, events: ['*'] });
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: sink.url, events: ['*'] });
       const ids = await dueRows(appId, endpoint.id, BREAKER_THRESHOLD + 2, 1_000);
 
       for (const id of ids.slice(0, BREAKER_THRESHOLD)) await attemptDelivery(id);
@@ -279,7 +282,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
       // A different endpoint is untouched by this one's circuit.
       const other = await receiver();
       other.setHandler(ok);
-      const { endpoint: ep2 } = await webhookService.createEndpoint({ applicationId: appId, url: other.url, events: ['*'] });
+      const { endpoint: ep2 } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: other.url, events: ['*'] });
       const [id2] = await dueRows(appId, ep2.id, 1, 1_000);
       await attemptDelivery(id2!);
       expect(other.hits).toBe(1);
@@ -294,7 +297,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
     const hung = await receiver();
     try {
       const appId = await application('overlap');
-      const { endpoint } = await webhookService.createEndpoint({ applicationId: appId, url: hung.url, events: ['*'] });
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: hung.url, events: ['*'] });
       await dueRows(appId, endpoint.id, 2, 1_000);
 
       // The first sweep takes one row and hangs on it.
@@ -329,11 +332,11 @@ describe('webhook endpoint isolation (delivery path)', () => {
       // Application's cap (8), so only the Application cap can hold them.
       const endpoints = [];
       for (let i = 0; i < 3; i++) {
-        const { endpoint } = await webhookService.createEndpoint({ applicationId: appA, url: hung.url, events: ['*'] });
+        const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appA, url: hung.url, events: ['*'] });
         endpoints.push(endpoint.id);
       }
       for (const [i, ep] of endpoints.entries()) await dueRows(appA, ep, 6, 120_000 - i * 1_000);
-      const { endpoint: epB } = await webhookService.createEndpoint({ applicationId: appB, url: healthy.url, events: ['*'] });
+      const { endpoint: epB } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appB, url: healthy.url, events: ['*'] });
       await dueRows(appB, epB.id, 3, 60_000);
 
       const started = Date.now();
@@ -371,7 +374,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
     });
     try {
       const appId = await application('timeout');
-      const { endpoint } = await webhookService.createEndpoint({ applicationId: appId, url: slow.url, events: ['*'] });
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: slow.url, events: ['*'] });
       const [late, inTime] = await dueRows(appId, endpoint.id, 2, 1_000);
 
       setDeliveryTimeoutMs(300);
@@ -401,7 +404,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
       const appId = await application('lanes');
       const ids: string[] = [];
       for (let i = 0; i < 4; i++) {
-        const { endpoint } = await webhookService.createEndpoint({ applicationId: appId, url: slow.url, events: ['*'] });
+        const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: slow.url, events: ['*'] });
         ids.push(...(await dueRows(appId, endpoint.id, 1, 1_000)));
       }
       __deliveryDbLanes.set(1);
@@ -430,14 +433,14 @@ describe('webhook endpoint isolation (delivery path)', () => {
       })),
     });
     await expect(
-      webhookService.createEndpoint({ applicationId: appId, url: 'https://example.com/one-more', events: ['*'] }),
+      webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: 'https://example.com/one-more', events: ['*'] }),
     ).rejects.toMatchObject({ code: 'WEBHOOK_ENDPOINT_LIMIT_REACHED', statusCode: 400 });
     expect(await prisma.webhookEndpoint.count({ where: { applicationId: appId } })).toBe(MAX_ENDPOINTS_PER_APPLICATION);
 
     // Another Application is not affected.
     const other = await application('limit-other');
     await expect(
-      webhookService.createEndpoint({ applicationId: other, url: 'https://example.com/first', events: ['*'] }),
+      webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: other, url: 'https://example.com/first', events: ['*'] }),
     ).resolves.toMatchObject({ endpoint: { applicationId: other } });
   });
 });

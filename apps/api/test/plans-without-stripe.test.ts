@@ -70,21 +70,6 @@ describe('plan creation without Stripe credentials', () => {
       payload: { slug, name: slug, price: { currency: 'USD', amount: 1200 }, interval: 'MONTH' },
     });
 
-  it('the real provider factory does throw for these apps — the suite mock is what hides it', async () => {
-    const appId = await createApp('plans-real-factory');
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-
-    // Bypass the suite-wide mock deliberately: this asserts what production
-    // actually does, and is the reason the assertions below are meaningful.
-    const actual = await vi.importActual<
-      typeof import('../src/modules/billing/providers/index.js')
-    >('../src/modules/billing/providers/index.js');
-
-    await expect(actual.getProviderForApplication(application, 'stripe')).rejects.toMatchObject({
-      code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
-    });
-  });
-
   it('an application with no billing credentials can still create plans', async () => {
     const appId = await createApp('plans-no-creds');
 

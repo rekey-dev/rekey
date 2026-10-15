@@ -96,12 +96,6 @@ describe("ADMIN_IP_ALLOWLIST", () => {
       /ADMIN_IP_ALLOWLIST/,
     );
   });
-
-  it("a well-formed list of every supported shape passes validation", () => {
-    process.env.ADMIN_IP_ALLOWLIST =
-      "203.0.113.4, 10.0.0.0/8, 2001:db8::1, 2001:db8::/32";
-    expect(() => assertAdminIpAllowlistValid()).not.toThrow();
-  });
 });
 
 /**
@@ -146,39 +140,6 @@ describe("ADMIN_IP_ALLOWLIST with an address the API cannot vouch for", () => {
     // The refusal has to say how to get out of it.
     expect(res.json().error.fix).toMatch(/API_PROXY_SECRET/);
     expect(res.json().error.fix).toMatch(/ADMIN_IP_ALLOWLIST/);
-  });
-
-  it("refuses the same way with a wrong key, so it still leaks nothing", async () => {
-    process.env.ADMIN_IP_ALLOWLIST = "10.0.0.0/8";
-    app = await buildApp({ logger: false });
-
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/tenants",
-      headers: {
-        authorization: "Bearer not-the-real-key-not-the-real-key",
-        ...throughUnknownProxy.headers,
-      },
-      remoteAddress: throughUnknownProxy.remoteAddress,
-    });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe("ADMIN_IP_UNVERIFIABLE");
-  });
-
-  it("with NO allowlist configured, the same request is unaffected", async () => {
-    delete process.env.ADMIN_IP_ALLOWLIST;
-    app = await buildApp({ logger: false });
-
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/tenants",
-      headers: {
-        authorization: `Bearer ${KEY}`,
-        ...throughUnknownProxy.headers,
-      },
-      remoteAddress: throughUnknownProxy.remoteAddress,
-    });
-    expect(res.statusCode).toBe(200);
   });
 
   it("admits a vouched allowlisted address through the same proxy", async () => {

@@ -19,7 +19,7 @@ import { RekeyError } from '../lib/error.js';
 import { verifyUserAccessTokenAnyAlg, type UserSessionClaims } from '../lib/jwt.js';
 import { prisma } from '../lib/prisma.js';
 import { authService, type PublicEndUser } from '../modules/auth/auth.service.js';
-import { sessionIssuedBefore } from '../lib/session-stamp.js';
+import { accessTokenEndedByStamp } from '../lib/session-stamp.js';
 
 /** Who is really behind an impersonated session. Set only for `imp` tokens. */
 export interface ImpersonationContext {
@@ -56,6 +56,12 @@ declare module 'fastify' {
      * impersonated session out of the routes that rebind credentials.
      */
     impersonation?: ImpersonationContext;
+    /**
+     * `EndUser.sessionsInvalidBefore` as read when this request's user token
+     * was admitted. A route that mints a new session from the current one
+     * passes it on, so the mint is refused if every session was ended since.
+     */
+    sessionStamp?: Date | null;
   }
 }
 
@@ -137,11 +143,10 @@ export async function requireUserSession(
   );
   // A token minted before the user's last password change, reset, sign-out
   // everywhere or refresh-token reuse is refused now rather than at its
-  // expiry. Those end every session, and the stamp is per user. Compared at
-  // second granularity (`iat` is seconds), so a token minted in the same
-  // second as the stamp, which is the pair the password-change response
-  // itself hands back, survives.
-  if (sessionIssuedBefore(claims, sessionsInvalidBefore)) {
+  // expiry. Those end every session, and the stamp is per user. See
+  // lib/session-stamp.ts for how a token minted in the stamp's own second is
+  // decided.
+  if (accessTokenEndedByStamp(claims, sessionsInvalidBefore)) {
     throw new RekeyError({
       statusCode: 401,
       code: 'USER_TOKEN_INVALID',
@@ -164,6 +169,7 @@ export async function requireUserSession(
   }
 
   request.endUser = endUser;
+  request.sessionStamp = sessionsInvalidBefore;
   if (claims.dev) request.deviceId = claims.dev;
 
   // The `oid` claim says which organization was active when the token was

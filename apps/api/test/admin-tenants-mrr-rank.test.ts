@@ -14,7 +14,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { pricedAt } from './subscription-price-fixture.js';
-import { bringPlansInStep } from '../src/modules/plans/default-price.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -64,17 +67,13 @@ describe('admin tenants ranked by MRR', () => {
     expect(application.statusCode, application.body).toBe(201);
     const applicationId = (application.json().data as { id: string }).id;
     for (const entry of mrr) {
-      const plan = await prisma.plan.create({
-        data: { applicationId, slug: `pro-${++serial}`, name: 'Pro', amount: entry.amount, currency: entry.currency, interval: 'MONTH', kind: 'SUBSCRIPTION' },
-      });
+      const plan = await seedPlan({ applicationId, slug: `pro-${++serial}`, name: 'Pro', interval: 'MONTH', kind: 'SUBSCRIPTION' }, entry.amount > 0 ? { currency: entry.currency, amount: entry.amount } : null);
       for (let i = 0; i < entry.subscribers; i += 1) {
         const endUser = await prisma.endUser.create({ data: { applicationId, email: `buyer-${++serial}@example.com` } });
         const price = entry.unpriced === true ? {} : await pricedAt(plan.id, entry.currency, entry.amount);
         await prisma.subscription.create({ data: { applicationId, endUserId: endUser.id, planId: plan.id, status: 'ACTIVE', ...price } });
       }
     }
-    // Every plan has its default price row, so an unpriced subscription is on a plan that has one.
-    await bringPlansInStep([applicationId]);
   }
 
   async function page(query: string): Promise<TenantPage> {

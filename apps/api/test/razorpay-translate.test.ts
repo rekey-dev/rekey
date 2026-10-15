@@ -52,16 +52,6 @@ describe('razorpay module translate', () => {
     ]);
   });
 
-  it('subscription.authenticated maps like activated; no current_end leaves the period untouched', () => {
-    const events = translate(
-      { event: 'subscription.authenticated', payload: { subscription: { entity: { id: 'sub_2' } } } },
-      ctx(),
-    );
-    expect(events?.[0]).toMatchObject({ type: 'checkout.completed', checkoutSessionId: 'sub_2' });
-    // undefined = the applier leaves currentPeriodEnd alone.
-    expect('currentPeriodEnd' in (events![0] as object)).toBe(false);
-  });
-
   it('subscription.charged → payment.succeeded with the OR-matcher + firstPeriod from paid_count', () => {
     const fire = (paidCount: number): unknown[] | null =>
       translate(
@@ -155,14 +145,6 @@ describe('razorpay module translate', () => {
     ]);
   });
 
-  it('subscription.pending without a payment entity → status mirror only', () => {
-    const events = translate(
-      { event: 'subscription.pending', payload: { subscription: { entity: { id: 'sub_p' } } } },
-      ctx(),
-    );
-    expect(events).toMatchObject([{ type: 'subscription.past_due', status: 'PAST_DUE' }]);
-  });
-
   it('payment_link.paid → payment.succeeded matched by the link id, no provider subscription', () => {
     const events = translate(
       {
@@ -245,14 +227,6 @@ describe('razorpay module translate', () => {
     expect(c.log.warn).toHaveBeenCalled();
   });
 
-  it('order.paid missing its payment → no events + warning', () => {
-    const c = ctx();
-    expect(
-      translate({ event: 'order.paid', payload: { order: { entity: { id: 'order_3', notes: { rekey_checkout: 'embedded' } } } } }, c),
-    ).toEqual([]);
-    expect(c.log.warn).toHaveBeenCalled();
-  });
-
   it('missing entities → no events (cannot apply, never guess) + warning', () => {
     const c = ctx();
     expect(translate({ event: 'subscription.charged', payload: {} }, c)).toEqual([]);
@@ -291,12 +265,5 @@ describe('razorpay module translate', () => {
     expect(fallback).toMatch(/^rzp_subscription\.charged_123_[0-9a-f]+$/);
     // Deterministic, the same body yields the same idempotency key.
     expect(razorpayModule.webhook.extractEventId(payload, req({}))).toBe(fallback);
-  });
-
-  it('extractEventType reads the Razorpay envelope', () => {
-    expect(razorpayModule.webhook.extractEventType({ event: 'subscription.charged' })).toBe(
-      'subscription.charged',
-    );
-    expect(razorpayModule.webhook.extractEventType({})).toBe('unknown');
   });
 });

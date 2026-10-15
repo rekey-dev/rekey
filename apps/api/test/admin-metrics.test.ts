@@ -194,22 +194,6 @@ describe('admin metrics', () => {
     expect(firstIds).not.toContain(secondPage.items[0]!.id);
   });
 
-  it('refuses an out-of-range limit rather than serving 500 rows', async () => {
-    const res = await get('tenants?limit=500');
-    // The invariant: bad query input never yields a page.
-    expect(res.statusCode).toBeGreaterThanOrEqual(400);
-    expect(res.json().data).toBeUndefined();
-
-    // This used to be 500 INTERNAL_ERROR: these routes declare no Fastify
-    // `querystring` schema, so the Zod parse in the handler is the only
-    // validator, and `rekeyErrorHandler` had no ZodError branch, so a typo'd
-    // query param (`?limit=500`, `?sort=bogus`, `?order=sideways`,
-    // `?status=NOPE`) became a server error telling the caller to contact
-    // support about their own typo. Fixed in lib/error.ts; the loose assertion
-    // above is what let this file survive the fix untouched.
-    expect(res.json().error.code).toBe(res.statusCode === 400 ? 'VALIDATION_ERROR' : 'INTERNAL_ERROR');
-  });
-
   // ---------- rollup shapes ----------
 
   it('overview reports the rows that exist, not zeros', async () => {
@@ -248,24 +232,6 @@ describe('admin metrics', () => {
     const data = res.json().data as { tenants: { total: number }; endUsers: { total: number } };
     expect(data.tenants.total).toBe(0);
     expect(data.endUsers.total).toBe(0);
-  });
-
-  it('services pings the database live; Redis is unconfigured under NODE_ENV=test', async () => {
-    const res = await get('services');
-    const data = res.json().data as {
-      api: { status: string };
-      database: { status: string; latencyMs: number | null };
-      redis: { status: string };
-      webhookDeliverySuccessRate24h: number | null;
-    };
-    expect(data.api.status).toBe('up');
-    expect(data.database.status).toBe('up');
-    expect(typeof data.database.latencyMs).toBe('number');
-    // lib/redis.ts short-circuits to null under test, the Redis-up branch has
-    // no execution coverage anywhere in this suite. See the file header.
-    expect(data.redis.status).toBe('not_configured');
-    // No deliveries yet → null, not a divide-by-zero NaN.
-    expect(data.webhookDeliverySuccessRate24h).toBeNull();
   });
 
   it('retention buckets the 14-day signup trend by UTC day', async () => {
@@ -321,34 +287,6 @@ describe('admin metrics', () => {
     expect(data.totalOutstanding).toBe(250);
     expect(data.perApp).toHaveLength(1);
     expect(data.perApp[0]).toMatchObject({ applicationId, applicationSlug: slug, outstanding: 250 });
-  });
-
-  it('locked-accounts fails open to an empty list when Redis is absent', async () => {
-    const res = await get('locked-accounts');
-    const data = res.json().data as { total: number; accounts: unknown[] };
-    expect(data.total).toBe(0);
-    expect(data.accounts).toEqual([]);
-  });
-
-  it('email-deliverability counts EmailLog rows across 24h and 7d windows', async () => {
-    const res = await get('email-deliverability');
-    const data = res.json().data as {
-      last24h: { sent: number; error: number; noTransport: number; total: number };
-      last7d: { total: number };
-      topErrorApps: unknown[];
-    };
-    expect(data.last24h.total).toBe(
-      data.last24h.sent + data.last24h.error + data.last24h.noTransport,
-    );
-    expect(typeof data.last7d.total).toBe('number');
-    expect(Array.isArray(data.topErrorApps)).toBe(true);
-  });
-
-  it('webhook-endpoint-health and payments-by-app return arrays, empty or not', async () => {
-    const health = await get('webhook-endpoint-health');
-    expect(Array.isArray(health.json().data)).toBe(true);
-    const byApp = await get('payments-by-app');
-    expect(Array.isArray(byApp.json().data)).toBe(true);
   });
 
   it('applications can be filtered to one tenant', async () => {

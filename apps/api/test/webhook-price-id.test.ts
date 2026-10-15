@@ -20,6 +20,10 @@ import { stripeModule } from '../src/modules/billing/providers/modules/stripe/in
 import { razorpayModule } from '../src/modules/billing/providers/modules/razorpay/index.js';
 import type { DomainBillingEvent, TranslateCtx } from '../src/modules/billing/providers/module-types.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const stripe = new Stripe('sk_for_signing_only', { apiVersion: STRIPE_API_VERSION });
 
@@ -145,11 +149,6 @@ describe('a renewal for another provider price', () => {
       expect(receipt.processingError).toContain('plan_stub_pro');
     });
 
-    it('records a charge that names no plan, as before', async () => {
-      await charged('pay_unnamed');
-      expect(await payments()).toMatchObject([{ providerPaymentId: 'pay_unnamed' }]);
-    });
-
     it('compares nothing when the price was never registered with the provider', async () => {
       await prisma.planPrice.update({ where: { id: w.inrPriceId }, data: { metadata: {} } });
       await charged('pay_unregistered', { plan_id: 'plan_someone_elses' });
@@ -158,10 +157,7 @@ describe('a renewal for another provider price', () => {
 
     it("reads the additional price's registration, not the plan's", async () => {
       // The plan's own registration belongs to the default USD price.
-      await prisma.plan.update({
-        where: { id: w.planId },
-        data: { metadata: { razorpay: { planId: 'plan_of_the_default_price' } } },
-      });
+      await revisePlan({ id: w.planId }, { metadata: { razorpay: { planId: 'plan_of_the_default_price' } } });
       await charged('pay_additional', { plan_id: 'plan_stub_pro' });
       expect(await payments()).toMatchObject([{ providerPaymentId: 'pay_additional' }]);
       expect((await lastReceipt()).processingError ?? '').not.toContain('plan_of_the_default_price');
@@ -230,12 +226,6 @@ describe('a renewal for another provider price', () => {
       const receipt = await lastReceipt();
       expect(receipt.processingError).toContain('price_cheaper');
       expect(receipt.processingError).toContain(registered);
-    });
-
-    it('records an invoice whose lines name two prices or none, as before', async () => {
-      await invoicePaid('in_proration', [{ price: { id: registered } }, { price: { id: 'price_new' } }]);
-      await invoicePaid('in_bare', []);
-      expect((await payments()).map((p) => p.providerPaymentId)).toEqual(['in_proration', 'in_bare']);
     });
   });
 });

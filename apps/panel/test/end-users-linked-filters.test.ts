@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { ALL_SCOPES } from './all-scopes';
 
 const calls: Array<{ path: string; interrupt: boolean | undefined }> = [];
 let scopes: string[] | null = null;
@@ -46,7 +47,7 @@ vi.mock('@/lib/api', async () => {
       },
     errorQuery: async () => '',
     readErrorFlash: async () => ({}),
-    getApplication: async () => ({ id: 'app_1', access: scopes === null ? undefined : { level: 'APP_VIEWER', scopes } }),
+    getApplication: async () => ({ id: 'app_1', access: { level: 'APP_VIEWER', scopes: scopes ?? ALL_SCOPES } }),
     api: async ({ path, interruptOnAccessError }: { path: string; interruptOnAccessError?: boolean }) => {
       calls.push({ path, interrupt: interruptOnAccessError });
       if (path.includes('/end-users?')) {

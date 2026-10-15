@@ -25,7 +25,7 @@ export default async function ListLayout({
   const { id, listId } = await params;
   const [list, application] = await Promise.all([getList(id, listId), getApplication(id)]);
   const base = `/applications/${id}/lists/${listId}`;
-  const canWrite = hasScope(application.access?.scopes ?? null, 'audience:write');
+  const canWrite = hasScope(application.access.scopes, 'audience:write');
 
   return (
     <div className="space-y-5">

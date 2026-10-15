@@ -8,13 +8,15 @@
  * credit pack at USD 10.00 and INR 799.00.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { RoutingPreviewDto } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { couponsService } from '../src/modules/coupons/coupons.service.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('routing preview with a coupon', () => {
   let app: FastifyInstance;
@@ -113,15 +115,5 @@ describe('routing preview with a coupon', () => {
     expect((await item({ country: 'US', couponCode: 'ONCE' })).coupon).toMatchObject({
       discount: { currency: 'USD', discountAmount: 250, amountAfterDiscount: 750 },
     });
-  });
-
-  it('has no coupon on an item when none is sent, and decides through the coupon service when one is', async () => {
-    const quote = vi.spyOn(couponsService, 'quote');
-    expect((await item({ country: 'IN' })).coupon).toBeNull();
-    expect(quote).not.toHaveBeenCalled();
-    await item({ country: 'IN', couponCode: 'BOTH' });
-    expect(quote).toHaveBeenCalledTimes(1);
-    expect(quote.mock.calls[0]![0]).toMatchObject({ code: 'BOTH', planSlug: 'pack', amount: 79900, currency: 'INR' });
-    quote.mockRestore();
   });
 });

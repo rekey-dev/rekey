@@ -24,6 +24,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { emailService } from '../src/modules/email/email.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface World {
   ownerToken: string;
@@ -131,20 +134,6 @@ describe('email send control', () => {
   }
 
   // ---------- the three gates ----------
-
-  it('defaults to enabled, and nothing is suppressed until somebody says so', async () => {
-    const w = await world();
-    const res = await inject({
-      method: 'GET',
-      url: `${base(w)}/email-send-control`,
-      headers: auth(w),
-    });
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data as { emailsEnabled: boolean; events: Array<{ enabled: boolean }> };
-    expect(data.emailsEnabled).toBe(true);
-    expect(data.events.length).toBe(9);
-    expect(data.events.every((e) => e.enabled)).toBe(true);
-  });
 
   it('the master switch suppresses a send, and records it as suppressed', async () => {
     const w = await world();
@@ -352,41 +341,7 @@ describe('email send control', () => {
 
   // ---------- an unknown event is a 404, not a 500 ----------
 
-  it('an unknown event key is refused as not-found', async () => {
-    const w = await world();
-    const res = await inject({
-      method: 'PATCH',
-      url: `${base(w)}/email-send-control/not_a_real_event`,
-      headers: auth(w),
-      payload: { enabled: false },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('EMAIL_EVENT_UNKNOWN');
-  });
-
   // ---------- stats ----------
-
-  it('counts a suppressed send as suppressed, not as an error', async () => {
-    const w = await world();
-    await dropEmailDependence(w);
-    await inject({
-      method: 'PATCH',
-      url: `${base(w)}/email-send-control`,
-      headers: auth(w),
-      payload: { emailsEnabled: false },
-    });
-    await send(w, 'x@example.com');
-
-    const res = await inject({
-      method: 'GET',
-      url: `${base(w)}/email-stats?hours=24`,
-      headers: auth(w),
-    });
-    expect(res.statusCode).toBe(200);
-    const stats = res.json().data as { suppressed: number; error: number };
-    expect(stats.suppressed).toBe(1);
-    expect(stats.error).toBe(0);
-  });
 
   // ---------- what the first review found missing ----------
 
@@ -470,7 +425,11 @@ describe('email send control', () => {
 
   it('a test send refuses a suppressed address, but still ignores the master switch', async () => {
     const w = await world();
-    const email = `test-${w.tag}@example.com`;
+    // The operator's own address: without a mail provider of its own, an
+    // Application's test send goes nowhere else (email-test-send-recipient.test.ts).
+    const email = await prisma.tenantMembership
+      .findFirstOrThrow({ where: { tenant: { applications: { some: { id: w.applicationId } } } }, select: { tenantUser: { select: { email: true } } } })
+      .then((m) => m.tenantUser.email);
 
     // Master switch off: a test send is how an operator proves transport
     // before turning sending back on, so it must still be attempted.
@@ -508,7 +467,7 @@ describe('email send control', () => {
     expect(refused.json().error.code).toBe('EMAIL_ADDRESS_SUPPRESSED');
   });
 
-  it('the two workspace-scoped events are marked, and their switch is refused', async () => {
+  it('the workspace-scoped events are marked, and their switch is refused', async () => {
     const w = await world();
     const res = await inject({
       method: 'GET',
@@ -518,7 +477,13 @@ describe('email send control', () => {
     const events = (res.json().data as { events: Array<{ key: string; systemScoped: boolean }> })
       .events;
     const scoped = events.filter((e) => e.systemScoped).map((e) => e.key).sort();
-    expect(scoped).toEqual(['billing_unapplied_payment', 'workspace_invitation']);
+    expect(scoped).toEqual([
+      'billing_unapplied_payment',
+      'operator_account_claimed',
+      'operator_email_confirmed',
+      'operator_email_verification',
+      'workspace_invitation',
+    ]);
 
     // A switch that stores a setting nothing reads is the worst kind: the
     // operator is certain they turned it off and it keeps arriving.

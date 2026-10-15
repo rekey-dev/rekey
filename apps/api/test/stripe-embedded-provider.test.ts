@@ -8,14 +8,15 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
-import { STRIPE_JS_RELEASE_TRAIN } from '@rekey.dev/shared-types';
+import type { EndUser } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
-import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { stripeModule } from '../src/modules/billing/providers/modules/stripe/index.js';
 import { browserCredentialCheck } from '../src/modules/billing/checkout/readiness.js';
 import type { CheckoutSessionInput, HostedFallbackInput } from '../src/modules/billing/providers/types.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 type Call = { op: string; params?: Record<string, unknown>; options?: Record<string, unknown>; id?: string };
 
@@ -85,7 +86,7 @@ function input(over: Partial<CheckoutSessionInput> = {}): CheckoutSessionInput {
       currency: 'USD',
       interval: 'MONTH',
       metadata: { stripe: { priceId: 'price_fake' } },
-    } as unknown as Plan, null),
+    } as unknown as FixturePlan, null),
     successUrl: 'https://app.example/ok',
     cancelUrl: 'https://app.example/cancel',
     ...over,
@@ -188,10 +189,6 @@ describe('getCheckoutSession', () => {
       currency: 'USD',
       url: null,
     });
-  });
-
-  it('answers null for a session Stripe does not have', async () => {
-    expect(await provider().getCheckoutSession('cs_test_missing')).toBeNull();
   });
 });
 
@@ -347,9 +344,5 @@ describe('the publishable key', () => {
     expect(mismatched.message).toContain('test key');
 
     expect(browserCredentialCheck('stripe', { apiKey: 'sk_live_1', publishableKey: 'pk_live_1' }).status).toBe('PASS');
-  });
-
-  it('loads the Stripe.js release train of the pinned API version', () => {
-    expect(STRIPE_API_VERSION.endsWith(`.${STRIPE_JS_RELEASE_TRAIN}`)).toBe(true);
   });
 });

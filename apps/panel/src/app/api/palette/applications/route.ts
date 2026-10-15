@@ -39,7 +39,7 @@ export async function GET(): Promise<Response> {
       name: a.name,
       slug: a.slug,
       billingEnabled: a.billingConfig.enabled,
-      scopes: a.access?.scopes ?? null,
+      scopes: a.access.scopes,
     }));
     return NextResponse.json(slim, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {

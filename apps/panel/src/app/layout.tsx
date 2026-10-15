@@ -7,7 +7,7 @@ import { THEME_INIT } from '@/components/ThemeToggle';
 import { Analytics } from '@/components/providers/analytics';
 import { TrackFlag } from '@/components/analytics/track-flag';
 
-// Brand faces, same self-hosted fonts as the marketing site (etherlabz brand).
+// Brand faces, the same self-hosted fonts as rekey.dev.
 // Akkurat = body/sans, Feature = display serif. Metric-matched fallbacks kill FOUC.
 const fontAkkurat = localFont({
   variable: '--font-akkurat',
@@ -42,6 +42,7 @@ export default function RootLayout({ children }: { children: ReactNode }): React
     <html lang="en" suppressHydrationWarning className={`${fontAkkurat.variable} ${fontFeature.variable}`}>
       <head>
         {/* Set the theme class before paint so there's no light/dark flash. */}
+        {/* eslint-disable-next-line react/no-danger -- a constant script, no user input */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT }} />
       </head>
       <body className="min-h-screen text-[var(--color-fg)]">

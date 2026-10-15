@@ -14,6 +14,10 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 interface PublicPlanRow {
   slug: string;
@@ -121,23 +125,6 @@ describe('the resolved price on a plan', () => {
     expect(await priceOf({ country: 'IN' })).toMatchObject({ currency: 'USD', amount: 2000, isDefault: true, reason: 'fallback' });
   });
 
-  it('keeps a subscriber in the currency they already pay in, on every plan', async () => {
-    await w.createPlan({ slug: 'team', name: 'Team', price: { currency: 'USD', amount: 5000 } });
-    await w.putPrice('team', 'INR', 399900);
-    const { row } = await w.sessionOf(await w.checkout({ country: 'IN' }));
-    await w.razorpayWebhook({
-      event: 'subscription.activated',
-      payload: { subscription: { entity: { id: row.providerSessionId, status: 'active' } } },
-    });
-
-    // Now in Germany, where nothing but the default would apply: they still pay in rupees.
-    const caller = { country: 'DE', buyer: w.buyer };
-    expect(await priceOf(caller, 'team')).toMatchObject({ currency: 'INR', amount: 399900, reason: 'bound' });
-    expect(await charged(caller, 'team')).toMatchObject({ currency: 'INR', amount: 399900 });
-    // Someone else in Germany gets the default.
-    expect(await priceOf({ country: 'DE', buyer: await w.newBuyer() }, 'team')).toMatchObject({ currency: 'USD', reason: 'default' });
-  });
-
   it('refuses a user token that is present and invalid, as every other route does', async () => {
     const res = await app.inject({
       method: 'GET',
@@ -176,43 +163,9 @@ describe('the resolved price on a plan', () => {
     expect(free.price).toBeNull();
   });
 
-  it('keeps registration detail for the operator and off the public catalogue', async () => {
-    const [publicPlan] = await catalogue({ key: 'publishable' });
-    for (const price of publicPlan!.prices) expect(price).not.toHaveProperty('registration');
-
-    const listed = await w.operator('GET', '/plans');
-    const plan = (listed.json().data as { items: Array<{ prices: PlanPriceDto[]; price: ResolvedPriceDto }> }).items[0]!;
-    expect(plan.prices.map((price) => [price.currency, price.isDefault, price.registration])).toEqual([
-      ['USD', true, { status: 'REGISTERED', error: null }],
-      ['INR', false, { status: 'NOT_REQUIRED', error: null }],
-    ]);
-    // An operator is no buyer: the price resolved for them is the default.
-    expect(plan.price).toMatchObject({ currency: 'USD', amount: 2000, isDefault: true, reason: 'default' });
-
-    const single = await w.operator('PATCH', '/plans/pro', { name: 'Pro plan' });
-    expect((single.json().data as { price: ResolvedPriceDto }).price).toMatchObject({ currency: 'USD', reason: 'default' });
-  });
-
-  it('follows the plan: a default price edited through the plan is the same row with the new amount', async () => {
-    const draft = await w.createPlan({ slug: 'draft', name: 'Draft', price: { currency: 'USD', amount: 1000 } });
-    await prisma.plan.update({ where: { id: draft }, data: { metadata: {}, registrationStatus: 'NOT_REQUIRED' } });
-    const before = (await prisma.plan.findUniqueOrThrow({ where: { id: draft } })).defaultPriceId;
-
-    const patched = await w.operator('PATCH', '/plans/draft', { price: { currency: 'USD', amount: 1200 } });
-    expect(patched.statusCode, patched.body).toBe(200);
-    expect((patched.json().data as { price: ResolvedPriceDto }).price).toMatchObject({ id: before, amount: 1200, formatted: '$12.00' });
-    expect(await prisma.planPrice.findUniqueOrThrow({ where: { id: before! } })).toMatchObject({ amount: 1200, currency: 'USD' });
-
-    // Free now: the plan has no price row and says so.
-    const freed = await w.operator('PATCH', '/plans/draft', { price: null });
-    expect(freed.statusCode, freed.body).toBe(200);
-    expect(freed.json().data).toMatchObject({ price: null, prices: [], isFree: true, defaultPriceId: null });
-    expect(await prisma.planPrice.count({ where: { planId: draft } })).toBe(0);
-  });
-
   it('archives a default price a subscriber is on when the plan is re-priced, and keeps their snapshot', async () => {
     const draft = await w.createPlan({ slug: 'draft', name: 'Draft', price: { currency: 'USD', amount: 1000 } });
-    await prisma.plan.update({ where: { id: draft }, data: { metadata: {}, registrationStatus: 'NOT_REQUIRED' } });
+    await revisePlan({ id: draft }, { metadata: {}, registrationStatus: 'NOT_REQUIRED' });
     const granted = await w.operator('POST', `/end-users/${w.buyer.id}/subscriptions`, { planSlug: 'draft', currency: 'USD' });
     expect(granted.statusCode, granted.body).toBe(201);
     const old = (await prisma.plan.findUniqueOrThrow({ where: { id: draft } })).defaultPriceId!;

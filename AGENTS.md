@@ -71,9 +71,25 @@ migrated automatically under `docker compose --profile full up`.
    (`lib/secrets.ts`) for secrets whose cleartext is needed later.
 7. **Side-effects (email, webhooks) are fire-and-forget** and must never block
    the user-facing response.
+8. **Name things for what they are, not how they came to be.** A file, a test,
+   a `describe` title or an identifier says what it holds or what behaviour it
+   covers, never which review, audit, round, phase, fix list, issue or pull
+   request produced it: `sign-in-lockout.test.ts`, not `audit-3.test.ts`;
+   `provider-amount-scale.test.ts`, not `money-v2-wire-scale.test.ts`. A name
+   like `review-fixes` tells the next reader nothing and stops meaning
+   anything once the review is forgotten. Split a grab bag by behaviour
+   instead of renaming it. `node .github/scripts/check-file-names.mjs` fails
+   CI on a process word in a source or test path; real product vocabulary (the
+   audit log, the plan review page) goes on its allowlist with a reason.
+9. **Rekey is an independent project.** Code, docs, tests and commit messages
+   name Rekey and its public pieces only: no employer, hosting account,
+   private repository, personal email address or coding-agent attribution.
+   The release check rejects them.
 
 ## Tests
 
 Vitest, per-workspace. The `apps/api` suite shares one Postgres + Redis in a
 single fork — cross-file failures are often transient; re-run before assuming a
 regression. Add tests next to the module you touch.
+A test is added when a plausible change would break behaviour that nothing else
+catches. A new test that duplicates existing cover is not added.

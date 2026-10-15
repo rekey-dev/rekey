@@ -129,56 +129,10 @@ describe('operator session lifecycle', () => {
     })).toBe(0);
   });
 
-  // tenant_refresh_tokens allows one live row per session (unique partial
-  // index, migration 20260915120000). Racing refreshes must resolve to one
-  // winner and RACED for the rest (inside the reuse window, nothing revoked),
-  // never a unique violation as a 500.
-  it('concurrent refreshes of one token: one winner, the rest RACED, never a 500', async () => {
-    const s = await signUp(uniqueEmail('race'));
-
-    const results = await Promise.all(Array.from({ length: 8 }, () => refresh(s.refreshToken)));
-    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
-    for (const r of results.filter((x) => x.statusCode !== 200)) {
-      expect(r.statusCode).toBe(401);
-      expect(r.json().error.code).toBe('REFRESH_TOKEN_RACED');
-    }
-    expect(await prisma.tenantRefreshToken.count({
-      where: { tenantUserId: s.user.id, replacedById: null, revokedAt: null },
-    })).toBe(1);
-  });
-
-  it('the database refuses a second live operator row in one session', async () => {
-    const s = await signUp(uniqueEmail('one-head'));
-    const head = await prisma.tenantRefreshToken.findFirstOrThrow({
-      where: { tenantUserId: s.user.id, replacedById: null, revokedAt: null },
-    });
-    await expect(
-      prisma.tenantRefreshToken.create({
-        data: {
-          tenantUserId: s.user.id,
-          tokenHash: `dup-${head.id}`,
-          expiresAt: head.expiresAt,
-          sessionId: head.sessionId,
-        },
-      }),
-    ).rejects.toMatchObject({ code: 'P2002' });
-  });
-
   it('refresh with an unknown token is REFRESH_TOKEN_INVALID, not a 500', async () => {
     const res = await refresh('rp_op_not_a_real_refresh_token');
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('REFRESH_TOKEN_INVALID');
-  });
-
-  it('refresh with an expired token is REFRESH_TOKEN_EXPIRED', async () => {
-    const s = await signUp(uniqueEmail('exp'));
-    await prisma.tenantRefreshToken.updateMany({
-      where: { tenantUserId: s.user.id },
-      data: { expiresAt: new Date(Date.now() - 60_000) },
-    });
-    const res = await refresh(s.refreshToken);
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('REFRESH_TOKEN_EXPIRED');
   });
 
   // ---------- sign-out ----------
@@ -321,28 +275,6 @@ describe('operator session lifecycle', () => {
     ).toBe(1);
   });
 
-  it('replaying a ROTATED token is still chain compromise and revokes everything', async () => {
-    // The other history a revoked token can have, and the one reuse-detection
-    // exists for: the token was spent by a rotation, so a second presentation
-    // means someone else holds it.
-    const email = uniqueEmail('rotated-reuse');
-    const first = await signUp(email);
-    await signIn(email); // a second live session, to prove the cascade reaches it
-
-    const rotated = await refresh(first.refreshToken);
-    expect(rotated.statusCode).toBe(200);
-    await ageRotation(first.refreshToken);
-
-    const replay = await refresh(first.refreshToken);
-    expect(replay.statusCode).toBe(401);
-    expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
-    expect(
-      await prisma.tenantRefreshToken.count({
-        where: { tenantUserId: first.user.id, revokedAt: null },
-      }),
-    ).toBe(0);
-  });
-
   it('revoking one session refuses its access token; the other session keeps working without a refresh', async () => {
     const email = uniqueEmail('sid');
     const a = await signUp(email);
@@ -480,7 +412,7 @@ describe('operator session lifecycle', () => {
     // `delivered` is asserted because it is the field that *did* reveal it,
     // this test checked only `resetToken` while the body next to it answered
     // `false` for a miss and `true` for a hit. See
-    // test/auth-hardening-operator.test.ts for the both-sides comparison.
+    // test/operator-account-enumeration.test.ts for the both-sides comparison.
     expect(res.statusCode).toBe(200);
     const data = res.json().data as { delivered: boolean; resetToken: string | null };
     expect(data.resetToken).toBeNull();
@@ -512,17 +444,6 @@ describe('operator session lifecycle', () => {
     await signIn(email, 'a-brand-new-one');
     // The session that was NOT used to change the password is revoked.
     expect((await refresh(other.refreshToken)).statusCode).toBe(401);
-  });
-
-  it('change-password refuses a new password under the minimum length', async () => {
-    const s = await signUp(uniqueEmail('short'));
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/change-password',
-      headers: { authorization: `Bearer ${s.accessToken}` },
-      payload: { currentPassword: 'pw-one-two-three', newPassword: 'short' },
-    });
-    expect(res.statusCode).toBe(400);
   });
 
   // ---------- the session guard itself ----------

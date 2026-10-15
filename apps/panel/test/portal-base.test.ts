@@ -26,20 +26,13 @@ const page = readFileSync(
 );
 
 describe('portalBase', () => {
-  it("uses the API's value over the build-time one", () => {
-    expect(portalBase({ portalBaseUrl: 'https://portal.api.example' }, 'https://portal.build.example')).toBe(
-      'https://portal.api.example',
-    );
+  it("is the API's value, without a trailing slash", () => {
+    expect(portalBase({ portalBaseUrl: 'https://portal.api.example/' })).toBe('https://portal.api.example');
   });
 
-  it('is null when the API says the deployment runs no portal, whatever the build says', () => {
-    expect(portalBase({ portalBaseUrl: null }, 'https://portal.build.example')).toBeNull();
-  });
-
-  it('falls back to the build-time value only when the API does not send the field', () => {
-    expect(portalBase({}, 'https://portal.build.example/')).toBe('https://portal.build.example');
-    expect(portalBase({}, undefined)).toBeNull();
-    expect(portalBase({}, '')).toBeNull();
+  it('is null when the deployment runs no portal, and for a row that carries no value', () => {
+    expect(portalBase({ portalBaseUrl: null })).toBeNull();
+    expect(portalBase({})).toBeNull();
   });
 
   it('never produces a placeholder the page could show as live', () => {

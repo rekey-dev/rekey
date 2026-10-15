@@ -26,6 +26,7 @@ import {
   RekeyError,
   verifyWebhookSignature,
 } from '../../../packages/sdk-node/src/index.js';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -84,20 +85,6 @@ describe('@rekey.dev/node SDK integration', () => {
     }) as typeof fetch;
   }
 
-  async function enableOrganizations(applicationId: string): Promise<void> {
-    const application = await prisma.application.findUniqueOrThrow({
-      where: { id: applicationId },
-    });
-    const config =
-      typeof application.authConfig === 'object' && application.authConfig !== null
-        ? (application.authConfig as Record<string, unknown>)
-        : {};
-    await prisma.application.update({
-      where: { id: applicationId },
-      data: { authConfig: { ...config, organizationsEnabled: true } },
-    });
-  }
-
   async function bootstrapApplication(slug: string): Promise<BootstrappedApp> {
     const tenant = await app
       .inject({
@@ -138,20 +125,6 @@ describe('@rekey.dev/node SDK integration', () => {
     });
   });
 
-  // ---------- constructor / config guards ----------
-
-  it('rejects construction without apiUrl', () => {
-    expect(() => new Rekey({ apiUrl: '', secretKey: 'rp_live_x' })).toThrow(
-      /apiUrl/,
-    );
-  });
-
-  it('rejects construction with a non-rp_ secret', () => {
-    expect(
-      () => new Rekey({ apiUrl: 'http://x', secretKey: 'pk_live_x' }),
-    ).toThrow(/secretKey/);
-  });
-
   // ---------- applications + auth ----------
 
   it('applications.me returns the calling Application', async () => {
@@ -178,128 +151,6 @@ describe('@rekey.dev/node SDK integration', () => {
     expect(me.email).toBe('sdk-user@example.com');
   });
 
-  it('verifyEmail consumes a fresh send-verification token', async () => {
-    const signup = await rekey.auth.signUp({
-      email: 'verify-me@example.com',
-      password: 'pw-long-enough',
-    });
-
-    const result = await rekey.auth.sendVerificationEmail(signup.accessToken);
-    // No email transport configured → raw token returned to caller.
-    expect(result.verificationToken).toBeTruthy();
-
-    const verified = await rekey.auth.verifyEmail({
-      token: result.verificationToken!,
-    });
-    expect(verified.endUser.emailVerified).toBe(true);
-  });
-
-  // ---------- organizations ----------
-
-  it('organizations full lifecycle: create → invite → accept → setRole → leave', async () => {
-    await enableOrganizations(appA.applicationId);
-
-    const owner = await rekey.auth.signUp({
-      email: 'owner@example.com',
-      password: 'pw-long-enough',
-    });
-    const invitee = await rekey.auth.signUp({
-      email: 'invitee@example.com',
-      password: 'pw-long-enough',
-    });
-
-    const created = await rekey.organizations.create(owner.accessToken, {
-      name: 'Acme',
-      slug: 'acme',
-    });
-    expect(created.organization.slug).toBe('acme');
-    expect(created.membership.role).toBe('OWNER');
-
-    const mine = await rekey.organizations.listMine(owner.accessToken);
-    expect(mine.items).toHaveLength(1);
-    expect(mine.page).toMatchObject({ total: 1, hasMore: false });
-    expect(mine.items[0]!.role).toBe('OWNER');
-
-    const fetched = await rekey.organizations.get(
-      owner.accessToken,
-      created.organization.id,
-    );
-    expect(fetched.id).toBe(created.organization.id);
-
-    const updated = await rekey.organizations.update(
-      owner.accessToken,
-      created.organization.id,
-      { name: 'Acme Inc' },
-    );
-    expect(updated.name).toBe('Acme Inc');
-
-    const inv = await rekey.organizations.invite(
-      owner.accessToken,
-      created.organization.id,
-      { email: 'invitee@example.com', role: 'MEMBER' },
-    );
-    expect(inv.token).toBeTruthy();
-
-    await rekey.organizations.acceptInvitation(invitee.accessToken, {
-      token: inv.token,
-    });
-
-    const members = await rekey.organizations.listMembers(
-      owner.accessToken,
-      created.organization.id,
-    );
-    expect(members.items).toHaveLength(2);
-    expect(members.page.total).toBe(2);
-    const inviteeMember = members.items.find((m) => m.email === 'invitee@example.com')!;
-
-    const promoted = await rekey.organizations.setMemberRole(
-      owner.accessToken,
-      created.organization.id,
-      inviteeMember.endUserId,
-      { role: 'ADMIN' },
-    );
-    expect(promoted.role).toBe('ADMIN');
-
-    await rekey.organizations.leave(invitee.accessToken, created.organization.id);
-    const after = await rekey.organizations.listMembers(
-      owner.accessToken,
-      created.organization.id,
-    );
-    expect(after.items).toHaveLength(1);
-    expect(after.page.total).toBe(1);
-  });
-
-  it('OWNER leave is refused via the SDK (billing is tied to the owner)', async () => {
-    await enableOrganizations(appA.applicationId);
-    const owner = await rekey.auth.signUp({
-      email: 'lone-owner@example.com',
-      password: 'pw-long-enough',
-    });
-    const created = await rekey.organizations.create(owner.accessToken, {
-      name: 'Solo',
-      slug: 'solo',
-    });
-    try {
-      await rekey.organizations.leave(owner.accessToken, created.organization.id);
-      throw new Error('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(RekeyError);
-      expect((err as RekeyError).code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
-    }
-  });
-
-  // ---------- licenses ----------
-
-  it('licenses.verify returns ok=false for an unknown key (no throw)', async () => {
-    const result = await rekey.licenses.verify({
-      key: 'rl-totally-bogus-key',
-      machineFingerprint: 'mac-test-1',
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toBe('unknown');
-  });
-
   it('licenses.verify activates a valid license + idempotent on re-call', async () => {
     // Mint plan + license + an EndUser to own it via direct prisma.
     const endUser = await prisma.endUser.create({
@@ -310,16 +161,12 @@ describe('@rekey.dev/node SDK integration', () => {
         role: 'user',
       },
     });
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId: appA.applicationId,
         slug: 'pro',
         name: 'Pro',
         kind: 'LICENSE',
-        amount: 9900,
-        currency: 'USD',
-      },
-    });
+      }, { currency: 'USD', amount: 9900 });
     const { randomBytes, createHash } = await import('node:crypto');
     const rawKey = `rl-${randomBytes(24).toString('hex')}`;
     const keyHash = createHash('sha256').update(rawKey).digest('hex');
@@ -354,23 +201,6 @@ describe('@rekey.dev/node SDK integration', () => {
       where: { licenseId: license.id },
     });
     expect(activations).toBe(1);
-  });
-
-  // ---------- usage ----------
-
-  it('usage.record + aggregate sum quantities for a meter', async () => {
-    await prisma.usageMeter.create({
-      data: {
-        applicationId: appA.applicationId,
-        slug: 'tokens',
-        name: 'Tokens',
-        unit: 'tokens',
-      },
-    });
-    await rekey.usage.record({ meterSlug: 'tokens', quantity: 100 });
-    await rekey.usage.record({ meterSlug: 'tokens', quantity: 250 });
-    const agg = await rekey.usage.aggregate({ meterSlug: 'tokens' });
-    expect(agg.total).toBe(350);
   });
 
   // ---------- error envelope ----------

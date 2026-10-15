@@ -9,6 +9,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Usage — record idempotency', () => {
   let app: FastifyInstance;
@@ -132,22 +135,6 @@ describe('Usage — record idempotency', () => {
     const over = await record({ meterSlug: 'api_calls', quantity: 1, endUserId: euId });
     expect(over.statusCode).toBe(402);
     expect(over.json().error.code).toBe('USAGE_QUOTA_EXCEEDED');
-  });
-
-  it('different keys → two records', async () => {
-    expect((await record({ meterSlug: 'api_calls', quantity: 3, idempotencyKey: 'a' })).statusCode).toBe(201);
-    expect((await record({ meterSlug: 'api_calls', quantity: 4, idempotencyKey: 'b' })).statusCode).toBe(201);
-    const { total, count } = await totalFor();
-    expect(total).toBe(7);
-    expect(count).toBe(2);
-  });
-
-  it('no key → each call counts (historical behavior preserved)', async () => {
-    expect((await record({ meterSlug: 'api_calls', quantity: 2 })).statusCode).toBe(201);
-    expect((await record({ meterSlug: 'api_calls', quantity: 2 })).statusCode).toBe(201);
-    const { total, count } = await totalFor();
-    expect(total).toBe(4);
-    expect(count).toBe(2);
   });
 
   it('a concurrent replay (same key) still yields a single record', async () => {

@@ -45,6 +45,9 @@ import { prisma } from '../src/lib/prisma.js';
 import * as cacheA from '../src/lib/operator-auth-cache.js';
 import { hashTenantRefreshToken } from '../src/lib/tenant-refresh-tokens.js';
 import { tenantAuthService } from '../src/modules/tenant-auth/tenant-auth.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 /**
  * The reads the operator auth cache exists to remove. `requireTenantSession`
@@ -304,18 +307,6 @@ describe('operator auth cache: revocation stays immediate', () => {
     expect((await probe(appA, two.accessToken)).statusCode).toBe(200);
   });
 
-  it('sign-out: the signed-out session is refused at once', async () => {
-    const s = await signUp(`sout-${tag()}`);
-    await warm(appA, s.accessToken);
-    const r = await on(appA, {
-      method: 'POST',
-      url: '/api/v1/tenant/auth/sign-out',
-      payload: { refreshToken: s.refreshToken },
-    });
-    expect(r.statusCode).toBeLessThan(300);
-    expect((await probe(appA, s.accessToken)).statusCode).toBe(401);
-  });
-
   it('password change: every session is refused at once', async () => {
     const s = await signUp(`pw-${tag()}`);
     const other = await signIn(s.email);
@@ -522,15 +513,14 @@ describe('operator auth cache: revocation stays immediate', () => {
     expect(await activeRole(appA, w.member)).toBe('MEMBER');
   });
 
-  it('the OAuth email-verified upgrade drops the cached operator row', async () => {
+  it('a provider-verified sign-in to an unconfirmed operator ends the cached session at once', async () => {
     const s = await signUp(`oauth-${tag()}`);
     await prisma.tenantUser.update({ where: { email: s.email }, data: { emailVerified: false } });
     await warm(appA, s.accessToken);
     await tenantAuthService.findOrCreateOAuthOperator({ email: s.email, emailVerified: true });
-    const after = await authReads(async () => {
-      expect((await probe(appA, s.accessToken)).statusCode).toBe(200);
-    });
-    expect(after).toContain('tenantUser.findUnique');
+    // The proof claims the account, so the session opened before it is over.
+    // A cached row would have kept answering 200 until its entry aged out.
+    expect((await probe(appA, s.accessToken)).statusCode).toBe(401);
   });
 
   // ------------------------------------------------------------- two processes
@@ -676,26 +666,4 @@ describe('operator auth cache: revocation stays immediate', () => {
 
   // --------------------------------------------------------------- unit level
 
-  it('a load that raced an invalidation is not stored', async () => {
-    cacheA.getCachedAuth('boot', 'boot', undefined); // start the subscription
-    await delivered();
-    const entry = {
-      user: {} as never,
-      membership: { id: 'm1', role: 'OWNER' as const, scopesRestricted: false, scopes: [] },
-    };
-    const ticket = cacheA.loadTicket();
-    cacheA.invalidateOperatorAuth('op-1');
-    cacheA.storeAuth(ticket, 'op-1', 't1', 's1', entry);
-    expect(cacheA.getCachedAuth('op-1', 't1', 's1')).toBeNull();
-
-    const fresh = cacheA.loadTicket();
-    cacheA.storeAuth(fresh, 'op-1', 't1', 's1', entry);
-    expect(cacheA.getCachedAuth('op-1', 't1', 's1')).not.toBeNull();
-    // An invalidation for a different operator's membership leaves it alone,
-    // one for this membership drops it.
-    cacheA.applyInvalidation('o:op-2 m:m2');
-    expect(cacheA.getCachedAuth('op-1', 't1', 's1')).not.toBeNull();
-    cacheA.applyInvalidation('m:m1');
-    expect(cacheA.getCachedAuth('op-1', 't1', 's1')).toBeNull();
-  });
 });

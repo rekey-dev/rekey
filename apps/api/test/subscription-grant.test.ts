@@ -19,12 +19,15 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { Prisma, WebhookDelivery } from '@prisma/client';
+import type { WebhookDelivery } from '@prisma/client';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -83,7 +86,7 @@ describe('Granting a subscription without a payment provider', () => {
     });
     if (ac.statusCode !== 201) throw new Error(`appcreate ${ac.statusCode}: ${ac.body}`);
     appId = (ac.json().data as { id: string }).id;
-    const { endpoint } = await webhookService.createEndpoint({
+    const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       // Unreachable on purpose: delivery ROWS are the assertion, not HTTP success.
       url: 'https://example.invalid/grant-hook',
@@ -201,18 +204,6 @@ describe('Granting a subscription without a payment provider', () => {
     await putEntitlement('pro', { kind: 'CREDIT', key: 'bonus', quantity: 200 });
     const euId = await makeEndUser('buyer@example.com');
 
-    await grant({ planSlug: 'pro', endUserId: euId });
-
-    expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(700);
-  });
-
-  it('a second grant still grants nothing twice', async () => {
-    await makePlan('pro');
-    await putEntitlement('pro', { kind: 'CREDIT', key: 'base', quantity: 500 });
-    await putEntitlement('pro', { kind: 'CREDIT', key: 'bonus', quantity: 200 });
-    const euId = await makeEndUser('buyer@example.com');
-
-    await grant({ planSlug: 'pro', endUserId: euId });
     await grant({ planSlug: 'pro', endUserId: euId });
 
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(700);
@@ -413,63 +404,6 @@ describe('Granting a subscription without a payment provider', () => {
       (res.json().data as { subscription: { currentPeriodEnd: string | null } }).subscription.currentPeriodEnd,
     ).toBeNull();
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(1000);
-  });
-
-  // ---------------------------------------------------------- revocation
-
-  it('the existing cancel path ends a granted subscription at period end', async () => {
-    await makePlan('pro');
-    await putEntitlement('pro', { kind: 'CREDIT', quantity: 500 });
-    const euId = await makeEndUser('buyer@example.com');
-    const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
-    await grant({ planSlug: 'pro', endUserId: euId, currentPeriodEnd: soon });
-
-    const sub = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
-    const { billingService } = await import('../src/modules/billing/billing.service.js');
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
-
-    // No provider means no provider call, and, since #336, still a scheduled
-    // cancellation rather than an immediate one that keeps the money.
-    const canceled = await billingService.cancelCurrentSubscription(application, endUser);
-    expect(canceled.status).toBe('ACTIVE');
-    expect(canceled.cancelAt?.toISOString()).toBe(soon);
-
-    // …and when the date passes, the local expiry reaps it (no webhook is coming).
-    await prisma.subscription.update({
-      where: { id: sub.id },
-      data: { cancelAt: new Date(Date.now() - 1000), currentPeriodEnd: new Date(Date.now() - 1000) },
-    });
-    const reaped = await billingService.getCurrentSubscription(application, endUser);
-    expect(reaped?.status).toBe('CANCELED');
-    expect(reaped?.canceledAt).not.toBeNull();
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(after.status).toBe('CANCELED');
-    // …and the buyer stops being entitled by it.
-    const { entitlementsService } = await import('../src/modules/billing/entitlements.service.js');
-    const held = await entitlementsService.resolveForEndUser(appId, euId);
-    expect(held.entitlements).toEqual([]);
-  });
-
-  // ------------------------------------------- the term actually ending
-
-  it('an explicit term is honoured, and is the only way to get one', async () => {
-    await makePlan('pro');
-    const euId = await makeEndUser('timeboxed@example.com');
-    const ends = new Date(Date.now() + 14 * 86_400_000).toISOString();
-
-    const withTerm = await grant({ planSlug: 'pro', endUserId: euId, currentPeriodEnd: ends });
-    expect(
-      (withTerm.json().data as { subscription: { currentPeriodEnd: string } }).subscription
-        .currentPeriodEnd,
-    ).toBe(ends);
-
-    const other = await makeEndUser('openended@example.com');
-    const without = await grant({ planSlug: 'pro', endUserId: other });
-    expect(
-      (without.json().data as { subscription: { currentPeriodEnd: string | null } }).subscription
-        .currentPeriodEnd,
-    ).toBeNull();
   });
 
   it('a granted term that has elapsed stops entitling — a 14-day grant is not forever', async () => {
@@ -721,42 +655,6 @@ describe('Granting a subscription without a payment provider', () => {
     expect(free.status).toBe('ACTIVE');
   });
 
-  it('a paid plan outranks a $0 plan even after the default plan is renamed or cleared', async () => {
-    // The ranking cannot lean on today's `defaultPlanSlug` alone: an operator
-    // who renames the free tier, or clears it, still has buyers holding the
-    // old $0 rows, and those must not shadow what the buyer pays for.
-    await makePlan('free', { price: undefined });
-    const paidId = await makePlan('paid');
-    await setDefaultPlan('free');
-    const euId = await makeEndUser('renamed@example.com');
-    const paid = await prisma.subscription.create({
-      data: { applicationId: appId, endUserId: euId, planId: paidId, status: 'PENDING', provider: 'paypal' },
-    });
-    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
-    await prisma.subscription.update({
-      where: { id: paid.id },
-      data: { status: 'ACTIVE', providerSubId: 'I-PAID-2', currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000) },
-    });
-
-    const { billingService } = await import('../src/modules/billing/billing.service.js');
-    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
-    for (const slug of ['free-v2', '']) {
-      if (slug) {
-        await makePlan(slug, { price: undefined });
-        await setDefaultPlan(slug);
-      } else {
-        const current = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-        const { defaultPlanSlug: _cleared, ...rest } = current.billingConfig as Record<string, unknown>;
-        await prisma.application.update({
-          where: { id: appId },
-          data: { billingConfig: rest as Prisma.InputJsonObject },
-        });
-      }
-      const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-      expect((await billingService.getCurrentSubscription(application, endUser))?.id).toBe(paid.id);
-    }
-  });
-
   it('a paid plan that lapses on read falls back to the live free tier on that same read', async () => {
     await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');
@@ -846,22 +744,6 @@ describe('Granting a subscription without a payment provider', () => {
     expect(deliveries).toHaveLength(2);
     // A new period is a new grant anchor, so the credits refill exactly once.
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(1000);
-  });
-
-  // ------------------------------------------------------------- refusals
-
-  it('requires exactly one of endUserId and email', async () => {
-    await makePlan('pro');
-    const euId = await makeEndUser('buyer@example.com');
-
-    const neither = await grant({ planSlug: 'pro' });
-    expect(neither.statusCode).toBe(400);
-    const both = await grant({ planSlug: 'pro', endUserId: euId, email: 'buyer@example.com' });
-    expect(both.statusCode).toBe(400);
-
-    const byEmail = await grant({ planSlug: 'pro', email: 'BUYER@Example.com' });
-    expect(byEmail.statusCode).toBe(201);
-    expect((byEmail.json().data as { subscription: { endUserId: string } }).subscription.endUserId).toBe(euId);
   });
 
   it('404s on an unknown plan or an unknown subscriber, writing nothing', async () => {

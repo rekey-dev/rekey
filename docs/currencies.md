@@ -6,7 +6,7 @@ each payment provider, and what the reporting currency does.
 Related pages: [billing.md](billing.md) for plans and checkout,
 [coupons.md](coupons.md) for discounts, [billing-log.md](billing-log.md) for
 the record of every pricing decision, and
-[migrating-to-2.2.0-rc.7.md](migrating-to-2.2.0-rc.7.md) if you are upgrading.
+[migrating-to-2.2.md](migrating-to-2.2.md) if you are upgrading.
 
 ## An amount is an integer in the minor unit
 

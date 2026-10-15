@@ -30,6 +30,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const BASE = '/api/v1/tenant/applications';
 
@@ -151,8 +154,6 @@ const PROBES: Probe[] = [
     suffix: '/custom-email-templates/some_key/test-send',
   },
   { subResource: 'custom-email-templates', method: 'DELETE', suffix: '/custom-email-templates/some_key' },
-  // Was `end-user-roles`, which is still served as a hidden alias and so no
-  // longer appears in the route table this test reads.
   { subResource: 'application-roles', method: 'GET', suffix: '/application-roles' },
   // Support mode: the open cases name another workspace's customers and carry
   // the operators' reasons; the catalogue is application configuration.

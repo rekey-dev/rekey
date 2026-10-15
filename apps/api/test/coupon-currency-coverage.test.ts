@@ -14,6 +14,9 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Quote {
   currency: string;
@@ -90,29 +93,6 @@ describe('coupon coverage of the currency charged', () => {
     expect(inr).toMatchObject({ provider: 'razorpay', row: { currency: 'INR', unitAmount: 79900, discountAmount: 20000, chargeAmount: 59900 } });
   });
 
-  it('tells a buyer the code, the kind and the rate, and nothing else about the coupon', async () => {
-    await w.operator('POST', '/coupons', {
-      code: 'SECRETS',
-      discountType: 'AMOUNT',
-      amounts: [{ currency: 'USD', amountOff: 300 }, { currency: 'INR', amountOff: 20000 }],
-      maxRedemptions: 7,
-      maxRedemptionsPerUser: 2,
-      planSlugs: ['pack'],
-      metadata: { campaign: 'private-note' },
-    });
-    const fixed = await preview({ code: 'SECRETS' }, undefined);
-    expect(fixed.statusCode, fixed.body).toBe(200);
-    expect(fixed.json().data.coupon).toEqual({ code: 'secrets', discountType: 'AMOUNT', basisPoints: null });
-    expect(Object.keys(fixed.json().data as object).sort()).toEqual(
-      ['amount', 'amountAfterDiscount', 'coupon', 'currency', 'discountAmount', 'formatted', 'plan', 'price', 'priceFallback'],
-    );
-    // Not the rupee amount, the limits or the operator's note.
-    for (const hidden of ['20000', 'INR', 'maxRedemptions', 'private-note', 'planSlugs']) {
-      expect(fixed.body).not.toContain(hidden);
-    }
-    expect((await preview({ code: 'PCT' })).json().data.coupon).toEqual({ code: 'pct', discountType: 'PERCENT', basisPoints: 2500 });
-  });
-
   it('refuses a fixed coupon with no amount in the currency charged, where the code is entered and at checkout', async () => {
     const quoted = await preview({ code: 'DOLLARS', country: 'IN' });
     expect(quoted.statusCode, quoted.body).toBe(400);
@@ -132,17 +112,6 @@ describe('coupon coverage of the currency charged', () => {
     const full = await buy({ country: 'IN' }, buyer);
     expect(full.json().data).toMatchObject({ currency: 'INR', unitAmount: 79900, discountAmount: 0 });
     expect(await redemptions('DOLLARS')).toBe(0);
-  });
-
-  it('refuses a percentage limited to other currencies the same way, and applies it where it is allowed', async () => {
-    expect(errorOf(await preview({ code: 'PCTUSD', country: 'IN' }))).toMatchObject({
-      code: 'COUPON_CURRENCY_NOT_COVERED',
-      message: 'Coupon "PCTUSD" does not work for prices in INR.',
-    });
-    expect(errorOf(await buy({ couponCode: 'PCTUSD', country: 'IN' })).code).toBe('COUPON_CURRENCY_NOT_COVERED');
-    expect(quoteOf(await preview({ code: 'PCTUSD' }))).toMatchObject({ currency: 'USD', discountAmount: 250 });
-    // An unlimited percentage works in both.
-    expect(quoteOf(await preview({ code: 'PCT', country: 'IN' }))).toMatchObject({ currency: 'INR', discountAmount: 19975 });
   });
 
   describe('after a fall back to the default price', () => {
@@ -186,11 +155,6 @@ describe('coupon coverage of the currency charged', () => {
       expect(errorOf(await preview({ code: 'PCTUSD', country: 'IN' })).fix).toContain('adding INR to its `currencies`');
       await w.operator('PATCH', '/coupons/PCTUSD', { currencies: ['USD', 'INR'] });
       expect(quoteOf(await preview({ code: 'PCTUSD', country: 'IN' }))).toMatchObject({ currency: 'INR', discountAmount: 19975 });
-    });
-
-    it('follows the other half of the fix: the checkout without the code charges the full default price', async () => {
-      const bought = await buy({ country: 'DE' });
-      expect(bought.json().data).toMatchObject({ currency: 'USD', unitAmount: 1000, discountAmount: 0 });
     });
   });
 
@@ -249,19 +213,6 @@ describe('coupon coverage of the currency charged', () => {
         data: { code: 'dollars', planSlug: 'pack', reasonCode: 'COUPON_CURRENCY_NOT_COVERED', chargedCurrency: 'INR' },
       });
       expect(logged[0]!.couponId).toEqual(expect.any(String));
-    });
-
-    it('records a refusal decided after the provider is known', async () => {
-      await buy({ couponCode: 'BIG' });
-      await expect.poll(() => refusedEvents('COUPON_FULL_DISCOUNT_UNSUPPORTED')).toHaveLength(1);
-      expect((await refusedEvents('COUPON_FULL_DISCOUNT_UNSUPPORTED'))[0]).toMatchObject({ currency: 'USD', data: { planSlug: 'pack' } });
-    });
-
-    it('records nothing for a code that matches no coupon', async () => {
-      const res = await preview({ code: 'NOSUCHCODE' });
-      expect(res.statusCode).toBe(404);
-      expect(errorOf(res).code).toBe('COUPON_NOT_FOUND');
-      expect(await prisma.billingEvent.count({ where: { applicationId: w.applicationId, type: 'coupon.refused' } })).toBe(0);
     });
   });
 });

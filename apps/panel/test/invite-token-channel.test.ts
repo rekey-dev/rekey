@@ -63,6 +63,10 @@ const CREDENTIAL_PARAMS = [
 const ARRIVED_BY_LINK: Readonly<Record<string, readonly string[]>> = {
   [path.join('app', 'accept-invite', 'page.tsx')]: ['token'],
   [path.join('app', 'reset-password', 'page.tsx')]: ['token'],
+  // The operator confirmation link (`/verify-email?token=…`), which arrives
+  // from the email the same way. Its token confirms an address for an
+  // account the visitor must also be signed in to, and gives no session.
+  [path.join('app', 'verify-email', 'page.tsx')]: ['token'],
   [path.join('app', 'sign-up', 'page.tsx')]: ['invite'],
 };
 

@@ -263,17 +263,11 @@ describe('rekey doctor', () => {
 
   // ---------- plan-currencies ----------
 
-  it('plan-currencies fails on an unsellable currency, a malformed amount and the API blocker, naming each plan', async () => {
+  it('plan-currencies fails on an unsellable currency and a malformed amount, naming each plan', async () => {
     const kwd = plan({ id: 'p2', slug: 'gulf', prices: [price({ id: 'pp_kwd', currency: 'KWD', amount: 1000 })] });
     const huf = plan({ id: 'p3', slug: 'forint', prices: [price({ id: 'pp_huf', currency: 'HUF', amount: 500050 })] });
-    const malformed = plan({
-      id: 'p4',
-      slug: 'broken',
-      prices: [],
-      checkout: { ready: false, blockers: [{ provider: null, code: 'PLAN_CURRENCY_INVALID', message: 'stored with the currency "US"', fix: 'Set the price again.' }] },
-    });
     const retired = plan({ id: 'p5', slug: 'retired', active: false, prices: [price({ id: 'pp_bhd', currency: 'BHD', amount: 1000 })] });
-    stub.ok(`GET ${app('app_1')}/plans?limit=100&offset=0`, paged([PRO, kwd, huf, malformed, retired], 100));
+    stub.ok(`GET ${app('app_1')}/plans?limit=100&offset=0`, paged([PRO, kwd, huf, retired], 100));
     stub.ok(`GET ${app('app_1')}/billing-credentials`, [credential({ currencies: ['USD', 'INR', 'HUF', 'KWD'] })]);
     const { code, named } = await doctor(operator);
     expect(code).toBe(1);
@@ -282,9 +276,9 @@ describe('rekey doctor', () => {
     expect(check.message).toContain('gulf: KWD is not a currency a price can be in');
     // Intl puts a no-break space between the code and the number.
     expect(check.message).toMatch(/forint: HUF\s5,000\.50 \(HUF is priced in whole units/);
-    expect(check.message).toContain('broken: PLAN_CURRENCY_INVALID');
     expect(check.message).not.toContain('retired');
     expect(check.fix).toContain('rekey plans prices archive <plan> <currency> --app app_1');
+    expect(check.fix).toContain('{"price": {"currency": "USD", "amount": 1900}}');
   });
 
   // ---------- provider-currencies ----------

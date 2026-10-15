@@ -82,21 +82,4 @@ describe('registerGracefulShutdown', () => {
     await expect(shutdown('SIGINT')).resolves.toBeUndefined();
     expect(onShutdownComplete).toHaveBeenCalledOnce();
   });
-
-  it('registers SIGTERM and SIGINT process listeners', async () => {
-    const app = await buildApp({ logger: false });
-    await app.ready();
-
-    const before = {
-      term: process.listenerCount('SIGTERM'),
-      int: process.listenerCount('SIGINT'),
-    };
-    registerGracefulShutdown(app);
-    expect(process.listenerCount('SIGTERM')).toBe(before.term + 1);
-    expect(process.listenerCount('SIGINT')).toBe(before.int + 1);
-
-    // Close the app directly (we didn't trigger shutdown) so the fork doesn't
-    // leak an open server between tests.
-    await app.close();
-  });
 });

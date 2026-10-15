@@ -12,6 +12,9 @@ import { TOOL_SCOPES, allOperatorTools, handleOperatorMcpMessage } from '../src/
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { seedUsers } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const tool = allOperatorTools.find((t) => t.name === 'get_user_analytics')!;
 

@@ -16,7 +16,7 @@
  * There are two independent reasons a file can be inert:
  *
  *   1. Its PATH cannot matter (top-level markdown, anything under docs/ that
- *      is not a guide). A short, boring list, because this is where being wrong
+ *      is not a guide or an upgrade script). A short, boring list, because this is where being wrong
  *      silently drops coverage. A guide (any `.md` under docs/) is not inert: its code
  *      samples are compiled by a package suite, so it runs the package tests.
  *   2. Its CONTENT did not really change: the TypeScript AST before and after
@@ -75,6 +75,13 @@ const INERT_PATHS = [
  * package tests and nothing else: no build and no API test reads it.
  */
 const DOC_SNIPPET_PATHS = [/^docs\/.*\.md$/];
+
+/**
+ * Upgrade scripts the API suite runs against a migrated database
+ * (`apps/api/test/money-migrations-over-existing-rows.test.ts` reads the preflight
+ * queries). A change to one runs the API tests.
+ */
+const API_READ_DOC_PATHS = [/^docs\/upgrades\/.*\.sql$/];
 
 /** Anything here re-runs everything: it changes how the other jobs behave. */
 const GLOBAL_PATHS = [
@@ -177,6 +184,10 @@ export function classify(files, opts = {}) {
   for (const file of files) {
     if (DOC_SNIPPET_PATHS.some((re) => re.test(file))) {
       result.packages = true;
+      continue;
+    }
+    if (API_READ_DOC_PATHS.some((re) => re.test(file))) {
+      result.api = true;
       continue;
     }
     if (INERT_PATHS.some((re) => re.test(file))) continue;
@@ -298,7 +309,8 @@ function selfTest() {
     // A guide's code samples are compiled by a package suite, and by nothing else.
     ['docs only', ['docs/auth.md'], { api: false, packages: true, build: false, full: false }],
     ['a nested guide', ['docs/specs/billing-money-model.md'], { api: false, packages: true, build: false }],
-    ['a docs file that is not a guide', ['docs/specs/billing-money-model.step-z.sql'], { api: false, packages: false, build: false }],
+    ['a docs file that is not a guide', ['docs/assets/diagram.svg'], { api: false, packages: false, build: false }],
+    ['an upgrade script the API suite reads', ['docs/upgrades/billing-money-model.preflight.sql'], { api: true, packages: false, build: false }],
     ['top-level prose', ['decisions.md', 'README.md'], { api: false, packages: false, build: false }],
     [
       'top-level prose',

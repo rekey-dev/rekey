@@ -14,6 +14,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { applicationsService } from '../src/modules/applications/applications.service.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
 import { GoogleProvider } from '../src/modules/oauth/providers/google.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -55,7 +58,7 @@ describe('EndUser.createdVia', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: appId,
       patch: { methods: ['password', 'magic_link', 'oauth'] },
     });

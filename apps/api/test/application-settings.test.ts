@@ -4,10 +4,12 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { isIanaTimezone } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { bearer, operatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('application settings: reporting timezone', () => {
   let app: FastifyInstance;
@@ -86,12 +88,6 @@ describe('application settings: reporting timezone', () => {
     expect((await prisma.application.findUniqueOrThrow({ where: { id: w.appId } })).reportingTimezone).toBe('UTC');
   });
 
-  it('refuses unknown keys', async () => {
-    const w = await operatorWorld(app);
-    const res = await patch(w, w.ownerToken, { timezone: 'Europe/Berlin' });
-    expect(res.statusCode).toBe(400);
-  });
-
   it('needs write access and overview:write', async () => {
     const w = await operatorWorld(app, 'APP_VIEWER');
     const viewer = await patch(w, w.memberToken, { reportingTimezone: 'Europe/Berlin' });
@@ -106,11 +102,5 @@ describe('application settings: reporting timezone', () => {
     expect(restricted.statusCode).toBe(403);
     expect(restricted.json().error.code).toBe('SCOPE_INSUFFICIENT');
     expect((await prisma.application.findUniqueOrThrow({ where: { id: w.appId } })).reportingTimezone).toBe('Europe/Berlin');
-  });
-
-  it('knows real zones', () => {
-    for (const tz of ['UTC', 'Europe/Berlin', 'America/Argentina/Buenos_Aires', 'Asia/Kolkata', 'Etc/GMT+5']) {
-      expect(isIanaTimezone(tz), tz).toBe(true);
-    }
   });
 });

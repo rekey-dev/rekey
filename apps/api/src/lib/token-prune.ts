@@ -143,7 +143,18 @@ export async function pruneExpiredSessionTokens(
     maxBatches,
   );
 
-  return refresh + tenantRefresh + resets + verifications;
+  const operatorVerifications = await deleteInBatches(
+    (limit) => prisma.$executeRaw`
+      DELETE FROM "tenant_email_verification_tokens"
+      WHERE "id" IN (
+        SELECT "id" FROM "tenant_email_verification_tokens" WHERE "expires_at" < ${now} LIMIT ${limit}
+      )
+      AND "expires_at" < ${now}`,
+    batchSize,
+    maxBatches,
+  );
+
+  return refresh + tenantRefresh + resets + verifications + operatorVerifications;
 }
 
 /**

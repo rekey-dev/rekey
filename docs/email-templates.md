@@ -32,10 +32,25 @@ These are the `{{variables}}` a saved copy of each built-in email can use. Every
 | `welcome` | `userEmail`, `appUrl` |
 | `mfa_enabled` | `userEmail`, `enabledAtIso`, `enabledAt` |
 | `password_changed` | `userEmail`, `changedAtIso`, `changedAt` |
+| `account_claimed` | `userEmail`, `claimedAtIso`, `claimedAt`, `appUrl` |
+| `operator_account_claimed` | `userEmail`, `claimedAtIso`, `claimedAt`, `appUrl`, `reviewSummary` |
+| `operator_email_verification` | `userEmail`, `verifyUrl`, `expiresAtIso`, `expiresAt` |
+| `operator_email_confirmed` | `userEmail`, `confirmedAtIso`, `confirmedAt`, `appUrl` |
+| `signup_existing_account` | `userEmail`, `appUrl` |
+| `signup_finish_setup` | `userEmail`, `resetUrl`, `expiresAtIso`, `expiresAt` |
 | `billing_payment_failed_reminder` | `userEmail`, `planName`, `amountDue`, `attempt`, `graceEndsAtIso`, `graceEndsAt`, `portalUrl` |
 | `billing_unapplied_payment` | `amount`, `provider`, `providerPaymentId`, `endUserEmail`, `receivedAtIso`, `receivedAt` |
 
 `portalUrl` is the Application's hosted billing portal (`PUBLIC_PORTAL_URL` plus the slug), where the customer updates their payment method. It is empty when the hosted portal is off for the Application, and the default then leaves out its **Update payment method** button. Wrap a link to it in `{{#if portalUrl}}...{{/if}}` for the same effect in your own copy.
+
+Three built-in emails exist for the account-takeover and enumeration rules in [auth.md](auth.md#an-unverified-account-belongs-to-whoever-proves-the-mailbox):
+
+- `account_claimed` goes to an address after a magic link, a social sign-in or a completed reset proved the mailbox of an account that was still unverified and something other than the password a reset replaces was removed: the earlier password, a passkey, a linked provider, or a licence key. It is a security notice: it is not counted against the per-recipient limit.
+- `operator_account_claimed` is the operator version, sent by Rekey to the operator and not editable per Application. `reviewSummary` is one sentence per workspace the account owns or administers: every other member with their email and role, how many Applications it has, and how many live API keys, enabled webhook endpoints and billing providers those have, with how many keys and endpoints have no recorded creator and were left in place. It is sent when a claim removed something or left any of those to review.
+- `operator_email_verification` is the operator confirmation email, with the panel's `/verify-email` link. It says to sign in to the account and then confirm, to confirm only if you created the account yourself, and to ask for an emailed sign-in link if you did not. `operator_email_confirmed` follows a confirmation and says to reset the password if it was not you. Both are sent by Rekey to the operator and are not editable per Application; the second is a security notice and is not counted against the per-recipient limit.
+- `signup_existing_account` and `signup_finish_setup` go to the owner of an address when someone tries to sign up with it on an Application that requires a verified address, where sign-up itself must not say the address is taken. The first tells a verified owner to sign in or reset; the second gives an unverified one a link to choose a password. Keep `{{resetUrl}}` in a saved copy of the second: it is the only way in that mail offers.
+
+The default `email_verification` copy carries a boxed line telling the reader to confirm only if they signed up themselves, because confirming keeps the password chosen at sign-up. If you saved your own copy of that email before 2.2.0, it does not have the line; consider adding it.
 ## Sender identity
 
 Every email an Application sends, built-in or custom, introduces itself with three settings, set in **Panel → Application → Email → Sender** or with `PATCH /api/v1/tenant/applications/:id/email-sender`:

@@ -293,6 +293,12 @@ export const env = createEnv({
     EMAIL_SEND_DAILY_CAP: z.coerce.number().int().positive().default(1000),
     EMAIL_SEND_RECIPIENT_HOURLY_CAP: z.coerce.number().int().positive().default(10),
 
+    // Caps on built-in auth email (reset, sign-in link, verification, welcome,
+    // invitation) to ONE mailbox, per Application, whoever asks and from
+    // whatever address. Security notices are not counted.
+    AUTH_EMAIL_RECIPIENT_HOURLY_CAP: z.coerce.number().int().positive().default(5),
+    AUTH_EMAIL_RECIPIENT_DAILY_CAP: z.coerce.number().int().positive().default(15),
+
     // Signs one-click unsubscribe links in custom notification email. The links
     // never expire, so the key rotates by id: set a new secret and id, and move
     // the old pair into EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS (`id:secret,id:secret`)

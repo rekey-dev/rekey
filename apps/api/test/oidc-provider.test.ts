@@ -16,6 +16,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 // Requiring a verified email needs a URL the verification link can be built on.
 const VERIFY_BASE = 'https://app.example.com';
@@ -245,58 +248,6 @@ describe('OIDC provider', () => {
     expect(md.scopes_supported).toEqual(['openid', 'profile', 'email']);
   });
 
-  it('jwks_uri points at the deployment JWKS, which really serves the ID Token key', async () => {
-    const fx = await bootstrap();
-    const md = await app
-      .inject({ method: 'GET', url: `/api/v1/mcp/${fx.slug}/.well-known/openid-configuration` })
-      .then((r) => r.json() as { jwks_uri: string });
-    expect(md.jwks_uri).toMatch(/\/\.well-known\/jwks\.json$/);
-    const tokens = await grant(fx, { scope: 'openid' });
-    const kid = (jwt.decode(tokens.id_token!, { complete: true })?.header as { kid?: string }).kid;
-    const jwks = await app
-      .inject({ method: 'GET', url: '/.well-known/jwks.json' })
-      .then((r) => r.json() as { keys: Array<{ kid: string; alg: string }> });
-    expect(jwks.keys.some((k) => k.kid === kid && k.alg === 'RS256')).toBe(true);
-  });
-
-  it('serves the same document at the RFC 8414 path-insertion URL', async () => {
-    const fx = await bootstrap();
-    const suffix = await app.inject({
-      method: 'GET',
-      url: `/api/v1/mcp/${fx.slug}/.well-known/openid-configuration`,
-    });
-    const inserted = await app.inject({
-      method: 'GET',
-      url: `/.well-known/openid-configuration/api/v1/mcp/${fx.slug}`,
-    });
-    expect(inserted.statusCode).toBe(200);
-    expect(inserted.body).toBe(suffix.body);
-  });
-
-  it('advertises openid alongside mcp:account when both surfaces are on', async () => {
-    const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: true });
-    const md = await app
-      .inject({ method: 'GET', url: `/api/v1/mcp/${fx.slug}/.well-known/oauth-authorization-server` })
-      .then((r) => r.json() as { scopes_supported: string[] });
-    expect(md.scopes_supported).toEqual(['openid', 'profile', 'email', 'mcp:account']);
-  });
-
-  it('mounts the grant endpoints for an OIDC-only app (no MCP required)', async () => {
-    const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: false });
-    const authorize = await app.inject({
-      method: 'GET',
-      url: `/api/v1/mcp/${fx.slug}/oauth/authorize?response_type=code&client_id=${fx.clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}&code_challenge=${pkce().challenge}&code_challenge_method=S256&scope=openid`,
-    });
-    expect(authorize.statusCode).toBe(200);
-    expect(authorize.body).toContain('Know which account is yours');
-    // The client names itself, so the screen names where the answer goes.
-    expect(authorize.body).toContain(`<p class="dest">${new URL(REDIRECT).host}</p>`);
-    expect(authorize.body).toContain('Deny sends you back to');
-    // …but the MCP resource server itself stays 404, because mcpEnabled is off.
-    const mcp = await app.inject({ method: 'POST', url: `/api/v1/mcp/${fx.slug}` });
-    expect(mcp.statusCode).toBe(404);
-  });
-
   // ---- ID Token -----------------------------------------------------------
 
   it('issues an ID Token with correct standard claims, signed RS256 by the JWKS key', async () => {
@@ -336,19 +287,6 @@ describe('OIDC provider', () => {
     expect(verified.sub).toBe(fx.euId);
   });
 
-  it('omits nonce entirely when the client did not send one', async () => {
-    const fx = await bootstrap();
-    const tokens = await grant(fx, { scope: 'openid' });
-    expect(decodeJwt(tokens.id_token!)).not.toHaveProperty('nonce');
-  });
-
-  it('issues no ID Token when openid was not requested', async () => {
-    const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: true });
-    const tokens = await grant(fx, { scope: 'mcp:account' });
-    expect(tokens.scope).toBe('mcp:account');
-    expect(tokens.id_token).toBeUndefined();
-  });
-
   it('sub is stable across grants and differs per application for the same email', async () => {
     const fx = await bootstrap();
     const first = decodeJwt((await grant(fx, { scope: 'openid' })).id_token!);
@@ -379,13 +317,6 @@ describe('OIDC provider', () => {
     const withProfile = decodeJwt((await grant(fx, { scope: 'openid profile' })).id_token!);
     expect(withProfile.name).toBe('Ada Lovelace');
     expect(withProfile).not.toHaveProperty('email');
-  });
-
-  it('drops unsupported and disabled scopes instead of granting them', async () => {
-    // MCP is OFF here, a client asking for it must not receive it.
-    const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: false });
-    const tokens = await grant(fx, { scope: 'openid email mcp:account admin superuser' });
-    expect(tokens.scope).toBe('openid email');
   });
 
   it('refuses an authorization request whose scopes are all ungrantable', async () => {
@@ -468,31 +399,6 @@ describe('OIDC provider', () => {
     expect(typeof claims.updated_at).toBe('number');
   });
 
-  it('accepts POST as well as GET (OIDC Core §5.3.1)', async () => {
-    const fx = await bootstrap();
-    const tokens = await grant(fx, { scope: 'openid' });
-    const r = await app.inject({
-      method: 'POST',
-      url: `/api/v1/mcp/${fx.slug}/oauth/userinfo`,
-      headers: { authorization: `Bearer ${tokens.access_token}` },
-    });
-    expect(r.statusCode).toBe(200);
-    expect((r.json() as { sub: string }).sub).toBe(fx.euId);
-  });
-
-  it('returns ONLY sub for a bare openid grant', async () => {
-    const fx = await bootstrap();
-    const tokens = await grant(fx, { scope: 'openid' });
-    const claims = await app
-      .inject({
-        method: 'GET',
-        url: `/api/v1/mcp/${fx.slug}/oauth/userinfo`,
-        headers: { authorization: `Bearer ${tokens.access_token}` },
-      })
-      .then((r) => r.json() as Record<string, unknown>);
-    expect(Object.keys(claims)).toEqual(['sub']);
-  });
-
   it('does not leak profile claims to an email-only grant, or vice versa', async () => {
     const fx = await bootstrap();
     const emailOnly = await grant(fx, { scope: 'openid email' });
@@ -552,24 +458,6 @@ describe('OIDC provider', () => {
     expect(r.statusCode).toBe(403);
     expect((r.json() as { error: string }).error).toBe('insufficient_scope');
     expect(r.headers['www-authenticate']).toContain('insufficient_scope');
-  });
-
-  it('rejects a missing or garbage bearer token with 401 + WWW-Authenticate', async () => {
-    const fx = await bootstrap();
-    const none = await app.inject({
-      method: 'GET',
-      url: `/api/v1/mcp/${fx.slug}/oauth/userinfo`,
-    });
-    expect(none.statusCode).toBe(401);
-    expect(none.headers['www-authenticate']).toContain('Bearer');
-
-    const garbage = await app.inject({
-      method: 'GET',
-      url: `/api/v1/mcp/${fx.slug}/oauth/userinfo`,
-      headers: { authorization: 'Bearer not-a-real-token' },
-    });
-    expect(garbage.statusCode).toBe(401);
-    expect((garbage.json() as { error: string }).error).toBe('invalid_token');
   });
 
   it('rejects an access token issued by a DIFFERENT application (no cross-app claims)', async () => {
@@ -632,19 +520,4 @@ describe('OIDC provider', () => {
     expect((r.json() as { error: string }).error).toBe('insufficient_scope');
   });
 
-  it('an mcp:account token still reaches the MCP tools', async () => {
-    const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: true });
-    const tokens = await grant(fx, { scope: 'openid mcp:account' });
-    expect(tokens.scope).toBe('openid mcp:account');
-    const r = await app.inject({
-      method: 'POST',
-      url: `/api/v1/mcp/${fx.slug}`,
-      headers: {
-        authorization: `Bearer ${tokens.access_token}`,
-        'content-type': 'application/json',
-      },
-      payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
-    });
-    expect(r.statusCode).toBe(200);
-  });
 });

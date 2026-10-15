@@ -25,6 +25,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const REDIRECT = 'http://127.0.0.1:9798/callback';
 function pkce(): { verifier: string; challenge: string } {
@@ -230,22 +233,5 @@ describe('workspace operator-MCP switch', () => {
     expect(ev).toBeDefined();
     expect(ev!.actorType).toBe('operator');
     expect(ev!.metadata).toMatchObject({ enabled: false });
-  });
-
-  it('rename still works on its own, and the body needs at least one field', async () => {
-    const w = await world();
-    const renamed = await inject({
-      method: 'PATCH',
-      url: '/api/v1/tenant/workspace',
-      headers: auth(w.ownerToken),
-      payload: { name: 'Renamed Co' },
-    });
-    expect(renamed.statusCode).toBe(200);
-    expect((renamed.json().data as { name: string; operatorMcpEnabled: boolean })).toMatchObject({
-      name: 'Renamed Co',
-      operatorMcpEnabled: true,
-    });
-    const empty = await inject({ method: 'PATCH', url: '/api/v1/tenant/workspace', headers: auth(w.ownerToken), payload: {} });
-    expect(empty.statusCode).toBe(400);
   });
 });

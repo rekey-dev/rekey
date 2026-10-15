@@ -1,0 +1,38 @@
+name: Deprecate package versions
+
+# Run by hand after a stable release, to point everyone on an older version at
+# it. Marks every version of each @rekey.dev/* package in `range` deprecated.
+# Re-running is harmless. Uses the same NPM_TOKEN as release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      range:
+        description: 'Semver range to deprecate, for example "<2.2.0"'
+        required: true
+      message:
+        description: Message npm shows on install
+        required: true
+
+jobs:
+  deprecate:
+    if: github.repository == 'rekey-dev/rekey'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Deprecate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RANGE: ${{ inputs.range }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          for p in shared-types node react nextjs astro cli mcp; do
+            npm deprecate "@rekey.dev/$p@${RANGE}" "$MESSAGE"
+            echo "deprecated @rekey.dev/$p@${RANGE}"
+          done

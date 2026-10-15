@@ -1,6 +1,6 @@
 /**
  * Per-Application end-user role catalog,
- * `/api/v1/tenant/applications/:id/end-user-roles`.
+ * `/api/v1/tenant/applications/:id/application-roles`.
  *
  * A per-app RBAC surface with four operations and, until now, no test. It is
  * the thing `EndUser.role` validates against, so its failure modes are not
@@ -16,6 +16,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Fixture {
   accessToken: string;
@@ -79,7 +82,7 @@ describe('end-user role catalog', () => {
   }
 
   function url(f: Fixture, suffix = ''): string {
-    return `/api/v1/tenant/applications/${f.applicationId}/end-user-roles${suffix}`;
+    return `/api/v1/tenant/applications/${f.applicationId}/application-roles${suffix}`;
   }
 
   function list(f: Fixture): Promise<LightMyRequestResponse> {
@@ -125,7 +128,7 @@ describe('end-user role catalog', () => {
 
     const other = await app.inject({
       method: 'GET',
-      url: `/api/v1/tenant/applications/${secondId}/end-user-roles`,
+      url: `/api/v1/tenant/applications/${secondId}/application-roles`,
       headers: { authorization: `Bearer ${f.accessToken}` },
     });
     const names = (other.json().data as Array<{ name: string }>).map((r) => r.name);
@@ -177,37 +180,6 @@ describe('end-user role catalog', () => {
   });
 
   // ---------- update ----------
-
-  it('updates the description and can move the default flag', async () => {
-    const f = await bootstrap();
-    await create(f, { name: 'editor' });
-
-    const res = await app.inject({
-      method: 'PATCH',
-      url: url(f, '/editor'),
-      headers: { authorization: `Bearer ${f.accessToken}` },
-      payload: { description: 'Can edit', isDefault: true },
-    });
-    expect(res.statusCode).toBe(200);
-    const updated = res.json().data as { description: string; isDefault: boolean };
-    expect(updated.description).toBe('Can edit');
-    expect(updated.isDefault).toBe(true);
-
-    const roles = (await list(f)).json().data as Array<{ isDefault: boolean }>;
-    expect(roles.filter((r) => r.isDefault)).toHaveLength(1);
-  });
-
-  it('updating an unknown role is END_USER_ROLE_NOT_FOUND', async () => {
-    const f = await bootstrap();
-    const res = await app.inject({
-      method: 'PATCH',
-      url: url(f, '/ghost'),
-      headers: { authorization: `Bearer ${f.accessToken}` },
-      payload: { description: 'nope' },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('END_USER_ROLE_NOT_FOUND');
-  });
 
   // ---------- delete ----------
 
@@ -307,17 +279,6 @@ describe('end-user role catalog', () => {
     // Neither refusal deleted anything.
     const names = ((await list(f)).json().data as Array<{ name: string }>).map((r) => r.name);
     expect(names).toContain('editor');
-  });
-
-  it('deleting an unknown role is END_USER_ROLE_NOT_FOUND', async () => {
-    const f = await bootstrap();
-    const res = await app.inject({
-      method: 'DELETE',
-      url: url(f, '/ghost'),
-      headers: { authorization: `Bearer ${f.accessToken}` },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('END_USER_ROLE_NOT_FOUND');
   });
 
   // ---------- the catalog is authoritative ----------

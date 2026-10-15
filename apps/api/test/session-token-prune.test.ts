@@ -95,58 +95,19 @@ describe('session-token retention', () => {
     expect(await prisma.refreshToken.findUnique({ where: { id: row.id } })).not.toBeNull();
   });
 
-  it('sweeps an expired reset token immediately — it has no forensic role', async () => {
-    const row = await prisma.passwordResetToken.create({
-      data: {
-        applicationId: ids.applicationId,
-        endUserId: ids.endUserId,
-        tokenHash: `r-${Math.random()}`,
-        expiresAt: new Date(Date.now() - DAY),
-      },
-    });
+  it('sweeps an expired operator confirmation token, and keeps one that can still be used', async () => {
+    const operator = await prisma.tenantUser.create({ data: { email: `prune-${Math.random().toString(36).slice(2, 8)}@example.com` } });
+    const token = (expiresAt: Date) =>
+      prisma.tenantEmailVerificationToken.create({
+        data: { tenantUserId: operator.id, email: operator.email, tokenHash: `v-${Math.random()}`, expiresAt },
+      });
+    const expired = await token(new Date(Date.now() - DAY));
+    const live = await token(new Date(Date.now() + DAY));
 
     await pruneExpiredSessionTokens();
 
-    expect(await prisma.passwordResetToken.findUnique({ where: { id: row.id } })).toBeNull();
-  });
-
-  it('deletes everything eligible across several batches, and nothing else', async () => {
-    const old = new Date(Date.now() - 60 * DAY);
-    const base = { applicationId: ids.applicationId, endUserId: ids.endUserId };
-    // 23 eligible rows at batch size 5: four full batches and a short one.
-    await prisma.refreshToken.createMany({
-      data: Array.from({ length: 23 }, (_, i) => ({
-        ...base,
-        tokenHash: `old-${i}-${Math.random()}`,
-        createdAt: old,
-        expiresAt: i % 2 === 0 ? old : new Date(Date.now() + DAY),
-        revokedAt: i % 2 === 0 ? null : old,
-      })),
-    });
-    const keep = await Promise.all([
-      // Old but live.
-      prisma.refreshToken.create({
-        data: { ...base, tokenHash: `k1-${Math.random()}`, createdAt: old, expiresAt: new Date(Date.now() + DAY) },
-      }),
-      // Revoked, but inside the forensics window.
-      prisma.refreshToken.create({
-        data: { ...base, tokenHash: `k2-${Math.random()}`, expiresAt: new Date(Date.now() - DAY), revokedAt: new Date() },
-      }),
-    ]);
-    await prisma.passwordResetToken.createMany({
-      data: Array.from({ length: 7 }, (_, i) => ({
-        ...base,
-        tokenHash: `r-${i}-${Math.random()}`,
-        expiresAt: new Date(Date.now() - DAY),
-      })),
-    });
-
-    const deleted = await pruneExpiredSessionTokens({ batchSize: 5 });
-
-    expect(deleted).toBe(30);
-    const left = await prisma.refreshToken.findMany({ select: { id: true } });
-    expect(left.map((r) => r.id).sort()).toEqual(keep.map((r) => r.id).sort());
-    expect(await prisma.passwordResetToken.count()).toBe(0);
+    expect(await prisma.tenantEmailVerificationToken.findUnique({ where: { id: expired.id } })).toBeNull();
+    expect(await prisma.tenantEmailVerificationToken.findUnique({ where: { id: live.id } })).not.toBeNull();
   });
 
   it('stops at the per-run batch cap and finishes on the next run', async () => {

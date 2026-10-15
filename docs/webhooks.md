@@ -24,13 +24,34 @@ releases. The response carries the endpoint's signing **secret exactly once** �
 store it like a password; only its stored copy exists afterwards, and the only
 way to get a new one is `POST …/webhooks/:endpointId/rotate-secret`.
 
-The URL must be public `http(s)`. Loopback, private, link-local and CGNAT
-targets are refused at registration with `400 WEBHOOK_URL_UNSAFE`, and refused
-again at delivery time after DNS resolution — a public hostname with a private
-A record does not get through. Self-hosters who genuinely need to deliver to an
-internal service set `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`; leave it `false` on
-anything internet-facing, because the endpoint URL is attacker-influenceable
-input and that flag is what stops it becoming an SSRF.
+The URL must be public, and in production it must be `https://`. Loopback,
+private, link-local and CGNAT targets are refused at registration with
+`400 WEBHOOK_URL_UNSAFE`, and refused again at delivery time after DNS
+resolution, so a public hostname with a private A record does not get through.
+Self-hosters who genuinely need to deliver to an internal service set
+`WEBHOOK_ALLOW_PRIVATE_TARGETS=true`; leave it `false` on anything
+internet-facing, because the endpoint URL is attacker-influenceable input and
+that flag is what stops it becoming an SSRF.
+
+### https only in production
+
+A payload carries your users' email addresses and ids, so a deployment running
+with `NODE_ENV=production` sends it only over TLS:
+
+- Creating an endpoint with an `http://` URL, or changing one to it, answers
+  `400 URL_NOT_HTTPS`. The panel form and the `create_webhook_endpoint` and
+  `update_webhook_endpoint` MCP tools apply the same rule.
+- An endpoint stored as `http://` before this rule receives nothing. Each of
+  its deliveries records the error `URL_NOT_HTTPS: not sent. …`, visible on the
+  endpoint's page in the panel, in `GET …/deliveries` and in the
+  `recent_failed_webhook_deliveries` MCP tool, and follows the normal retry
+  schedule. Change the endpoint to an `https://` URL and retry the delivery.
+- `GET …/webhooks` returns `httpsRequired`, true when the rule applies.
+
+Two deployments keep plain http: one not in production, and one with
+`WEBHOOK_ALLOW_PRIVATE_TARGETS=true`, where http is for receivers on your own
+private network. That flag allows http to any host, so do not set it only to
+get http back for a public receiver.
 
 Endpoint management, all under `/api/v1/tenant/applications/:id/webhooks`:
 
@@ -219,7 +240,18 @@ rather than hardcoding this table.
 | `server` | A secret key's `PATCH /api/v1/users/:id/profile`. | `profile.<key>` per answer |
 | `operator` | An operator's `PATCH /api/v1/tenant/applications/:id/end-users/:euid`, or `.../end-users/:euid/profile`. | any of `role`, `emailVerified`, `metadata`, or `profile.<key>` |
 | `email_verification` | The first successful `POST /api/v1/auth/verify-email`. | `emailVerified` |
-| `magic_link` | A magic-link sign-in that proved an unverified address. | `emailVerified` |
+| `magic_link` | A magic-link sign-in that proved an unverified address and took the account over from whoever registered it. | `emailVerified`, `credentials` |
+| `oauth` | A social sign-in whose provider verified the address of an unverified account. | `emailVerified`, `credentials` |
+| `password_reset` | A completed password reset on an unverified account. | `emailVerified`, `credentials` |
+| `mfa` | A mailbox proof on an unverified account that already had MFA, finished by a correct code. Nothing was removed. | `emailVerified` |
+
+`credentials` in `changed` means the account's sign-in methods were replaced:
+the password (unless `via` is `password_reset`, which set a new one), every
+session, passkeys, a second factor, other linked providers and device bindings
+set before the mailbox was proven were removed. The user id and everything
+else on the account are unchanged. If your app grants access by membership or
+role, this is the event to review them on. See
+[auth.md](auth.md#an-unverified-account-belongs-to-whoever-proves-the-mailbox).
 
 It is written in the same transaction as the change, and only when a value
 actually changed: a PATCH that stores what was already there, or a second

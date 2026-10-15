@@ -69,8 +69,14 @@ import type {
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
-import { signWebhook, generateWebhookSecret } from '../../lib/webhook-signing.js';
-import { pinnedFetchInit, assertSafeUrlResolved } from '../../lib/ssrf-guard.js';
+import { signWebhook, generateWebhookSecret, isWebhookUrlSafe } from '../../lib/webhook-signing.js';
+import {
+  assertSafeUrlResolved,
+  isPlainHttp,
+  pinnedFetchInit,
+  plainHttpRefused,
+  urlNotHttps,
+} from '../../lib/ssrf-guard.js';
 import {
   endpointMatches,
   isKnownWebhookEvent,
@@ -79,6 +85,7 @@ import {
 } from './events.js';
 import { randomBytes } from 'node:crypto';
 import { BREAKER_THRESHOLD, deliveryTimeoutMs, getEndpointGate } from './endpoint-gate.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 // Total attempts, the first one included, so 4 retries, not 5.
 const MAX_ATTEMPTS = 5;
@@ -303,6 +310,33 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string> 
   void reader.cancel().catch(() => undefined);
   return Buffer.concat(chunks).toString('utf8').slice(0, maxBytes);
 }
+
+/**
+ * Refuse an endpoint URL that must not be stored. Called by create and update
+ * in this service, so the panel routes and the operator MCP tools get the
+ * same answer.
+ */
+function assertEndpointUrlAllowed(url: string): void {
+  const safety = isWebhookUrlSafe(url, { allowPrivate: env.WEBHOOK_ALLOW_PRIVATE_TARGETS ?? false });
+  if (!safety.ok) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'WEBHOOK_URL_UNSAFE',
+      message: `Webhook URL is not allowed: ${safety.reason}`,
+      fix: 'Use a public HTTPS URL. To enable private targets on a self-hosted deploy, set WEBHOOK_ALLOW_PRIVATE_TARGETS=true.',
+    });
+  }
+  if (isPlainHttp(url) && plainHttpRefused()) throw urlNotHttps('The webhook URL');
+}
+
+/**
+ * What a delivery records when its endpoint was stored as plain http before
+ * this deployment refused it. Starts with the error code so an operator
+ * reading the delivery log can look it up.
+ */
+export const PLAIN_HTTP_DELIVERY_ERROR =
+  'URL_NOT_HTTPS: not sent. This endpoint URL is plain http, and this deployment delivers only over https. ' +
+  'Change the endpoint to an https:// URL, then retry this delivery.';
 
 interface PostResult {
   ok: boolean;
@@ -552,6 +586,15 @@ const DISABLED_APP_PARK_MS = 5 * 60_000;
 export async function attemptDelivery(deliveryId: string): Promise<void> {
   const delivery = await inDbLane(() => claimForAttempt(deliveryId));
   if (!delivery) return;
+
+  // Before the breaker, which would otherwise replace this reason with its
+  // own after a few attempts and hide why nothing is being sent.
+  if (isPlainHttp(delivery.endpoint.url) && plainHttpRefused()) {
+    await inDbLane(() =>
+      recordOutcome(delivery, { ok: false, status: null, responseBody: null, error: PLAIN_HTTP_DELIVERY_ERROR }),
+    );
+    return;
+  }
 
   // Per-endpoint isolation (endpoint-gate.ts). The breaker comes first: an
   // endpoint that has failed several sends in a row is not sent to while its
@@ -820,7 +863,19 @@ export const webhookService = {
     applicationId: string;
     url: string;
     events: string[];
+    /**
+     * The operator creating the endpoint, or null when no operator is.
+     * Required, so every caller has to say. An operator who has not confirmed
+     * their address is refused (an endpoint is a standing copy of the
+     * Application's user data sent wherever it points), and the endpoint
+     * remembers who created it.
+     */
+    createdByTenantUserId: string | null;
   }): Promise<{ endpoint: WebhookEndpoint; secret: string }> {
+    if (args.createdByTenantUserId !== null) {
+      await assertOperatorVerifiedForCredential(args.createdByTenantUserId, 'add a webhook endpoint');
+    }
+    assertEndpointUrlAllowed(args.url);
     const existing = await prisma.webhookEndpoint.count({ where: { applicationId: args.applicationId } });
     if (existing >= MAX_ENDPOINTS_PER_APPLICATION) {
       throw new RekeyError({
@@ -837,6 +892,7 @@ export const webhookService = {
         url: args.url,
         events: args.events,
         secret,
+        createdByTenantUserId: args.createdByTenantUserId,
       },
     });
     return { endpoint, secret };
@@ -848,7 +904,13 @@ export const webhookService = {
     url?: string;
     events?: string[];
     enabled?: boolean;
+    /** The operator making the change, or null when no operator is. Refused while their address is unconfirmed. */
+    actorTenantUserId: string | null;
   }): Promise<WebhookEndpoint> {
+    if (args.actorTenantUserId !== null) {
+      await assertOperatorVerifiedForCredential(args.actorTenantUserId, 'change a webhook endpoint');
+    }
+    if (args.url !== undefined) assertEndpointUrlAllowed(args.url);
     // Scope the write by (id, applicationId), like deleteEndpoint/rotateSecret
     //, so an endpointId from another application can never be mutated by
     // passing a different applicationId. `update` keyed on id alone would let

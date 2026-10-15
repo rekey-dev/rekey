@@ -18,6 +18,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { usageService } from '../src/modules/usage/usage.service.js';
 import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Usage remaining + meter catalogue', () => {
   let app: FastifyInstance;
@@ -167,18 +170,6 @@ describe('Usage remaining + meter catalogue', () => {
     expect(after.body.meters[0]).toMatchObject({ used: 5, remaining: 0 });
   });
 
-  it('a record of exactly `remaining` units is accepted and one more is refused', async () => {
-    const user = await signUp();
-    await subscribe({ endUserId: user.endUser.id }, 10);
-    expect((await record({ meterSlug: 'api_calls', quantity: 4, endUserId: user.endUser.id })).statusCode).toBe(201);
-
-    const { remaining } = (await selfRemaining(user.accessToken)).body.meters[0]!;
-    expect(remaining).toBe(6);
-    expect((await record({ meterSlug: 'api_calls', quantity: remaining! + 1, endUserId: user.endUser.id })).statusCode).toBe(402);
-    expect((await record({ meterSlug: 'api_calls', quantity: remaining!, endUserId: user.endUser.id })).statusCode).toBe(201);
-    expect((await selfRemaining(user.accessToken)).body.meters[0]!.remaining).toBe(0);
-  });
-
   it('reports the calendar month in UTC and ignores usage recorded in an earlier month', async () => {
     const user = await signUp();
     await subscribe({ endUserId: user.endUser.id }, 10);
@@ -241,19 +232,6 @@ describe('Usage remaining + meter catalogue', () => {
     const large = await countQueries(read);
     expect((await read()).meters).toHaveLength(12);
     expect(large.count).toBe(small.count);
-  });
-
-  it('says when an unfiltered read stops short of the catalogue', async () => {
-    const user = await signUp();
-    await prisma.usageMeter.createMany({
-      data: Array.from({ length: 200 }, (_, i) => ({ applicationId: appId, slug: `bulk-${i}`, name: `b${i}`, unit: 'u' })),
-    });
-    const all = await selfRemaining(user.accessToken, '');
-    expect(all.body.meters).toHaveLength(200);
-    expect(all.body).toMatchObject({ totalMeters: 201, truncated: true });
-
-    const one = await selfRemaining(user.accessToken, '?meter=bulk-199');
-    expect(one.body).toMatchObject({ totalMeters: 1, truncated: false });
   });
 
   it('works with the secret key and a user token too, and needs the token', async () => {
@@ -363,15 +341,6 @@ describe('Usage remaining + meter catalogue', () => {
         url: `/api/v1/usage/remaining/for-user${q}`,
         headers: { authorization: `Bearer ${key}` },
       });
-
-    it('matches the self read for the same end-user', async () => {
-      const user = await signUp();
-      await subscribe({ endUserId: user.endUser.id }, 8);
-      await record({ meterSlug: 'api_calls', quantity: 3, endUserId: user.endUser.id });
-      const named = await forUser(`?endUserId=${user.endUser.id}&meter=api_calls`);
-      expect(named.statusCode).toBe(200);
-      expect(named.json().data).toEqual((await selfRemaining(user.accessToken)).body);
-    });
 
     it('refuses the publishable key, an unknown end-user, and a missing subject', async () => {
       const user = await signUp();

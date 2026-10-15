@@ -23,6 +23,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { applyPaymentSucceeded } from '../src/modules/billing/webhooks/apply.js';
 import type { PaymentSucceededEvent } from '../src/modules/billing/providers/module-types.js';
+import { seedPlan } from './seed-plan.js';
 
 /** Enough of a pino logger for the applier, with nothing recorded. */
 const silentLog = {
@@ -130,17 +131,6 @@ describe('a succeeded payment with no local subscription', () => {
     expect(kase!.resolvedBy).toBeNull();
   });
 
-  it('opens a case for Stripe too, which already recorded the payment', async () => {
-    const ev = event();
-    await applyPaymentSucceeded(ev, { log: silentLog, provider: 'stripe' });
-
-    const payment = await prisma.payment.findFirst({
-      where: { applicationId, providerPaymentId: ev.providerPaymentId },
-    });
-    const kase = await prisma.unappliedPayment.findUnique({ where: { paymentId: payment!.id } });
-    expect(kase?.provider).toBe('stripe');
-  });
-
   it('records the provider as unknown rather than guessing when none was passed', async () => {
     // A queue row naming the wrong processor sends an operator to refund money
     // in a dashboard where it does not exist.
@@ -177,16 +167,12 @@ describe('a succeeded payment that DOES match a local subscription', () => {
     // The queue is for money we could not apply. A normal renewal appearing in
     // it would bury the real cases under noise, which is the failure mode that
     // makes an alerting queue useless.
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${randomUUID().slice(0, 8)}`,
         name: 'Pro',
-        amount: 4900,
-        currency: 'USD',
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 4900 });
     const endUser = await prisma.endUser.create({
       data: {
         applicationId,

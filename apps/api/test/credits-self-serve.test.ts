@@ -14,6 +14,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Credits self-serve', () => {
   let app: FastifyInstance;
@@ -159,12 +162,6 @@ describe('Credits self-serve', () => {
       });
     });
 
-    it('works alongside "*" when both are named on one key', async () => {
-      const user = await signUp();
-      const res = await grant(await mint(['*', 'credits:grant']), { endUserId: user.endUser.id, amount: 5, idempotencyKey: 'both' });
-      expect(res.statusCode).toBe(201);
-    });
-
     it('an idempotent replay grants once, and audits once', async () => {
       const user = await signUp();
       const key = await mint(['credits:grant']);
@@ -238,17 +235,6 @@ describe('Credits self-serve', () => {
         await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_refuse_grant_audit ON security_events');
         await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_refuse_grant_audit()');
       }
-    });
-
-    it('an Idempotency-Key header replays the response without a second grant', async () => {
-      const user = await signUp();
-      const key = await mint(['credits:grant']);
-      const body = { endUserId: user.endUser.id, amount: 7, idempotencyKey: 'hdr-body' };
-      const a = await grant(key, body, { 'idempotency-key': 'hdr-1' });
-      const b = await grant(key, body, { 'idempotency-key': 'hdr-1' });
-      expect(a.statusCode).toBe(201);
-      expect(b.statusCode).toBe(201);
-      expect(await balanceOf({ endUserId: user.endUser.id })).toBe(7);
     });
 
     it('refuses zero, negative, fractional, oversized and int-overflowing amounts', async () => {

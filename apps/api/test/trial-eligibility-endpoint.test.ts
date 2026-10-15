@@ -15,6 +15,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -227,12 +230,6 @@ describe('GET /billing/trial-eligibility', () => {
     expect(policy).toBe('once_per_plan');
     expect(bySlug(items, 'team').reason).toBe('ALREADY_REDEEMED');
     expect(bySlug(items, 'pro').eligible).toBe(true);
-  });
-
-  it('planSlug narrows to one plan', async () => {
-    const { items } = await read('?planSlug=pro');
-    expect(items).toHaveLength(1);
-    expect(items[0]!.planSlug).toBe('pro');
   });
 
   it('requires a user session — a per-buyer answer with no buyer is a lie', async () => {

@@ -35,6 +35,7 @@ import {
 } from '@rekey.dev/shared-types';
 import { Prisma, type AppEnvironment, type Application } from '@prisma/client';
 import { activityStatsSql, parseActivityStats, type ApplicationActivity } from '../end-users/activity-stats.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 export interface CreateApplicationInput {
   tenantId: string;
@@ -429,7 +430,22 @@ export const applicationsService = {
        */
       tokenAlg?: 'HS256' | 'RS256' | undefined;
     };
+    /**
+     * The operator making the change, or null when no operator is. `appUrl`
+     * and `redirectUrls` decide where sign-in and reset links land, so an
+     * operator who has not confirmed their address may not change them.
+     */
+    actorTenantUserId: string | null;
   }): Promise<Application> {
+    if (
+      args.actorTenantUserId !== null &&
+      (args.patch.appUrl !== undefined || args.patch.redirectUrls !== undefined)
+    ) {
+      await assertOperatorVerifiedForCredential(
+        args.actorTenantUserId,
+        'change where this Application sends sign-in and reset links',
+      );
+    }
     // Outside the transaction: only for the 404, never for a decision.
     await this.get(args.applicationId);
     return prisma.$transaction(async (tx) => {

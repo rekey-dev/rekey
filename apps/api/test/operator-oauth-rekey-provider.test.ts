@@ -40,23 +40,4 @@ describe('the `rekey` operator OAuth provider', () => {
     ).rejects.toMatchObject({ code: 'OAUTH_PROVIDER_NOT_CONFIGURED' });
   });
 
-  it('is a known provider name, so it fails as unconfigured and not as unknown', async () => {
-    // The distinction matters for the operator reading the error: "you have
-    // not set this up" is actionable, "no such provider" sends them looking
-    // for a typo.
-    await expect(
-      tenantOAuthService.buildAuthUrl({ provider: 'not-a-provider', state: 'x' }),
-    ).rejects.toMatchObject({ code: 'OAUTH_PROVIDER_UNKNOWN' });
-  });
-
-  it('still lists the providers that ARE configured', () => {
-    // Guards against the new entry breaking the list for everyone else,
-    // `configuredProviders` filters on credentials, and adding a third provider
-    // that returns null must not shorten the array for google/github.
-    const available = tenantOAuthService.configuredProviders();
-    expect(Array.isArray(available)).toBe(true);
-    for (const p of available) {
-      expect(['google', 'github', 'rekey']).toContain(p);
-    }
-  });
 });

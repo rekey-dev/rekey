@@ -38,7 +38,23 @@ import {
 import { organizationsService } from '../organizations/organizations.service.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
-import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { unanchoredTokenEnded } from '../../lib/session-stamp.js';
+import { sessionBasis } from '../../lib/session-basis.js';
+
+const SIGN_IN_EXPIRED = 'Your sign-in expired. Sign in again to continue.';
+
+/** Thrown when the account's sessions were all ended between the form's sign-in and its code. */
+class SignInExpired extends Error {}
+const signInExpired = (): Error => new SignInExpired(SIGN_IN_EXPIRED);
+
+function sessionEndedSinceAdmitted(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'USER_TOKEN_INVALID',
+    message: 'This access token predates a password change, sign-out everywhere, or a revocation of every session.',
+    fix: 'Sign in again.',
+  });
+}
 import { hasScope } from './oidc.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { authService } from '../auth/auth.service.js';
@@ -1193,8 +1209,8 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         // A password change or sign-out everywhere since the first step ends
         // the sign-in it proved, exactly as it ends a session. A ban placed in
         // between refuses here too, rather than only at code redemption.
-        if (!consent || !user || user.bannedAt || sessionIssuedBefore(consent, user.sessionsInvalidBefore)) {
-          return renderErr('Your sign-in expired. Sign in again to continue.');
+        if (!consent || !user || user.bannedAt || unanchoredTokenEnded(consent, user.sessionsInvalidBefore)) {
+          return renderErr(SIGN_IN_EXPIRED);
         }
         const options = await consentOrganizationChoices(application, user.id, granted);
         const picked = typeof body.organization === 'string' ? body.organization : 'personal';
@@ -1212,21 +1228,37 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           }
           organizationId = picked;
         }
-        const code = await mcpOAuthService.createAuthCode({
-          applicationId: application.id,
-          clientId: client.id,
-          endUserId: user.id,
-          redirectUri: params.redirect_uri,
-          codeChallenge: params.code_challenge,
-          scope: granted,
-          nonce: params.nonce,
-          // The authentication is the first step's sign-in, not this click.
-          authTime: new Date(consent.iat * 1000),
-          organizationId,
-        });
+        let code: string;
+        try {
+          code = await mcpOAuthService.createAuthCode({
+            applicationId: application.id,
+            clientId: client.id,
+            endUserId: user.id,
+            redirectUri: params.redirect_uri,
+            codeChallenge: params.code_challenge,
+            scope: granted,
+            nonce: params.nonce,
+            // The authentication is the first step's sign-in, not this click.
+            authTime: new Date(consent.iat_ms),
+            organizationId,
+            // The stamp the consent was just checked against, a few lines up.
+            basis: sessionBasis(user, signInExpired),
+          });
+        } catch (err) {
+          if (err instanceof SignInExpired) return renderErr(SIGN_IN_EXPIRED);
+          throw err;
+        }
         return redirectWith({ code });
       }
 
+      // Read before the password is checked. If every session on the account
+      // is ended between here and the code below (the owner's sign-in link
+      // claims an account someone else registered), the stamp moves and the
+      // code is not written.
+      const beforeSignIn = await prisma.endUser.findUnique({
+        where: { applicationId_email: { applicationId: application.id, email: email.toLowerCase() } },
+        select: { sessionsInvalidBefore: true },
+      });
       let endUserId: string;
       try {
         const ua = req.headers['user-agent'];
@@ -1281,20 +1313,28 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         );
       }
 
-      const code = await mcpOAuthService.createAuthCode({
-        applicationId: application.id,
-        clientId: client.id,
-        endUserId,
-        redirectUri: params.redirect_uri,
-        codeChallenge: params.code_challenge,
+      const signedInAt = new Date();
+      let code: string;
+      try {
+        code = await mcpOAuthService.createAuthCode({
+          basis: sessionBasis({ sessionsInvalidBefore: beforeSignIn?.sessionsInvalidBefore ?? null }, signInExpired),
+          applicationId: application.id,
+          clientId: client.id,
+          endUserId,
+          redirectUri: params.redirect_uri,
+          codeChallenge: params.code_challenge,
         // The GRANTED scope, not the requested one, everything downstream
         // (the access token, the ID Token, `/userinfo`, the refresh chain)
         // reads this row, so an unsupported scope must not survive past here.
         scope: granted,
         nonce: params.nonce,
-        // The sign-in above is the authentication event this code attests to.
-        authTime: new Date(),
-      });
+          // The sign-in above is the authentication event this code attests to.
+          authTime: signedInAt,
+        });
+      } catch (err) {
+        if (err instanceof SignInExpired) return renderErr(SIGN_IN_EXPIRED);
+        throw err;
+      }
       return redirectWith({ code });
     },
   );
@@ -1427,6 +1467,9 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         scope: granted,
         nonce: body.nonce,
         organizationId,
+        // The stamp the session middleware admitted this request's user token
+        // against: a session ended since cannot leave a code behind.
+        basis: { sessionsInvalidBefore: req.sessionStamp ?? null, refusal: sessionEndedSinceAdmitted },
         // The authentication this code attests to is the one that minted the
         // access token presented above, not this call. We do not know when
         // that happened, so `auth_time` is the moment we last SAW proof of it

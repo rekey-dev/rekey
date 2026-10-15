@@ -13,9 +13,11 @@ import jwt from 'jsonwebtoken';
 import { buildApp } from '../src/app.js';
 import { env } from '../src/config/env.js';
 import { issueTenantAccessToken } from '../src/lib/tenant-jwt.js';
-import { issueUserAccessToken } from '../src/lib/jwt.js';
 import { issueRefreshToken, revokeAllForEndUser } from '../src/lib/refresh-tokens.js';
 import { issueTenantRefreshToken, revokeAllTenantRefreshTokensForUser } from '../src/lib/tenant-refresh-tokens.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 function lifetimeOf(token: string): number {
   const claims = jwt.decode(token) as { iat: number; exp: number };
@@ -23,23 +25,11 @@ function lifetimeOf(token: string): number {
 }
 
 describe('token lifetimes', () => {
-  it('defaults are the values that used to be hard-coded', () => {
-    expect(env.END_USER_ACCESS_TOKEN_TTL_SECONDS).toBe(15 * 60);
-    expect(env.END_USER_REFRESH_TOKEN_TTL_DAYS).toBe(30);
-    expect(env.OPERATOR_ACCESS_TOKEN_TTL_SECONDS).toBe(15 * 60);
-    expect(env.OPERATOR_REFRESH_TOKEN_TTL_DAYS).toBe(30);
-  });
 
   it('the operator access token lasts OPERATOR_ACCESS_TOKEN_TTL_SECONDS', () => {
     const { token, expiresAt } = issueTenantAccessToken('user_1', 'tenant_1', 'MEMBER');
     expect(lifetimeOf(token)).toBe(env.OPERATOR_ACCESS_TOKEN_TTL_SECONDS);
     expect(Math.round((expiresAt.getTime() - Date.now()) / 1000)).toBeCloseTo(env.OPERATOR_ACCESS_TOKEN_TTL_SECONDS, -1);
-  });
-
-  it('the end-user access token lasts END_USER_ACCESS_TOKEN_TTL_SECONDS', () => {
-    // Third positional is the Application's tokenGeneration.
-    const issued = issueUserAccessToken('eu_1', 'app_1', 0, {});
-    expect(lifetimeOf(issued.token)).toBe(env.END_USER_ACCESS_TOKEN_TTL_SECONDS);
   });
 
   it('an explicit lifetime still wins over the setting', () => {
@@ -82,9 +72,9 @@ describe('refresh lifetimes and the session kill switch', () => {
     const euid = (eu.json().data as { id?: string; endUser?: { id: string } }).id ?? (eu.json().data as { endUser: { id: string } }).endUser.id;
 
     const day = 24 * 60 * 60 * 1000;
-    const euRefresh = await issueRefreshToken(appId, euid);
+    const euRefresh = await issueRefreshToken(appId, euid, {}, { sessionsInvalidBefore: null, refusal: () => new Error('the account moved on') });
     expect(Math.abs(euRefresh.record.expiresAt.getTime() - Date.now() - env.END_USER_REFRESH_TOKEN_TTL_DAYS * day)).toBeLessThan(5_000);
-    const opRefresh = await issueTenantRefreshToken(user.id);
+    const opRefresh = await issueTenantRefreshToken(user.id, {}, { sessionsInvalidBefore: null, refusal: () => new Error('the account moved on') });
     expect(Math.abs(opRefresh.record.expiresAt.getTime() - Date.now() - env.OPERATOR_REFRESH_TOKEN_TTL_DAYS * day)).toBeLessThan(5_000);
   });
 

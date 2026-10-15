@@ -324,12 +324,12 @@ ID-Token-as-access-token substitution, `insufficient_scope` in both directions,
 metadata keys that must never become claims, and the `tokenGeneration`
 kill-switch.
 
-`apps/api/test/auth-security-review.test.ts` covers the eight findings from the
-adversarial review that blocked 2.0.0-rc.1, each asserting the exact reproduced
-request is now refused: the sign-up verification bypass, the `email` scope
-condition, end-user-controlled profile claims, the `invalid_scope` fallback, the
-erased-user paths, the metadata ceiling and per-claim bounds, magic-link
-verification, and the registration toggle. It also asserts that neither
+The refusals that keep the provider safe each have a suite named for them in
+`apps/api/test/`: `email-verification-required-at-sign-up`, `oidc-email-scope`,
+`oidc-profile-claim-namespace`, `oauth-unsatisfiable-scope`,
+`erased-end-user-oauth`, `end-user-metadata-ceiling`,
+`magic-link-verifies-email` and `mcp-dynamic-client-registration-toggle`.
+`id-token-not-an-access-token.test.ts` asserts that neither
 `PROFILE_METADATA_CLAIMS` nor `issueIdToken`'s `claims` argument can ever carry
 `typ` / `applicationId` / `gen` — the three checks that stop an ID Token being
 replayed as an access token, which is the one thing standing between a widened

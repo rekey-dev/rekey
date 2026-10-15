@@ -150,9 +150,8 @@ export function termsOf(coupon: CouponRecord): CouponTerms {
  * A coupon's terms after an update that sends some of the discount fields, or
  * null when it sends none of them. A field left out keeps its stored value.
  *
- * Null matters for a coupon an earlier build wrote, which may have no rate or
- * no amounts: switching it off must not be refused for that, and must not
- * rewrite the columns the basis-points backfill still has to read.
+ * Null matters for a fixed coupon left with no amounts: switching it off
+ * must not be refused for that.
  *
  * @example
  * couponTermsAfter(coupon, { amounts: [{ currency: 'EUR', amountOff: 450 }] })?.amounts; // the EUR amount only
@@ -212,21 +211,6 @@ export function computeDiscount(coupon: CouponRecord, amount: number, currency: 
   if (fixed === undefined) return null;
   const step = chargeableStep(charged);
   return Math.min(Math.ceil(fixed.amountOff / step) * step, amount);
-}
-
-/**
- * Values for the two columns the previous API build reads. A coupon it could
- * misjudge gets values it refuses: no currency, nothing off.
- */
-export function previousBuildColumns(
-  discountType: CouponDiscountType,
-  terms: CouponTerms,
-): { amountOff: number; currency: string | null } {
-  if (discountType === 'PERCENT') {
-    return terms.currencies.length === 0 ? { amountOff: terms.basisPoints ?? 0, currency: null } : { amountOff: 0, currency: null };
-  }
-  const only = terms.amounts.length === 1 ? terms.amounts[0] : undefined;
-  return only === undefined ? { amountOff: 0, currency: null } : { amountOff: only.amountOff, currency: only.currency };
 }
 
 const REMOVED_FIELDS = {

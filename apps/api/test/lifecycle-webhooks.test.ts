@@ -18,6 +18,9 @@ import { emailService } from '../src/modules/email/email.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { issueVerificationToken } from '../src/lib/email-verification.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -67,11 +70,11 @@ describe('Lifecycle webhooks and welcome timing', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: appId,
       patch: { appUrl: 'https://app.example.com', methods: ['password', 'magic_link'] },
     });
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/lifecycle-hook',
       events: ['*'],
@@ -330,6 +333,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
     it('an MFA sign-in announces its session when the second factor completes, as via: "mfa"', async () => {
       const created = await signUp('mfa@example.com');
       const token = created.data.accessToken as string;
+      await prisma.endUser.updateMany({ where: { email: 'mfa@example.com' }, data: { emailVerified: true } });
       const setup = (await app
         .inject({ method: 'POST', url: '/api/v1/auth/mfa/setup', headers: asUser(token) })
         .then((r) => r.json().data)) as { otpauthUrl: string; backupCodes: string[] };
@@ -360,7 +364,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
     });
 
     it('switching the active organization re-mints a session and announces nothing', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { organizationsEnabled: true },
       });
@@ -384,7 +388,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
     });
 
     it('a sign-up refused a session by requireEmailVerification announces no session', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { requireEmailVerification: true },
       });
@@ -399,7 +403,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
 
   describe('organization invitations', () => {
     async function orgWithInvite(inviteeEmail: string): Promise<{ orgId: string; token: string; ownerId: string }> {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { organizationsEnabled: true },
       });
@@ -452,7 +456,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
 
     it('an invitation whose event cannot be written is not created', async () => {
       await failDeliveriesOf('organization.invitation.created');
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { organizationsEnabled: true },
       });
@@ -475,7 +479,7 @@ describe('Lifecycle webhooks and welcome timing', () => {
     });
 
     it('an invitation that fails at COMMIT leaves no invitation.created behind', async () => {
-      await applicationsService.updateAuthConfig({
+      await applicationsService.updateAuthConfig({ actorTenantUserId: null,
         applicationId: appId,
         patch: { organizationsEnabled: true },
       });

@@ -12,6 +12,10 @@ import { buildApp } from '../src/app.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { prisma } from '../src/lib/prisma.js';
 import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 interface Stats {
   users: { total: number; verified: number; newLast7d: number; newLast30d: number; signupTrend: Array<{ date: string; count: number }> };
@@ -150,12 +154,8 @@ describe('per-app overview stats', () => {
     await event('user.password_changed', new Date());
     await event('user.signed_in', ago(40));
 
-    const plan = await prisma.plan.create({
-      data: { applicationId, slug: 'pro', name: 'Pro', amount: 1000 },
-    });
-    await prisma.plan.create({
-      data: { applicationId, slug: 'old', name: 'Old', amount: 500, active: false },
-    });
+    const plan = await seedPlan({ applicationId, slug: 'pro', name: 'Pro' }, { currency: 'USD', amount: 1000 });
+    await seedPlan({ applicationId, slug: 'old', name: 'Old', active: false }, { currency: 'USD', amount: 500 });
     await prisma.subscription.create({
       data: { applicationId, endUserId: e1.id, planId: plan.id, status: 'ACTIVE' },
     });

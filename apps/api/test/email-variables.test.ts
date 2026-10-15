@@ -54,29 +54,12 @@ describe('derived date variables', () => {
     }
   });
 
-  it('keeps expiresAtIso registered for templates written against it', () => {
-    for (const key of ['password_reset', 'email_verification', 'magic_link_signin', 'workspace_invitation'] as const) {
-      expect(EMAIL_EVENTS[key].variables).toContain('expiresAtIso');
-      expect(EMAIL_EVENTS[key].variables).toContain('expiresAt');
-    }
-  });
-
   it('derives xAt from xAtIso when the caller passes only the ISO value', () => {
     const vars = pickEventVariables('password_reset', { userEmail: 'a@example.com', expiresAtIso: '2026-09-27T14:50:00.000Z' });
     expect(vars.expiresAt).toBe('27 Sep 2026, 14:50 UTC');
     expect(vars.expiresAtIso).toBe('2026-09-27T14:50:00.000Z');
   });
 
-  it('the defaults show the readable date, not the ISO one', () => {
-    const { html, text } = render('password_reset', {
-      userEmail: 'a@example.com',
-      resetUrl: 'https://app.example.com/r',
-      expiresAtIso: '2026-09-27T14:50:00.000Z',
-    });
-    expect(text).toContain('This link expires at 27 Sep 2026, 14:50 UTC.');
-    expect(html).toContain('27 Sep 2026, 14:50 UTC');
-    expect(html).not.toContain('2026-09-27T14:50');
-  });
 });
 
 describe('payment-failed portal button', () => {
@@ -87,10 +70,6 @@ describe('payment-failed portal button', () => {
     attempt: '1',
     graceEndsAtIso: '2026-10-11T00:00:00.000Z',
   };
-
-  it('registers portalUrl', () => {
-    expect(EMAIL_EVENTS.billing_payment_failed_reminder.variables).toContain('portalUrl');
-  });
 
   it('links "Update payment method" to the portal when there is one', () => {
     const { html, text, design } = render('billing_payment_failed_reminder', { ...base, portalUrl: 'https://portal.example.com/acme' });

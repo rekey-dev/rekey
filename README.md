@@ -3,8 +3,6 @@
 Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose --profile full up`.
 
 > **Status:** 2.1.0 is the latest stable release. 2.2.0 is in release candidates, with its stable release to follow. [MIT licensed](LICENSE).
->
-> **ReliPay is now Rekey.** Packages moved to `@rekey.dev/*` (the old `@relipay/*` packages are deprecated), environment variables renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read, so set `REKEY_*`), and relipay.dev (the old domain) will redirect to rekey.dev once the domain migration completes.
 
 ## For AI agents
 

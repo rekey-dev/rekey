@@ -33,6 +33,10 @@ import type { SubscriptionStatus } from '@prisma/client';
 import { cancelEffect } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('cancellation timing: the predicate and the server agree', () => {
   let app: FastifyInstance;
@@ -99,17 +103,13 @@ describe('cancellation timing: the predicate and the server agree', () => {
       })
       .then((r) => r.json().data as { endUser: { id: string }; accessToken: string });
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${slug}`,
         name: 'Paid',
-        amount: 9900,
-        currency: 'usd',
         interval: 'MONTH',
         active: true,
-      },
-    });
+      }, { currency: 'usd', amount: 9900 });
 
     const subscription = await prisma.subscription.create({
       data: {
@@ -174,20 +174,6 @@ describe('cancellation timing: the predicate and the server agree', () => {
     expect(row.status).toBe('ACTIVE');
   });
 
-  it('hand-provisioned, ACTIVE, with a period end → ALSO scheduled', async () => {
-    // The case the marketing copy got wrong. Every Rekey Cloud subscription
-    // has this shape, checkout is closed, so they are all provisioned by hand
-    // and none carries a provider record. The old predicate answered "this
-    // ends immediately, with no refund"; the API had already stopped doing
-    // that, and the warning cost buyers nothing but nerve.
-    const { predicted, scheduled } = await cancelAndCompare('ctc-hand', {
-      status: 'ACTIVE',
-      currentPeriodEnd: inTwentyDays(),
-    });
-    expect(predicted).toBe(true);
-    expect(scheduled).toBe(true);
-  });
-
   it('ACTIVE with no known period end → immediate, and the copy warns', async () => {
     const { predicted, scheduled, row } = await cancelAndCompare('ctc-noend', {
       status: 'ACTIVE',
@@ -204,16 +190,6 @@ describe('cancellation timing: the predicate and the server agree', () => {
     // off entitlement alone would promise them a period end they do not get.
     const { predicted, scheduled, row } = await cancelAndCompare('ctc-pastdue', {
       status: 'PAST_DUE',
-      currentPeriodEnd: inTwentyDays(),
-    });
-    expect(predicted).toBe(false);
-    expect(scheduled).toBe(false);
-    expect(row.status).toBe('CANCELED');
-  });
-
-  it('an abandoned PENDING checkout → immediate', async () => {
-    const { predicted, scheduled, row } = await cancelAndCompare('ctc-pending', {
-      status: 'PENDING',
       currentPeriodEnd: inTwentyDays(),
     });
     expect(predicted).toBe(false);

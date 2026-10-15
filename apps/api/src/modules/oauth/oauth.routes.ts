@@ -32,6 +32,7 @@ import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { shapeSignInOutcome } from '../auth/auth.routes.js';
 import { ok, okArray, errs, ref } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertVerifiedForCredential } from '../auth/user-lifecycle.js';
 
 const ProviderParam = z.object({ provider: z.string().min(1).max(40) });
 const StartBody = z.object({ state: z.string().min(1).max(512) });
@@ -332,6 +333,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
       const body = StartBody.parse(req.body);
+      assertVerifiedForCredential(req.endUser!, 'link a sign-in provider');
       const url = await oauthService.buildLinkAuthUrl({
         application: req.application!,
         providerName: provider,
@@ -398,6 +400,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
       const body = CallbackBody.parse(req.body);
+      assertVerifiedForCredential(req.endUser!, 'link a sign-in provider');
       const result = await oauthService.linkIdentity({
         application: req.application!,
         providerName: provider,

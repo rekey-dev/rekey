@@ -23,6 +23,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Auth lifecycle webhooks are transactional', () => {
   let app: FastifyInstance;
@@ -66,7 +69,7 @@ describe('Auth lifecycle webhooks are transactional', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/lifecycle-hook',
       events: ['*'],

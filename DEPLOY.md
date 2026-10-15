@@ -56,7 +56,7 @@ three `PORTAL_HOST` references, as the note on it in the compose file explains.
   will have already run by the time you notice. Read
   [Upgrading: Application environments](#upgrading-application-environments)
   **before** you deploy a version that contains it. For 2.2.0, read
-  [Upgrading: 2.2.0 migrations and rollback](#upgrading-220-migrations-and-rollback)
+  [Upgrading: 2.2.0 migrations](#upgrading-220-migrations)
   first. It also lists the three proxy secrets `docker-compose.prod.yml`
   requires from 2.2.0 on, without which the stack will not start.
 - Bootstrap the first tenant via `/api/v1/admin/*` using `SUPER_ADMIN_KEY`, or sign up at the panel.
@@ -499,23 +499,18 @@ GROUP BY application_id;
 
 The `mode` values are not recoverable after the migration runs.
 
-## Upgrading: rename `RELIPAY_*` env vars to `REKEY_*`
+## Upgrading: pre-1.1.2 environment-variable names
 
 **Applies to:** any deployment still setting the pre-1.1.2 variable names.
 
-1.1.2 renamed every environment variable `RELIPAY_*` → `REKEY_*` and kept the
-old name as a fallback read. 2.0.0 removes the fallback: `RELIPAY_URL`,
-`RELIPAY_SECRET`, `RELIPAY_OPERATOR_TOKEN`, `NEXT_PUBLIC_RELIPAY_URL` and
-`NEXT_PUBLIC_RELIPAY_PUBLIC_KEY` are no longer read by the panel, the admin app,
-the portal, `@rekey.dev/nextjs`, the CLI or the MCP server.
+1.1.2 renamed every environment variable to the `REKEY_*` prefix and kept the
+old name as a fallback read. 2.0.0 removes the fallback: the panel, the admin
+app, the portal, `@rekey.dev/nextjs`, the CLI and the MCP server read only
+`REKEY_URL`, `REKEY_SECRET`, `REKEY_OPERATOR_TOKEN`, `NEXT_PUBLIC_REKEY_URL` and
+`NEXT_PUBLIC_REKEY_PUBLIC_KEY`.
 
 Rename the variable in every `.env` file, compose file and hosting dashboard
-before deploying. The values do not change — only the key.
-
-```bash
-# check every env file for stragglers
-grep -rn 'RELIPAY_' --include='.env*' .
-```
+before deploying. The values do not change, only the key.
 
 This one fails loudly rather than quietly: the panel returns
 `PANEL_API_URL_MISSING`, the admin app `ADMIN_API_URL_MISSING`, the portal and
@@ -546,10 +541,16 @@ Locked accounts are, as before, invisible after a Redis flush: the locks are
 TTL'd keys, not rows. That is unchanged by this migration, but worth knowing if
 you flush Redis as part of a deploy — you are releasing every active lockout.
 
-## Upgrading: 2.2.0 migrations and rollback
+## Upgrading: 2.2.0 migrations
 
-**Applies to:** any deployment upgrading from 2.1.x to 2.2.0. The migrations
-self-apply on `api` container start, like every other release.
+**Applies to:** any deployment upgrading from 2.1.x, or from a 2.2 release
+candidate, to 2.2.0. The migrations self-apply on `api` container start, like
+every other release. The full guide is
+[docs/migrating-to-2.2.md](docs/migrating-to-2.2.md); this section is the
+operations half of it.
+
+**Take a database backup first. There is no rollback after these migrations:**
+see [No rollback](#no-rollback) below.
 
 **Set these three before you redeploy, or the stack will not start.**
 `docker-compose.prod.yml` now requires `PANEL_PROXY_SECRET`, `API_PROXY_SECRET`
@@ -643,40 +644,64 @@ Run them one at a time (each `CONCURRENTLY` must be its own statement, outside
 a transaction). If one fails part way it leaves an `INVALID` index behind:
 `DROP INDEX CONCURRENTLY` it and run that line again.
 
-These five indexes need nothing on a rollback: the 2.1.x API ignores them.
+### The money model migrations
 
-### Rolling back
+The migrations named `money_v2_*` move a plan's price onto price rows. The six
+numbered `20261014100001` to `20261014100006`, and `drop_unused_lockout_columns`, then drop the
+columns the price rows replaced and add the constraints. The tables they
+lock (`plans`, `plan_prices`, `subscriptions`, `coupons`, `applications`,
+`tenant_users`) are small on any deployment, so each finishes in well under a
+second.
 
-Three new columns are NOT NULL with no default, and the 2.1.x API never writes
-them. **Before starting a 2.1.x image against a migrated database, run:**
+Two of them can refuse to run. When one does, that migration has changed
+nothing and the migrations before it stay applied:
 
-```sql
-ALTER TABLE refresh_tokens ALTER COLUMN session_id DROP NOT NULL;
-ALTER TABLE tenant_refresh_tokens ALTER COLUMN session_id DROP NOT NULL;
-ALTER TABLE license_activations ALTER COLUMN application_id DROP NOT NULL;
-```
+- `money_v2_01_plan_default_price` refuses while any money is stored in HUF,
+  TWD, ISK, UGX or MGA.
+- `price_and_coupon_column_drop_checks` refuses while a plan, subscription, coupon or
+  price cannot be carried to the new shape (a currency that is not a
+  three-letter code is the usual cause). The message names each table, how
+  many rows, and the query in
+  `docs/upgrades/billing-money-model.preflight.sql` that lists them. Nothing
+  is guessed for such a row.
 
-Without the first two, every sign-in and refresh fails on the old API. Without
-the third, activating a licence on a new machine fails. Everything else in the
-new schema is ignored by the old code. One consequence of that: an end-user MCP
-connection bound to an organization (`refresh_tokens.grant_organization_id`)
-refreshes as a personal connection on the old API, and the refresh token the
-old API issues no longer carries the binding, so it stays personal after you
-upgrade again. Revoke those connections before rolling back if that matters.
+Run the preflight before you deploy and neither will surprise you. After
+correcting the rows, mark the stopped migration as rolled back with the
+command its message gives, then start the `api` container again.
 
-**Before upgrading to 2.2.0 again**, fill in what the old API left empty and
-restore the constraints, since `prisma migrate deploy` will not re-run a
-migration it has already recorded:
+### Replace every API instance together
 
-```sql
-UPDATE refresh_tokens SET session_id = id WHERE session_id IS NULL;
-ALTER TABLE refresh_tokens ALTER COLUMN session_id SET NOT NULL;
-UPDATE tenant_refresh_tokens SET session_id = id WHERE session_id IS NULL;
-ALTER TABLE tenant_refresh_tokens ALTER COLUMN session_id SET NOT NULL;
-UPDATE license_activations AS la SET application_id = l.application_id
-  FROM licenses AS l WHERE l.id = la.license_id AND la.application_id IS NULL;
-ALTER TABLE license_activations ALTER COLUMN application_id SET NOT NULL;
-```
+`prisma migrate deploy` runs when the new `api` container starts. An instance
+of the previous version that is still serving when the migrations finish does
+not work against the new schema, and it must be stopped, not left to drain:
+
+| After this migration | What a 2.2.0-rc.7 (or older) instance still serving does |
+|---|---|
+| `price_and_coupon_column_drop_checks` | Nothing changes. |
+| `subscription_price_snapshot_constraints` | Keeps working. It writes a subscription's three price columns together, which is what the new constraint requires. |
+| `currency_lists_not_null` | Nothing changes. |
+| `remove_billing_config_currency_key` | Nothing changes: it already reads `reportingCurrency`. |
+| `plan_prices_live_on_price_rows` | Every request that reads or writes a plan fails with a 500: the plan catalogue, checkout, plan create and update, subscription reads that include the plan, billing stats, and provider webhooks that load a plan (the provider retries those). It cannot write a plan at all. |
+| `coupon_terms_live_on_rate_and_amount_rows` | Every request that reads or writes a coupon fails with a 500: coupon preview, a checkout that names a coupon, coupon create and update. |
+| `drop_unused_lockout_columns` | Every operator request fails with a 500 (the operator row is read on each one), and so does an end-user sign-in that needs a second factor. |
+
+The first four leave the old instance working, and the three that break it run
+last, one after another, so the time it spends failing is as short as the
+migrations can make it. Those are failures, never wrong writes: a statement that names a dropped
+column is rejected by Postgres, and the old version has no other way to write
+a plan or a coupon. Stop the old instances as soon as the new one is healthy.
+
+### No rollback
+
+From 2.2.0 the previous images are not a rollback target. `plans.amount`,
+`plans.currency`, `plans.price_per_unit_cents`, `coupons.amount_off` and
+`coupons.currency` no longer exist, and no earlier API version, release
+candidates included, starts serving plans or coupons without them.
+
+To go back, restore the database backup you took before upgrading and start
+the previous images against it. Everything written after the backup is lost,
+so decide quickly: check `/health`, sign in to the panel, open a plan and run
+`rekey doctor` straight after the upgrade.
 
 ## Upgrading an existing deployment: required datastore passwords
 

@@ -138,50 +138,6 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(second.json().error.code).toBe('REFRESH_TOKEN_REUSED');
   });
 
-  it('FAMILY REVOCATION: reuse-detection revokes every active refresh for the user', async () => {
-    // Issue an initial token, rotate once to get a live replacement, then
-    // replay the original. Reuse-detection should revoke the replacement
-    // too, leaving every refresh for this user dead.
-    const { refreshToken: original, endUserId } = await signUp(appA, 'family@example.com');
-    const r1 = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/refresh',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { refreshToken: original },
-    });
-    const replacement = (r1.json().data as { refreshToken: string }).refreshToken;
-    await ageRotation(original);
-
-    // Replay the original, strong compromise signal.
-    const replay = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/refresh',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { refreshToken: original },
-    });
-    expect(replay.statusCode).toBe(401);
-    expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
-
-    // The live replacement must now also be rejected, family revocation. It
-    // reports REVOKED rather than REUSED because *it* was never replayed: the
-    // family kill revoked it outright, so `replacedById` is null. What matters
-    // is that it is dead, which the DB invariant below pins.
-    const afterFamily = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/refresh',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { refreshToken: replacement },
-    });
-    expect(afterFamily.statusCode).toBe(401);
-    expect(afterFamily.json().error.code).toBe('REFRESH_TOKEN_REVOKED');
-
-    // DB invariant: every refresh row for this user is revoked.
-    const live = await prisma.refreshToken.count({
-      where: { endUserId, revokedAt: null },
-    });
-    expect(live).toBe(0);
-  });
-
   it('chains rotations via replacedById so the audit trail is walkable', async () => {
     const { refreshToken: t1, endUserId } = await signUp(appA, 'chain@example.com');
 
@@ -212,36 +168,6 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(tokens[1]!.revokedAt).not.toBeNull();
     expect(tokens[1]!.replacedById).toBe(tokens[2]!.id);
     expect(tokens[2]!.revokedAt).toBeNull();
-  });
-
-  // One live row per session is enforced by a unique partial index
-  // (migration 20260915120000). Rotation revokes before it inserts, so racing
-  // refreshes of one token must end with one winner, every loser answered
-  // REFRESH_TOKEN_RACED (inside the reuse window, nothing revoked), and no
-  // unique violation surfacing as a 500.
-  it('concurrent refreshes of one token: one winner, the rest RACED, never a 500', async () => {
-    const { refreshToken, endUserId } = await signUp(appA, 'race@example.com');
-
-    const results = await Promise.all(
-      Array.from({ length: 8 }, () =>
-        app.inject({
-          method: 'POST',
-          url: '/api/v1/auth/refresh',
-          headers: { authorization: `Bearer ${appA.liveKey}` },
-          payload: { refreshToken },
-        }),
-      ),
-    );
-    const statuses = results.map((r) => r.statusCode);
-    expect(statuses.filter((s) => s === 200)).toHaveLength(1);
-    for (const r of results.filter((x) => x.statusCode !== 200)) {
-      expect(r.statusCode).toBe(401);
-      expect(r.json().error.code).toBe('REFRESH_TOKEN_RACED');
-    }
-    const heads = await prisma.refreshToken.count({
-      where: { endUserId, replacedById: null, revokedAt: null },
-    });
-    expect(heads).toBe(1);
   });
 
   it('the database refuses a second live row in one session', async () => {

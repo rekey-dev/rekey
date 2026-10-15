@@ -114,6 +114,13 @@ export interface OperatorToolContext {
 export interface OperatorTool {
   name: string;
   description: string;
+  /**
+   * Set on a tool that creates access outliving the caller's session and has
+   * no service-level check of its own: the dispatcher refuses it to an
+   * operator whose address is unconfirmed, with this as the action named in
+   * the refusal ("Confirm this account's email address before you ...").
+   */
+  confirmedOperatorOnly?: string;
   /** JSON Schema for tool arguments. */
   inputSchema: {
     type: 'object';

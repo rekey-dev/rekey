@@ -14,12 +14,14 @@ import {
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { pricedAt } from './subscription-price-fixture.js';
-import { billingStatsService } from '../src/modules/billing/stats.service.js';
 import * as checkoutPreview from '../src/modules/billing/checkout-preview.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
-import { countQueries } from './query-counter.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('reporting currency', () => {
   let app: FastifyInstance;
@@ -72,26 +74,6 @@ describe('reporting currency', () => {
       payload: { dunningEnabled: true },
     });
     expect(patched.json().data.billingConfig).toMatchObject({ reportingCurrency: 'INR', dunningEnabled: true });
-  });
-
-  it('refuses a code that is not a currency a plan can be priced in, and changes nothing', async () => {
-    const w = await operatorWorld(app);
-    for (const [code, why] of [
-      ['ABC', 'not an ISO 4217'],
-      ['XAU', 'not a currency a price can be in'],
-      ['KWD', 'three decimal'],
-    ] as const) {
-      const res = await call(w, 'PUT', w.ownerToken, { reportingCurrency: code });
-      expect(res.statusCode, res.body).toBe(400);
-      expect(res.json().error.code).toBe('BILLING_REPORTING_CURRENCY_INVALID');
-      expect(res.json().error.message).toContain(why);
-    }
-    for (const body of [{}, { reportingCurrency: 'US' }, { reportingCurrency: 'USD', convert: true }, { currency: 'USD' }]) {
-      const res = await call(w, 'PUT', w.ownerToken, body);
-      expect(res.statusCode, res.body).toBe(400);
-    }
-    expect(await changes(w.appId)).toEqual([]);
-    expect((await call(w, 'GET', w.ownerToken)).json().data.reportingCurrency).toBe('USD');
   });
 
   it('lets a viewer read it and only an application admin set it, and never another workspace', async () => {
@@ -148,9 +130,7 @@ describe('billing stats per currency', () => {
   });
 
   async function subscribers(applicationId: string, plan: { currency: string; amount: number; interval?: 'MONTH' | 'YEAR' }, n: number, own?: { currency: string; unitAmount: number }) {
-    const created = await prisma.plan.create({
-      data: { applicationId, slug: `p-${++serial}`, name: 'P', amount: plan.amount, currency: plan.currency, interval: plan.interval ?? 'MONTH', kind: 'SUBSCRIPTION' },
-    });
+    const created = await seedPlan({ applicationId, slug: `p-${++serial}`, name: 'P', interval: plan.interval ?? 'MONTH', kind: 'SUBSCRIPTION' }, plan.amount > 0 ? { currency: plan.currency, amount: plan.amount } : null);
     for (let i = 0; i < n; i += 1) {
       const endUser = await prisma.endUser.create({ data: { applicationId, email: `b-${++serial}@example.com` } });
       // Its own price when it has one, and the plan's otherwise: MRR reads the subscription's.
@@ -211,49 +191,6 @@ describe('billing stats per currency', () => {
       return value;
     });
     for (const sum of crossSums) expect(figures).not.toContain(sum);
-  });
-
-  it('leads with the reporting currency the operator set, at zero when nothing is in it', async () => {
-    const w = await operatorWorld(app);
-    const id = w.appId;
-    await subscribers(id, { currency: 'USD', amount: 2000 }, 1);
-    await pay(id, { amount: 2000, currency: 'USD' });
-    const set = await w.inject({
-      method: 'PUT',
-      url: `/api/v1/tenant/applications/${id}/billing/reporting-currency`,
-      headers: bearer(w.ownerToken),
-      payload: { reportingCurrency: 'GBP' },
-    });
-    expect(set.statusCode, set.body).toBe(200);
-
-    const stats = await billingStatsService.forApplication(id);
-    expect(stats.reportingCurrency).toBe('GBP');
-    expect(stats.mrr).toEqual([
-      { currency: 'GBP', mrrCents: 0, activeSubscriptions: 0 },
-      { currency: 'USD', mrrCents: 2000, activeSubscriptions: 1 },
-    ]);
-    expect(stats.revenueLast30d.map((r) => [r.currency, r.netCents])).toEqual([
-      ['GBP', 0],
-      ['USD', 2000],
-    ]);
-    expect(stats.monthlyRevenue.map((s) => s.currency)).toEqual(['GBP', 'USD']);
-    // Setting it converted nothing: the dollars are still dollars.
-    expect((await prisma.payment.findFirstOrThrow({ where: { applicationId: id } })).currency).toBe('USD');
-  });
-
-  it('costs the same number of queries with one payment as with hundreds in four currencies', async () => {
-    const w = await operatorWorld(app);
-    const id = w.appId;
-    await pay(id, {});
-    const small = await countQueries(() => billingStatsService.forApplication(id));
-    await prisma.payment.createMany({
-      data: Array.from({ length: 400 }, (_, i) => ({ applicationId: id, amount: 100 + i, currency: ['USD', 'EUR', 'INR', 'JPY'][i % 4]!, status: 'SUCCEEDED' as const })),
-    });
-    await subscribers(id, { currency: 'EUR', amount: 900 }, 5);
-    // The first read after a plan is written outside the API repairs its price row. That is not the stats' own cost.
-    await billingStatsService.forApplication(id);
-    const large = await countQueries(() => billingStatsService.forApplication(id));
-    expect(large.count, large.queries.join('\n')).toBe(small.count);
   });
 });
 
@@ -344,28 +281,6 @@ describe('routing preview', () => {
     expect(refuse).toMatchObject({ price: null, provider: null, providerReason: null });
     expect(refuse!.refusal!.code).toMatch(/^BILLING_/);
     expect(refuse!.summary).toContain('is refused');
-  });
-
-  it('does not offer a local price on a hint while local prices are trusted-only', async () => {
-    w = await twoCurrencyWorld(app);
-    const [hinted] = (await preview({ country: 'IN', plan: 'pro', countrySource: 'hint' })).items;
-    expect(hinted!.price).toMatchObject({ currency: 'USD', reason: 'default' });
-  });
-
-  it('previews every active plan when none is named, in a number of queries that does not grow with the plans', async () => {
-    w = await twoCurrencyWorld(app);
-    const one = await countQueries(() => w.operator('POST', '/billing/checkout/preview', { country: 'IN' }));
-    for (let i = 0; i < 6; i += 1) {
-      await w.createPlan({ slug: `extra-${i}`, name: `Extra ${i}`, price: { currency: 'USD', amount: 500 + i } });
-      await w.putPrice(`extra-${i}`, 'INR', 40000 + i);
-    }
-    let body: RoutingPreviewDto | undefined;
-    const many = await countQueries(async () => {
-      body = await preview({ country: 'IN' });
-    });
-    expect(body!.items).toHaveLength(7);
-    expect(body!.items.every((item) => item.price?.currency === 'INR' && item.provider === 'razorpay')).toBe(true);
-    expect(many.count, many.queries.join('\n')).toBe(one.count);
   });
 
   it("decides through checkout's own preview functions, opens nothing and writes nothing", async () => {

@@ -3,7 +3,7 @@
  *
  * Before this, the dashboard hid the cancel button on `provider === 'external'`
  * and the checkout action forwarded only stripe/paypal/razorpay, silently
- * auto-routing a buyer who picked anything else (EtherLabZ/Rekey#511). The
+ * auto-routing a buyer who picked anything else. The
  * fifth provider below exists to prove neither decision carries a name.
  */
 

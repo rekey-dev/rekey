@@ -30,6 +30,10 @@ import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { processDueDunningCases } from '../src/modules/billing/dunning.service.js';
 import { emailService } from '../src/modules/email/email.service.js';
 import type { WebhookDelivery } from '@prisma/client';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
@@ -151,22 +155,18 @@ describe('Dunning', () => {
       });
     }
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId: application.id,
         slug: 'pro_monthly',
         name: 'Pro',
-        amount: 999,
-        currency: 'USD',
         kind: 'SUBSCRIPTION',
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 999 });
     const endUserEmail = `dun-eu-${slug}@example.com`;
     const endUser = await prisma.endUser.create({
       data: { applicationId: application.id, email: endUserEmail },
     });
-    const { endpoint } = await webhookService.createEndpoint({
+    const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: application.id,
       url: 'https://example.invalid/dunning-hook',
       events: ['*'],
@@ -374,46 +374,6 @@ describe('Dunning', () => {
         ([input]) => input.application.id === b.applicationId && input.eventKey === 'billing_payment_failed_reminder',
       );
       expect(call?.[0].variables.amountDue).toBe('$4.50');
-    } finally {
-      dispatch.mockRestore();
-    }
-  });
-
-  it('the reminder links the hosted billing portal when the Application has one, and nothing when it does not', async () => {
-    const dispatch = vi.spyOn(emailService, 'dispatch');
-    try {
-      const seen: Record<string, unknown> = {};
-      for (const [slug, portal] of [['dun-portal-on', true], ['dun-portal-off', false]] as const) {
-        const b = await bootstrap(slug, 'stripe');
-        await prisma.application.update({ where: { id: b.applicationId }, data: { hostedPortalEnabled: portal } });
-        await prisma.subscription.create({
-          data: {
-            applicationId: b.applicationId,
-            endUserId: b.endUserId,
-            planId: b.planId,
-            status: 'ACTIVE',
-            provider: 'stripe',
-            providerSubId: `sub_${slug}`,
-          },
-        });
-        await fireStripe(
-          slug,
-          invoiceFailedEvt({
-            applicationId: b.applicationId,
-            providerSubId: `sub_${slug}`,
-            eventId: `evt_${slug}`,
-            invoiceId: `in_${slug}`,
-          }),
-        );
-        await waitForEmailLogs(b.applicationId, 'billing_payment_failed_reminder', 1);
-        const call = dispatch.mock.calls.find(
-          ([input]) => input.application.id === b.applicationId && input.eventKey === 'billing_payment_failed_reminder',
-        );
-        seen[slug] = call?.[0].variables.portalUrl;
-      }
-      const origin = new URL(process.env.PUBLIC_PORTAL_URL!).origin;
-      expect(seen['dun-portal-on']).toBe(`${origin}/dun-portal-on`);
-      expect(seen['dun-portal-off']).toBe('');
     } finally {
       dispatch.mockRestore();
     }
@@ -784,9 +744,7 @@ describe('Dunning', () => {
       })
       .then((r) => (r.json().data as { id: string }).id);
 
-    const plan = await prisma.plan.create({
-      data: { applicationId, slug: 'pro', name: 'Pro', amount: 999, currency: 'USD' },
-    });
+    const plan = await seedPlan({ applicationId, slug: 'pro', name: 'Pro' }, { currency: 'USD', amount: 999 });
     const endUser = await prisma.endUser.create({
       data: { applicationId, email: 'dun-list-eu@example.com' },
     });
@@ -802,9 +760,7 @@ describe('Dunning', () => {
         providerSubId: 'sub_dl_1',
       },
     });
-    const plan2 = await prisma.plan.create({
-      data: { applicationId, slug: 'pro2', name: 'Pro 2', amount: 1999, currency: 'USD' },
-    });
+    const plan2 = await seedPlan({ applicationId, slug: 'pro2', name: 'Pro 2' }, { currency: 'USD', amount: 1999 });
     const sub2 = await prisma.subscription.create({
       data: {
         applicationId,

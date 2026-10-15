@@ -795,10 +795,48 @@ export function authRateLimit(maxPerMinute: number): AuthRateLimitConfig {
  * the address. It keeps the per-Application auth ceiling and fails closed,
  * like the rest of the tier: every sign-up can send an email.
  */
-export function signUpRateLimit(maxPerMinute: number): AuthRateLimitConfig {
+export function signUpRateLimit(maxPerMinute: number): AuthRateLimitConfig & { [SIGN_UP_HOURLY_MARKER]: true } {
   // Per (Application, IP) only means something when the IP is the client's;
   // behind an unidentified proxy the per-Application auth ceiling still holds.
-  return { ...authRateLimit(maxPerMinute), keyGenerator: signUpRateLimitKey, allowList: skipUnvouchedIp };
+  return {
+    ...authRateLimit(maxPerMinute),
+    keyGenerator: signUpRateLimitKey,
+    allowList: skipUnvouchedIp,
+    [SIGN_UP_HOURLY_MARKER]: true,
+  };
+}
+
+/**
+ * Marker for the route that also gets the hourly sign-up bucket (app.ts).
+ * A route's own `config.rateLimit` holds one window, so the second one is a
+ * separate limiter, wired the way the auth ceiling is.
+ */
+export const SIGN_UP_HOURLY_MARKER = 'rekeySignUpHourly';
+
+/** Browser sign-ups one address may attempt in an hour, whatever emails it names. */
+export const SIGN_UP_HOURLY_MAX_PER_IP = 30;
+
+/**
+ * Whether a request counts against the hourly sign-up bucket.
+ *
+ * Only where sign-up still answers 409 for a taken address, which is what
+ * lets a browser key ask "does this address have an account". The per-minute
+ * bucket alone allows 600 such questions an hour from one address. An
+ * Application that requires a verified address answers every sign-up alike and
+ * is left out, as is a secret key (the customer's own server, which may create
+ * users in bulk) and an address nobody can vouch for.
+ */
+export function wantsSignUpHourlyCap(req: FastifyRequest): boolean {
+  const config = req.routeOptions?.config?.rateLimit;
+  if (typeof config !== 'object' || config === null) return false;
+  if ((config as Record<string, unknown>)[SIGN_UP_HOURLY_MARKER] !== true) return false;
+  if (req.authKind !== 'publishable' || !req.application || !req.clientIpVouched) return false;
+  const auth = req.application.authConfig as { requireEmailVerification?: unknown } | null;
+  return auth?.requireEmailVerification !== true;
+}
+
+export function signUpHourlyKey(req: FastifyRequest): string {
+  return `signuphour:${req.application?.id ?? 'anon'}:${req.ip}`;
 }
 
 /**

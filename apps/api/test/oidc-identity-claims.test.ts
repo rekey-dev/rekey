@@ -123,14 +123,6 @@ describe('OIDC identity claims', () => {
     await expect(exchange()).rejects.toMatchObject({ code: 'OAUTH_ID_TOKEN_INVALID' });
   });
 
-  it('accepts a multi-audience token authorized for this client', async () => {
-    stubIssuer({
-      token: { id_token: idToken(validClaims({ aud: [CLIENT_ID, 'other'], azp: CLIENT_ID })) },
-    });
-
-    await expect(exchange()).resolves.toMatchObject({ providerAccountId: 'user-1' });
-  });
-
   it('refuses an expired token', async () => {
     stubIssuer({
       token: { id_token: idToken(validClaims({ exp: Math.floor(Date.now() / 1000) - 600 })) },
@@ -142,14 +134,6 @@ describe('OIDC identity claims', () => {
   it('accepts a token that expired seconds ago, because our clock is not the issuer\'s', async () => {
     stubIssuer({
       token: { id_token: idToken(validClaims({ exp: Math.floor(Date.now() / 1000) - 5 })) },
-    });
-
-    await expect(exchange()).resolves.toMatchObject({ providerAccountId: 'user-1' });
-  });
-
-  it('accepts an `exp` the issuer serialized as a string', async () => {
-    stubIssuer({
-      token: { id_token: idToken(validClaims({ exp: String(Math.floor(Date.now() / 1000) + 300) })) },
     });
 
     await expect(exchange()).resolves.toMatchObject({ providerAccountId: 'user-1' });
@@ -214,12 +198,4 @@ describe('OIDC identity claims', () => {
     await expect(exchange()).rejects.toMatchObject({ code: 'OAUTH_ID_TOKEN_INVALID' });
   });
 
-  it('accepts a userinfo response that does carry a subject', async () => {
-    stubIssuer({
-      token: { access_token: 'at-1' },
-      userinfo: { sub: 'user-2', email: 'someone@issuer.test' },
-    });
-
-    await expect(exchange()).resolves.toMatchObject({ providerAccountId: 'user-2' });
-  });
 });

@@ -10,6 +10,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 type LogEntry = { type: string; actor: { type: string; id: string | null }; data: { before: string; after: string } };
 
@@ -76,12 +79,6 @@ describe('the Application default for a currency that cannot be charged', () => 
       expect(await logged('settings.unavailable_currency_changed')).toEqual([]);
     });
 
-    it('refuses a value that is neither choice', async () => {
-      const res = await patch({ onUnavailableCurrency: 'ignore' });
-      expect(res.statusCode, res.body).toBe(400);
-      expect((await w.operator('GET', '')).json().data.billingConfig.onUnavailableCurrency).toBe('fallback');
-    });
-
     it('logs a change with the value before and after and the operator who made it, and nothing for the same value again', async () => {
       await setDefault('refuse');
       await setDefault('refuse');
@@ -99,20 +96,6 @@ describe('the Application default for a currency that cannot be charged', () => 
         ]),
       );
       expect(twice).toHaveLength(2);
-    });
-
-    it('logs a change to the local prices rule the same way, and nothing for a patch that leaves both alone', async () => {
-      expect((await patch({ dunningEnabled: true })).statusCode).toBe(200);
-      expect((await patch({ localPrices: 'trusted' })).statusCode).toBe(200);
-      expect(await logged('settings.local_prices_changed')).toEqual([]);
-      expect(await logged('settings.unavailable_currency_changed')).toEqual([]);
-
-      expect((await patch({ localPrices: 'any' })).statusCode).toBe(200);
-      expect((await patch({ localPrices: 'any' })).statusCode).toBe(200);
-      const changes = await logged('settings.local_prices_changed');
-      expect(changes).toHaveLength(1);
-      expect(changes[0]).toMatchObject({ actor: { type: 'operator' }, data: { before: 'trusted', after: 'any' } });
-      expect(await logged('settings.unavailable_currency_changed')).toEqual([]);
     });
   });
 

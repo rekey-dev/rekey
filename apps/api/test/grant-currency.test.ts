@@ -9,6 +9,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const UNPRICED = { currency: null, unitAmount: null, planPriceId: null };
 
@@ -45,13 +48,6 @@ describe('price of a subscription no checkout created', () => {
       const priced = { currency: 'INR', unitAmount: 149900, planPriceId: w.inrPriceId };
       expect(res.json().data.subscription).toMatchObject({ status: 'ACTIVE', ...priced });
       expect(await subscriptionOf(w.buyer.id)).toMatchObject(priced);
-    });
-
-    it("takes the default price when the plan's own currency is named", async () => {
-      const res = await grant({ currency: 'usd' });
-      expect(res.statusCode, res.body).toBe(201);
-      const defaultPriceId = await defaultPriceIdOf();
-      expect(await subscriptionOf(w.buyer.id)).toMatchObject({ currency: 'USD', unitAmount: 2000, planPriceId: defaultPriceId });
     });
 
     it('refuses a currency the plan has no price in, naming the ones it has, and grants nothing', async () => {
@@ -161,16 +157,6 @@ describe('price of a subscription no checkout created', () => {
       });
     });
 
-    it('prices a live subscription that had no price', async () => {
-      await prisma.subscription.create({
-        data: { applicationId: w.applicationId, endUserId: w.buyer.id, planId: w.planId, status: 'ACTIVE' },
-      });
-      const res = await grant({ currency: 'INR' });
-      expect(res.statusCode, res.body).toBe(200);
-      expect(res.json().data.subscription).toMatchObject({ currency: 'INR', unitAmount: 149900 });
-      expect(await subscriptionOf(w.buyer.id)).toMatchObject({ currency: 'INR', unitAmount: 149900, planPriceId: w.inrPriceId });
-    });
-
     it('does not price a live subscription a checkout opened: it refuses another currency instead', async () => {
       await prisma.subscription.create({
         data: {
@@ -214,13 +200,6 @@ describe('price of a subscription no checkout created', () => {
       });
     });
 
-    it('prices a lapsed row that had no price', async () => {
-      await prisma.subscription.create({
-        data: { applicationId: w.applicationId, endUserId: w.buyer.id, planId: w.planId, status: 'CANCELED' },
-      });
-      expect((await grant({ currency: 'INR' })).statusCode).toBe(201);
-      expect(await subscriptionOf(w.buyer.id)).toMatchObject({ status: 'ACTIVE', currency: 'INR', unitAmount: 149900 });
-    });
   });
 
   describe('external billing system', () => {

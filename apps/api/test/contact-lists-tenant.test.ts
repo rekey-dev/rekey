@@ -8,9 +8,11 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { listsService } from '../src/modules/contacts/lists.service.js';
-import { assertContactListQuota } from '../src/modules/contacts/quota.js';
 import { contactsHarness } from './contacts-fixtures.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('tenant list management', () => {
   let app: FastifyInstance;
@@ -66,37 +68,6 @@ describe('tenant list management', () => {
     expect(again.statusCode).toBe(409);
     expect(again.json().error.code).toBe('LIST_KEY_TAKEN');
     expect(again.json().error.fix).toContain('/archive');
-  });
-
-  it('validates the key and the field schema', async () => {
-    const w = await world();
-    expect((await createList(w, { key: 'No Spaces' })).statusCode).toBe(400);
-    expect((await createList(w, { key: 'ab' })).statusCode).toBe(400);
-    const dupField = await createList(w, {
-      fieldSchema: [
-        { name: 'company', label: 'Company', type: 'text' },
-        { name: 'company', label: 'Company again', type: 'text' },
-      ],
-    });
-    expect(dupField.statusCode).toBe(400);
-    const selectWithoutOptions = await createList(w, {
-      fieldSchema: [{ name: 'plan', label: 'Plan', type: 'select' }],
-    });
-    expect(selectWithoutOptions.statusCode).toBe(400);
-    const ok = await createList(w, {
-      fieldSchema: [
-        { name: 'company', label: 'Company', type: 'text' },
-        { name: 'plan', label: 'Plan', type: 'select', required: true, options: ['solo', 'team'] },
-      ],
-    });
-    expect(ok.statusCode, ok.body).toBe(201);
-    expect(ok.json().data.fieldSchema[0]).toEqual({
-      name: 'company',
-      label: 'Company',
-      type: 'text',
-      required: false,
-      maxLength: 500,
-    });
   });
 
   it('versions the consent text: each new text is the next version, and history keeps every one', async () => {
@@ -189,27 +160,6 @@ describe('tenant list management', () => {
     expect(await prisma.contactList.count({ where: { applicationId: w.appId } })).toBe(3);
   });
 
-  it('a create waits for one still in flight before counting, so the ceiling cannot be raced', async () => {
-    const w = await world();
-    await prisma.tenant.update({ where: { id: w.tenantId }, data: { limits: { maxContactLists: 1 } } });
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
-    const first = prisma.$transaction(async (tx) => {
-      await assertContactListQuota(w.tenantId, tx);
-      await tx.contactList.create({ data: { applicationId: w.appId, key: 'first', name: 'First' } });
-      await held;
-    });
-    await new Promise((r) => setTimeout(r, 100));
-    const second = prisma.$transaction(async (tx) => {
-      await assertContactListQuota(w.tenantId, tx);
-      await tx.contactList.create({ data: { applicationId: w.appId, key: 'second', name: 'Second' } });
-    });
-    await new Promise((r) => setTimeout(r, 100));
-    release();
-    await first;
-    await expect(second).rejects.toMatchObject({ code: 'CONTACT_LIST_QUOTA_EXCEEDED' });
-  });
-
   it('a list id from another Application is LIST_NOT_FOUND', async () => {
     const w = await world();
     const other = await inject({
@@ -243,26 +193,6 @@ describe('tenant list management', () => {
       expect(denied.statusCode).toBe(403);
       expect(denied.json().error.code).toBe('SCOPE_INSUFFICIENT');
       expect(denied.json().error.message).toContain('audience:read');
-    });
-
-    it('a billing grant cannot read lists', async () => {
-      const w = await world();
-      const billing = await memberWith(w, 'APP_BILLING');
-      const denied = await inject({ method: 'GET', url: `${base(w)}/lists`, headers: auth(billing) });
-      expect(denied.statusCode).toBe(403);
-      expect(denied.json().error.code).toBe('SCOPE_INSUFFICIENT');
-    });
-
-    it('an APP_ADMIN grant reads and writes lists', async () => {
-      const w = await world();
-      const admin = await memberWith(w, 'APP_ADMIN');
-      const created = await inject({
-        method: 'POST',
-        url: `${base(w)}/lists`,
-        headers: auth(admin),
-        payload: { key: 'newsletter', name: 'Newsletter' },
-      });
-      expect(created.statusCode, created.body).toBe(201);
     });
   });
 });

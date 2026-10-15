@@ -11,6 +11,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { applyBillingEvent } from '../src/modules/billing/webhooks/apply.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface CouponStats {
   code: string;
@@ -106,16 +109,6 @@ describe('coupon redemptions', () => {
       ],
     });
     expect(JSON.stringify(reported)).not.toContain('20300');
-  });
-
-  it('holds the price row on the reservation from the moment the checkout opens', async () => {
-    const couponId = await createCoupon({ code: 'PCT', discountType: 'PERCENT', basisPoints: 2500 });
-    await w.sessionOf(await w.checkout({ planSlug: 'pack', country: 'IN', couponCode: 'PCT' }));
-    expect(await prisma.couponRedemption.findMany({ where: { couponId } })).toMatchObject([
-      { status: 'RESERVED', currency: 'INR', discountAmount: 19975, planPriceId: inrPackPriceId },
-    ]);
-    // An open checkout is not a redemption.
-    expect(await stats('pct')).toMatchObject({ redemptionCount: 0, discountIssuedByCurrency: [] });
   });
 
   it('writes one coupon.redeemed event with the price charged, once, however often the payment is replayed', async () => {

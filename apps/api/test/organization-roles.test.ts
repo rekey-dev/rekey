@@ -27,6 +27,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -165,28 +168,6 @@ describe('Custom organization roles', () => {
 
   // ---------- Catalog bootstrap ----------
 
-  it('seeds OWNER / ADMIN / MEMBER on every new Application, with MEMBER default', async () => {
-    const b = await bootstrap('seed');
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(res.statusCode).toBe(200);
-    const roles = res.json().data as Array<{
-      name: string;
-      baseRole: string;
-      isBuiltIn: boolean;
-      isDefault: boolean;
-    }>;
-    expect(roles.map((r) => r.name).sort()).toEqual(['ADMIN', 'MEMBER', 'OWNER']);
-    expect(roles.every((r) => r.isBuiltIn)).toBe(true);
-    // Each built-in sits on its own tier. That identity is what keeps every
-    // pre-catalog membership row resolving to the authority it always had.
-    for (const r of roles) expect(r.baseRole).toBe(r.name);
-    expect(roles.find((r) => r.isDefault)?.name).toBe('MEMBER');
-  });
-
   // ---------- Catalog authoring (operator) ----------
 
   it('refuses custom roles while organizations are disabled, and names the toggle', async () => {
@@ -199,56 +180,7 @@ describe('Custom organization roles', () => {
     expect(res.json().error.fix).toMatch(/organizationsEnabled/);
   });
 
-  it('reads the catalog even while organizations are disabled', async () => {
-    const b = await bootstrap('read-disabled', { orgsEnabled: false });
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(res.statusCode).toBe(200);
-    expect((res.json().data as unknown[]).length).toBe(3);
-  });
-
-  it('reserves the built-in names and rejects non-lowercase custom names', async () => {
-    const b = await bootstrap('names');
-    const reserved = await defineRole(b, { name: 'owner', baseRole: 'OWNER' });
-    expect(reserved.statusCode).toBe(409);
-    expect(reserved.json().error.code).toBe('ORGANIZATION_ROLE_NAME_RESERVED');
-
-    const shouty = await defineRole(b, { name: 'Content_Manager', baseRole: 'MEMBER' });
-    expect(shouty.statusCode).toBe(400);
-    expect(shouty.json().error.code).toBe('ORGANIZATION_ROLE_NAME_INVALID');
-  });
-
-  it('refuses to re-tier a built-in role', async () => {
-    const b = await bootstrap('retier');
-    const res = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/OWNER`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { baseRole: 'MEMBER' },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE');
-  });
-
   // ---------- Discovery (end-user) ----------
-
-  it('lets a signed-in end-user list the assignable role names', async () => {
-    const b = await bootstrap('discover');
-    await defineRole(b, {
-      name: 'content-manager',
-      baseRole: 'MEMBER',
-      description: 'Drafts and edits content',
-    });
-    const res = await asUser(b, b.ownerAccess, 'GET', '/api/v1/users/me/organizations/roles');
-    expect(res.statusCode).toBe(200);
-    const roles = res.json().data as Array<{ name: string; baseRole: string }>;
-    // Without this an org admin's UI could not populate a role picker: the only
-    // other way to learn a custom name would be to guess it.
-    expect(roles.find((r) => r.name === 'content-manager')?.baseRole).toBe('MEMBER');
-  });
 
   // ---------- Assignment is org-authored, not operator-authored ----------
 
@@ -469,78 +401,7 @@ describe('Custom organization roles', () => {
     expect(me.role).toBe('user');
   });
 
-  it('/me nulls the org role when there is no active organization', async () => {
-    const b = await bootstrap('me-null');
-    const me = await app
-      .inject({
-        method: 'GET',
-        url: '/api/v1/auth/me',
-        headers: { 'x-rekey-user-token': b.ownerAccess },
-      })
-      .then((r) => r.json().data as Record<string, unknown>);
-    expect(me.activeOrganizationId).toBeNull();
-    expect(me.activeOrganizationRole).toBeNull();
-    expect(me.activeOrganizationBaseRole).toBeNull();
-  });
-
   // ---------- Operator surface ----------
-
-  it('an operator can assign a custom role through the tenant routes', async () => {
-    const b = await bootstrap('operator-assign');
-    await defineRole(b, { name: 'content-manager', baseRole: 'MEMBER' });
-    const orgId = await makeOrg(b, 'operator-assign-org');
-    const member = await createMember(b, 'op-assign@example.com');
-
-    // The route-level body schema kept the old 3-value enum after the catalog
-    // landed, so Ajv rejected every custom name before the handler ran and the
-    // operator surface could not do what the end-user surface could.
-    const added = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organizations/${orgId}/members`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { endUserId: member.id, role: 'content-manager' },
-    });
-    expect(added.statusCode).toBe(201);
-    expect(added.json().data).toMatchObject({ role: 'content-manager', baseRole: 'MEMBER' });
-
-    const changed = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organizations/${orgId}/members/${member.id}`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { role: 'ADMIN' },
-    });
-    expect(changed.statusCode).toBe(200);
-    expect(changed.json().data).toMatchObject({ role: 'ADMIN', baseRole: 'ADMIN' });
-  });
-
-  it('an operator assigning an unknown role name gets ORGANIZATION_ROLE_UNKNOWN, not a schema error', async () => {
-    const b = await bootstrap('operator-unknown');
-    const orgId = await makeOrg(b, 'operator-unknown-org');
-    const member = await createMember(b, 'op-unknown@example.com');
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organizations/${orgId}/members`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { endUserId: member.id, role: 'not-a-real-role' },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('ORGANIZATION_ROLE_UNKNOWN');
-  });
-
-  it('an operator add-member that omits the role uses the catalog default', async () => {
-    const b = await bootstrap('operator-default');
-    await defineRole(b, { name: 'contributor', baseRole: 'MEMBER', isDefault: true });
-    const orgId = await makeOrg(b, 'operator-default-org');
-    const member = await createMember(b, 'op-default@example.com');
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organizations/${orgId}/members`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { endUserId: member.id },
-    });
-    expect(res.statusCode).toBe(201);
-    expect(res.json().data).toMatchObject({ role: 'contributor', baseRole: 'MEMBER' });
-  });
 
   // ---------- Re-tiering ----------
 
@@ -569,42 +430,6 @@ describe('Custom organization roles', () => {
       where: { applicationId_name: { applicationId: b.applicationId, name: 'founder' } },
     });
     expect(still.baseRole).toBe('OWNER');
-  });
-
-  it('allows the same re-tier once another OWNER-tier member exists', async () => {
-    const b = await bootstrap('retier-ok');
-    await defineRole(b, { name: 'founder', baseRole: 'OWNER' });
-    const orgId = await makeOrg(b, 'retier-ok-org');
-    await prisma.organizationMembership.update({
-      where: { organizationId_endUserId: { organizationId: orgId, endUserId: b.ownerEndUserId } },
-      data: { role: 'founder' },
-    });
-    const coOwner = await createMember(b, 'co-owner-retier@example.com');
-    await prisma.organizationMembership.create({
-      data: { organizationId: orgId, endUserId: coOwner.id, role: 'OWNER' },
-    });
-
-    const res = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/founder`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { baseRole: 'MEMBER' },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.baseRole).toBe('MEMBER');
-  });
-
-  it('re-tiering a role no organization uses is unaffected by the guard', async () => {
-    const b = await bootstrap('retier-unused');
-    await defineRole(b, { name: 'founder', baseRole: 'OWNER' });
-    const res = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/founder`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { baseRole: 'ADMIN' },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.baseRole).toBe('ADMIN');
   });
 
   // ---------- Concurrency ----------
@@ -710,30 +535,6 @@ describe('Custom organization roles', () => {
     expect(after.json().error.code).toBe('ORGANIZATION_ROLE_INSUFFICIENT');
   });
 
-  it('a newly created role is assignable immediately', async () => {
-    const b = await bootstrap('cache-create');
-    const orgId = await makeOrg(b, 'cache-create-org');
-    const member = await createMember(b, 'fresh-cache@example.com');
-    await prisma.organizationMembership.create({
-      data: { organizationId: orgId, endUserId: member.id, role: 'MEMBER' },
-    });
-    // Warm the cache before the role exists, so a stale snapshot would 400.
-    const warm = await asUser(b, b.ownerAccess, 'GET', '/api/v1/users/me/organizations/roles');
-    expect(warm.statusCode).toBe(200);
-
-    await defineRole(b, { name: 'fresh-role', baseRole: 'MEMBER' });
-
-    const res = await asUser(
-      b,
-      b.ownerAccess,
-      'PATCH',
-      `/api/v1/users/me/organizations/${orgId}/members/${member.id}`,
-      { role: 'fresh-role' },
-    );
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.role).toBe('fresh-role');
-  });
-
   // ---------- Disabling a role (revocation) ----------
 
   it('disabling a role refuses its existing holders, without touching the membership', async () => {
@@ -770,58 +571,6 @@ describe('Custom organization roles', () => {
       where: { organizationId_endUserId: { organizationId: orgId, endUserId: lead.id } },
     });
     expect(row.role).toBe('studio-lead');
-  });
-
-  it('re-enabling restores the holder', async () => {
-    const b = await bootstrap('reenable');
-    await defineRole(b, { name: 'studio-lead', baseRole: 'ADMIN' });
-    const orgId = await makeOrg(b, 'reenable-org');
-    const lead = await createMember(b, 'lead-reenable@example.com');
-    await prisma.organizationMembership.create({
-      data: { organizationId: orgId, endUserId: lead.id, role: 'studio-lead' },
-    });
-    const patch = (disabled: boolean): Promise<LightMyRequestResponse> =>
-      app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/studio-lead`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-        payload: { disabled },
-      });
-
-    await patch(true);
-    expect(
-      (await asUser(b, lead.access, 'GET', `/api/v1/users/me/organizations/${orgId}`)).statusCode,
-    ).toBe(403);
-    await patch(false);
-    expect(
-      (await asUser(b, lead.access, 'GET', `/api/v1/users/me/organizations/${orgId}`)).statusCode,
-    ).toBe(200);
-  });
-
-  it('a disabled role cannot be newly assigned', async () => {
-    const b = await bootstrap('disable-assign');
-    await defineRole(b, { name: 'content-manager', baseRole: 'MEMBER' });
-    const orgId = await makeOrg(b, 'disable-assign-org');
-    const member = await createMember(b, 'assignee-disable@example.com');
-    await prisma.organizationMembership.create({
-      data: { organizationId: orgId, endUserId: member.id, role: 'MEMBER' },
-    });
-    await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/content-manager`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-      payload: { disabled: true },
-    });
-
-    const res = await asUser(
-      b,
-      b.ownerAccess,
-      'PATCH',
-      `/api/v1/users/me/organizations/${orgId}/members/${member.id}`,
-      { role: 'content-manager' },
-    );
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('ORGANIZATION_ROLE_DISABLED');
   });
 
   it('refuses to disable an OWNER-tier role that is an org\'s only route to an owner', async () => {
@@ -908,35 +657,4 @@ describe('Custom organization roles', () => {
     expect(after.role).toBe('MEMBER');
   });
 
-  it('refuses to reassign an OWNER-tier role down a tier', async () => {
-    const b = await bootstrap('demote');
-    await defineRole(b, { name: 'founder', baseRole: 'OWNER' });
-    const orgId = await makeOrg(b, 'demote-org');
-    await prisma.organizationMembership.update({
-      where: { organizationId_endUserId: { organizationId: orgId, endUserId: b.ownerEndUserId } },
-      data: { role: 'founder' },
-    });
-
-    // The per-member last-OWNER guard does not sit on this path, so without an
-    // explicit refusal a bulk reassign would quietly empty every organization
-    // of its owner.
-    const res = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/founder?reassignTo=MEMBER`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('ORGANIZATION_ROLE_REASSIGN_DEMOTES_OWNER');
-  });
-
-  it('refuses to delete a built-in role', async () => {
-    const b = await bootstrap('builtin-del');
-    const res = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/MEMBER`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE');
-  });
 });

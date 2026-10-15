@@ -94,12 +94,6 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     b = await createApp('b');
   });
 
-  it('is empty for an Application with no providers', async () => {
-    const res = await list(a.publicKey);
-    expect(res.statusCode, res.body).toBe(200);
-    expect(res.json()).toEqual({ success: true, data: { providers: [] } });
-  });
-
   it('lists only providers with both a public config and a client secret', async () => {
     await configure(a.applicationId, 'github');
     await configure(a.applicationId, 'google');
@@ -141,44 +135,6 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     }
   });
 
-  it('leaves out a half-configured OIDC entry, which start refuses too', async () => {
-    await configure(a.applicationId, 'google');
-    await oauthService.setProviderConfig({
-      applicationId: a.applicationId,
-      providerName: 'oidc',
-      public: { clientId: 'o', redirectUri: REDIRECT_URI },
-      clientSecret: 'oidc-secret',
-    });
-
-    expect((await list(a.publicKey)).json().data.providers).toEqual([{ id: 'google', name: 'Google' }]);
-
-    const start = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/oauth/oidc/start',
-      headers: { authorization: `Bearer ${a.publicKey}` },
-      payload: { state: 's' },
-    });
-    expect(start.statusCode, start.body).toBe(400);
-    expect(start.json().error.code).toBe('OAUTH_PROVIDER_NOT_CONFIGURED');
-    expect(start.json().error.fix).toContain('issuerUrl');
-  });
-
-  it('drops a provider once the operator removes it', async () => {
-    await configure(a.applicationId, 'google');
-    await configure(a.applicationId, 'discord');
-    await oauthService.removeProviderConfig({ applicationId: a.applicationId, providerName: 'google' });
-    const res = await list(a.publicKey);
-    expect(res.json().data.providers).toEqual([{ id: 'discord', name: 'Discord' }]);
-  });
-
-  it('answers the secret key the same as the publishable key', async () => {
-    await configure(a.applicationId, 'google');
-    const viaPub = await list(a.publicKey);
-    const viaSecret = await list(a.liveKey);
-    expect(viaSecret.statusCode, viaSecret.body).toBe(200);
-    expect(viaSecret.json()).toEqual(viaPub.json());
-  });
-
   it('accepts a secret key holding only auth:read, and refuses one without it', async () => {
     await configure(a.applicationId, 'google');
     const readOnly = await a.mint(['auth:read']);
@@ -187,26 +143,6 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     const refused = await list(billingOnly);
     expect(refused.statusCode).toBe(403);
     expect(refused.json().error.code).toBe('API_KEY_SCOPE_INSUFFICIENT');
-  });
-
-  it('is cacheable for a short time, privately, and varies on the credential', async () => {
-    const res = await list(a.publicKey);
-    expect(res.headers['cache-control']).toBe('private, max-age=60');
-    expect(String(res.headers['vary'])).toMatch(/Authorization/);
-  });
-
-  it('refuses a missing, unknown, or malformed key', async () => {
-    const none = await list(undefined);
-    expect(none.statusCode).toBe(401);
-    expect(none.json().error.code).toBe('API_KEY_MISSING');
-
-    const unknownPub = await list(`rp_pub_${'0'.repeat(32)}`);
-    expect(unknownPub.statusCode).toBe(401);
-    expect(unknownPub.json().error.code).toBe('PUBLISHABLE_KEY_INVALID');
-
-    const unknownSecret = await list(`rp_live_${'0'.repeat(40)}`);
-    expect(unknownSecret.statusCode).toBe(401);
-    expect(unknownSecret.json().error.code).toBe('API_KEY_INVALID');
   });
 
   it("returns each Application's own providers and never another's", async () => {

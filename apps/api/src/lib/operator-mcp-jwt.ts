@@ -37,6 +37,8 @@ export interface OperatorMcpAccessClaims {
   /** Granted scopes, space-separated per RFC 6749, but we issue a single scope today. */
   scope: string;
   iat: number;
+  /** Issue time in milliseconds, for the per-operator stamp (lib/session-stamp.ts). */
+  iat_ms: number;
   exp: number;
 }
 
@@ -70,6 +72,7 @@ export function issueOperatorMcpAccessToken(
       tid: args.tenantId,
       cid: args.clientId,
       scope: args.scope,
+      iat_ms: Date.now(),
     },
     env.JWT_SECRET,
     { expiresIn: lifetime, algorithm: 'HS256', audience: args.audience },

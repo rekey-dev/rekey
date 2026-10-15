@@ -58,6 +58,8 @@ Some routes replace the global limiter with their own bucket:
 | Sign-in, operator sign-up, MFA, magic link, password reset, email verification (end user and operator) | (Application or none, email, client IP) | 10 per minute (some OAuth and MCP endpoints use 20 or 30) |
 | Change password, passkey enrolment step-up (end user and operator) | (Application or none, account, client IP) | 10 per minute |
 | End-user sign-up | (Application, client IP) | 10 per minute |
+| End-user sign-up with a publishable key, while the Application has `requireEmailVerification` off | (Application, client IP) | 30 per hour, on top of the 10 per minute |
+| Auth email to one mailbox (reset, magic link, verification, welcome, sign-up notices, operator reset, sign-in link and invitation) | (Application or `operator`, recipient) | 5 per hour and 15 per UTC day (`AUTH_EMAIL_RECIPIENT_HOURLY_CAP`, `AUTH_EMAIL_RECIPIENT_DAILY_CAP`). Not a request limit: see [auth.md](auth.md#how-much-auth-email-one-address-can-be-sent) for what each caller is told. |
 | The same routes, all together | per Application | 3000 (`RATE_LIMIT_AUTH_CEILING_MAX`) |
 | The same routes, all together, from one client IP | per (Application, client IP) for publishable-key traffic and for secret-key traffic that sends `X-Rekey-Client-Ip`; per client IP for operator routes, which have no Application | 100 (`RATE_LIMIT_MAX`) |
 | Failed end-user sign-ins and MFA codes with no client address (secret key without `X-Rekey-Client-Ip`, or an unidentified proxy); past it, only accounts that already failed this window are refused | per Application | 300 (`RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX`) |
@@ -261,8 +263,8 @@ so an entry a client prepends itself is never used:
    shared by every visitor. A missing or malformed `X-Rekey-Client-Ip` means
    the caller had no visitor address, and the request is treated as shared
    (never blocked by IP). Without a valid caller secret, `X-Rekey-Client-Ip`
-   is ignored and removed. This is what the split Dokploy units need: the
-   hosted panel and portal call the API's public origin, so without it every
+   is ignored and removed. This is what a split deployment needs when the
+   panel and portal call the API's public origin, so without it every
    operator and portal visitor would count as the host's outgoing address.
    Both headers are removed before anything logs or handles the request.
 

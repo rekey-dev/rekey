@@ -10,6 +10,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { setDeliveryScheduler } from '../src/modules/webhooks/webhook.service.js';
 import { contactsHarness, type ContactsWorld } from './contacts-fixtures.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('operator list reads', () => {
   let app: FastifyInstance;

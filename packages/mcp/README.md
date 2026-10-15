@@ -1,12 +1,10 @@
 # `@rekey.dev/mcp`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 A [Model Context Protocol](https://modelcontextprotocol.io) server for [Rekey](https://rekey.dev). Lets Claude Desktop, Cursor, and Claude Code introspect a deployment, read and change an Application's billing, and mint API keys, without screenshots or copy-paste from the panel.
 
 **This is the small server.** It has 23 tools: 9 reads against the deployment-wide admin API, 7 billing reads of one Application, and 7 write tools. The hosted operator MCP that every deployment runs at `/api/v1/tenant/mcp` is a different, larger server, including organizations, devices, plan entitlements, subscription cancel and billing provider config. This package does not reach that server and is not a client for it. If the hosted one is available to you, it is usually the one to connect.
 
-> **For AI agents connected through this server:** see [AGENTS.md](../../AGENTS.md) for what's safe to call and the write-tool safety model.
+> **For AI agents connected through this server:** see [AGENTS.md](./AGENTS.md) for what's safe to call and the write-tool safety model.
 
 ```bash
 # Run on demand (no global install needed):

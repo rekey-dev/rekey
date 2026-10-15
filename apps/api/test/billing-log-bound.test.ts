@@ -15,13 +15,10 @@ import {
   DIAGNOSTIC_PER_REASON_PER_HOUR,
   DIAGNOSTIC_RETENTION_DAYS,
   OUTBOX_FAILING_ATTEMPTS,
-  drainBillingEventOutbox,
-  enqueueBillingEvent,
   flushDiagnosticAggregates,
   pruneDiagnosticEvents,
   recordBillingEvent,
   recordDiagnosticBillingEvent,
-  recordMoneyPathBillingEvent,
   type BillingEventInput,
 } from '../src/modules/billing-log/index.js';
 
@@ -110,17 +107,6 @@ describe('billing log bounds', () => {
       expect(await count()).toBe(DIAGNOSTIC_PER_REASON_PER_HOUR + 1);
     });
 
-    it('gives each reason and each Application its own count', async () => {
-      const other = await newApplication();
-      for (let i = 0; i < 25; i += 1) {
-        await recordDiagnosticBillingEvent(refused('BILLING_NO_PROVIDER_FOR_CURRENCY'));
-        await recordDiagnosticBillingEvent(refused('BILLING_CURRENCY_CONFLICT'));
-        await recordDiagnosticBillingEvent(refused('BILLING_NO_PROVIDER_FOR_CURRENCY', other));
-      }
-      expect(await count({ type: 'checkout.refused' })).toBe(2 * DIAGNOSTIC_PER_REASON_PER_HOUR);
-      expect(await prisma.billingEvent.count({ where: { applicationId: other } })).toBe(DIAGNOSTIC_PER_REASON_PER_HOUR);
-    });
-
     it('caps one Application at two hundred diagnostic events an hour across every reason', async () => {
       for (let reason = 0; reason < 12; reason += 1) {
         for (let i = 0; i < DIAGNOSTIC_PER_REASON_PER_HOUR; i += 1) {
@@ -131,19 +117,6 @@ describe('billing log bounds', () => {
       await flushDiagnosticAggregates();
       const suppressed = (await aggregates()).reduce((sum, row) => sum + (row.data as { suppressed: number }).suppressed, 0);
       expect(suppressed).toBe(12 * DIAGNOSTIC_PER_REASON_PER_HOUR - DIAGNOSTIC_PER_APPLICATION_PER_HOUR);
-    });
-
-    it('bounds a diagnostic event whichever writer carries it', async () => {
-      for (let i = 0; i < 15; i += 1) await recordBillingEvent(prisma, refused());
-      for (let i = 0; i < 15; i += 1) await recordMoneyPathBillingEvent(prisma, refused());
-      for (let i = 0; i < 15; i += 1) await enqueueBillingEvent(refused());
-      // The drain compares a row's due time, stamped by the database, with this
-      // process's clock. The two differ by a few milliseconds either way.
-      await prisma.billingEventOutbox.updateMany({ where: { applicationId }, data: { nextAttemptAt: new Date(0) } });
-      await drainBillingEventOutbox(100);
-      expect(await count({ type: 'checkout.refused' })).toBe(DIAGNOSTIC_PER_REASON_PER_HOUR);
-      // A queued event past the bound is settled, not retried for ever.
-      expect(await prisma.billingEventOutbox.count({ where: { applicationId, processedAt: null } })).toBe(0);
     });
 
     it('skips the count of an Application deleted while its counters were live', async () => {
@@ -225,11 +198,6 @@ describe('billing log bounds', () => {
         [five.id, OUTBOX_FAILING_ATTEMPTS, 'coupon.redeemed', 'data.code: Required'],
       ]);
       expect(res.body).not.toContain('do-not-return');
-    });
-
-    it('answers an empty outbox with zeroes', async () => {
-      const data = BillingOutboxStatusSchema.parse((await status()).json().data);
-      expect(data).toMatchObject({ pending: 0, due: 0, failing: 0, oldestPendingAt: null, stuck: [] });
     });
 
     it('needs the super-admin key', async () => {

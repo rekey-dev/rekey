@@ -1,7 +1,5 @@
 # `@rekey.dev/nextjs`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 [Rekey](https://rekey.dev) helpers for the **Next.js App Router** (14, 15 and 16): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
 
 > **For AI coding agents:** start at [AGENTS.md](../../AGENTS.md).

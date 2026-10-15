@@ -120,7 +120,7 @@ export default async function BillingOverviewPage({
             title="Past due"
             value={stats.pastDueSubscriptions.toLocaleString()}
             href={
-              hasScope(app.access?.scopes ?? null, 'end-users:read')
+              hasScope(app.access.scopes, 'end-users:read')
                 ? `/applications/${id}/end-users?subscription=PAST_DUE`
                 : null
             }

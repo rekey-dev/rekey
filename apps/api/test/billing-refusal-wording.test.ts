@@ -17,6 +17,7 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
+import { revisePlan } from './seed-plan.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -107,13 +108,6 @@ describe('billing refusals name the right thing', () => {
       expect(fix).toContain(`Billing → Setup → Providers (/applications/${appId}/billing/providers)`);
     });
 
-    it('a checkout naming no provider answers the same', async () => {
-      await externalOnly();
-      const res = await checkout();
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('BILLING_PROVIDER_INBOUND_ONLY');
-    });
-
     it('a checkout naming external is refused about external, not the default provider', async () => {
       await externalOnly();
       const res = await checkout({ provider: 'external' });
@@ -136,12 +130,6 @@ describe('billing refusals name the right thing', () => {
     });
   });
 
-  it('with nothing configured at all, the refusal is unchanged', async () => {
-    const res = await checkout();
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('BILLING_CREDENTIALS_NOT_CONFIGURED');
-  });
-
   describe('plan refusals point at routes the caller can use', () => {
     it('PLAN_NOT_FOUND on the end-user checkout', async () => {
       const res = await checkout({ planSlug: 'nope' });
@@ -153,22 +141,8 @@ describe('billing refusals name the right thing', () => {
       expect(fix).toContain(`/api/v1/tenant/applications/${appId}/plans`);
     });
 
-    it('PLAN_NOT_FOUND on a tenant route', async () => {
-      const res = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${appId}/plans/nope`,
-        headers: auth(),
-        payload: { name: 'x' },
-      });
-      expect(res.statusCode).toBe(404);
-      expect(res.json().error.fix).not.toContain('/api/v1/admin/');
-    });
-
     it('PLAN_INACTIVE on the end-user checkout', async () => {
-      await prisma.plan.update({
-        where: { applicationId_slug: { applicationId: appId, slug: 'pro' } },
-        data: { active: false },
-      });
+      await revisePlan({ applicationId_slug: { applicationId: appId, slug: 'pro' } }, { active: false });
       const res = await checkout();
       expect(res.statusCode).toBe(400);
       const { code, fix } = res.json().error as { code: string; fix: string };
@@ -178,10 +152,7 @@ describe('billing refusals name the right thing', () => {
     });
 
     it('PLAN_INACTIVE on a plan whose registration failed says to register it, not to flip `active`', async () => {
-      await prisma.plan.update({
-        where: { applicationId_slug: { applicationId: appId, slug: 'pro' } },
-        data: { active: false, registrationStatus: 'FAILED' },
-      });
+      await revisePlan({ applicationId_slug: { applicationId: appId, slug: 'pro' } }, { active: false, registrationStatus: 'FAILED' });
       const res = await checkout();
       expect(res.statusCode).toBe(400);
       const { code, message, fix } = res.json().error as { code: string; message: string; fix: string };

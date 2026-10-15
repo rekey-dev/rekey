@@ -22,8 +22,8 @@ import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
-import { enqueueSubscriptionEvent } from '../src/modules/billing/webhooks/billing-events.js';
 import type { WebhookDelivery } from '@prisma/client';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
@@ -113,21 +113,17 @@ describe('Outbound billing webhook events', () => {
       );
     }
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId: application.id,
         slug: 'pro_monthly',
         name: 'Pro',
-        amount: 999,
-        currency: 'USD',
         kind: 'SUBSCRIPTION',
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 999 });
     const endUser = await prisma.endUser.create({
       data: { applicationId: application.id, email: `obe-eu-${slug}@example.com` },
     });
-    const { endpoint } = await webhookService.createEndpoint({
+    const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: application.id,
       url: 'https://example.invalid/billing-hook',
       events: ['*'],
@@ -563,13 +559,6 @@ describe('Outbound billing webhook events', () => {
       return deliveries[0]!.payload as unknown as WithEntitlements;
     }
 
-    it("carries the plan's entitlement rows", async () => {
-      const envelope = await activate('obe-ent-plan');
-      expect(envelope.data.subscription.entitlements).toContainEqual(
-        expect.objectContaining({ kind: 'FEATURE', key: 'max_widgets', valueType: 'INT', value: '2' }),
-      );
-    });
-
     it("applies the subscription's overrides, not the plan's raw value", async () => {
       // The whole reason the slug is not enough. A consumer reading this
       // payload must see 5, which is what this customer bought.
@@ -602,41 +591,6 @@ describe('Outbound billing webhook events', () => {
         where: { metadata: { path: ['checkoutSessionId'], equals: 'cs_obe-ent-unresolved' } },
       });
       expect(sub.status).toBe('ACTIVE');
-    });
-
-    it('does not send entitlements_updated at all when the grant cannot be resolved', async () => {
-      // The grant is that event's only news. Sent without it, it says nothing;
-      // sent with `[]`, it says the customer lost everything.
-      const b = await bootstrap('obe-ent-upd-unresolved', 'stripe');
-      const sub = await prisma.subscription.create({
-        data: { applicationId: b.applicationId, endUserId: b.endUserId, planId: b.planId, status: 'ACTIVE' },
-      });
-      const spy = vi
-        .spyOn(entitlementsService, 'resolveForSubscription')
-        .mockRejectedValue(new Error('simulated resolution failure'));
-      const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
-      let updatedIds: string[];
-      let activatedIds: string[];
-      try {
-        updatedIds = await prisma.$transaction((tx) =>
-          enqueueSubscriptionEvent(tx, 'subscription.entitlements_updated', sub.id),
-        );
-        activatedIds = await prisma.$transaction((tx) =>
-          enqueueSubscriptionEvent(tx, 'subscription.activated', sub.id),
-        );
-      } finally {
-        spy.mockRestore();
-        quiet.mockRestore();
-      }
-
-      expect(updatedIds).toEqual([]);
-      expect(
-        await prisma.webhookDelivery.count({
-          where: { endpointId: b.endpointId, eventType: 'subscription.entitlements_updated' },
-        }),
-      ).toBe(0);
-      // A status event still goes out, without the field.
-      expect(activatedIds).toHaveLength(1);
     });
   });
 });

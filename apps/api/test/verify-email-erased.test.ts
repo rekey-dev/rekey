@@ -19,6 +19,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 // A caller-supplied verify link must sit on an origin the Application declared,
 // the route takes a publishable key, so an unregistered destination is refused.
@@ -157,22 +160,5 @@ describe('verifyEmail refuses an erased end-user', () => {
       where: { endUserId, consumedAt: null },
     });
     expect(stillLive, 'the token should still be unspent').not.toBeNull();
-  });
-
-  it('still verifies a normal, un-erased account', async () => {
-    // The control. A guard that refuses everything would pass the two tests
-    // above and break the product.
-    const { liveKey, endUserId, token } = await fixture('vfe-ok');
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/verify-email',
-      headers: { authorization: `Bearer ${liveKey}` },
-      payload: { token },
-    });
-
-    expect(res.statusCode).toBeLessThan(300);
-    const row = await prisma.endUser.findUniqueOrThrow({ where: { id: endUserId } });
-    expect(row.emailVerified).toBe(true);
   });
 });

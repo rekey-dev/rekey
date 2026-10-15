@@ -64,17 +64,13 @@ export function AppNav({
   id,
   billingEnabled,
   scopes = null,
-  usersOverview = true,
 }: {
   id: string;
   billingEnabled: boolean;
   /** The caller's effective scopes on this Application; null = unrestricted. */
   scopes?: string[] | null;
-  /** False when the API predates the Users overview, so the tab is not offered. */
-  usersOverview?: boolean;
 }): React.JSX.Element {
   const visible = (seg: string): boolean => {
-    if (seg === 'users' && !usersOverview) return false;
     const need = SEG_SCOPE[seg];
     return need === null || need === undefined || hasScope(scopes, need);
   };

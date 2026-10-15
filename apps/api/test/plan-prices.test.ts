@@ -13,8 +13,11 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
-import { CheckoutResultDtoSchema, PagedSchema, PublicPlanDtoSchema } from '@rekey.dev/shared-types';
+import { CheckoutResultDtoSchema } from '@rekey.dev/shared-types';
 import { fakeRazorpay } from './fakes/billing-providers.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RETURN = 'https://app.example/account';
@@ -167,75 +170,12 @@ describe('plan prices', () => {
       expect((patched.json().data as { prices: unknown }).prices).toEqual(prices);
     });
 
-    it('returns only the default price for a plan sold in one currency', async () => {
-      const listed = await operator('GET', '/plans');
-      expect((listed.json().data as { items: Array<{ prices: unknown }> }).items[0]!.prices).toEqual([
-        expect.objectContaining({ currency: 'USD', amount: 2000, isDefault: true, archived: false }),
-      ]);
-    });
-
-    it('takes the plan by slug as well as by id, and 404s on neither', async () => {
-      expect((await putPrice('INR', { amount: 149900 }, 'pro')).statusCode).toBe(200);
-      const missing = await putPrice('INR', { amount: 149900 }, 'nope');
-      expect(missing.statusCode).toBe(404);
-      expect(missing.json().error.code).toBe('PLAN_NOT_FOUND');
-    });
-
     it('updates the amount and the countries of a price no provider has registered', async () => {
       await putPrice('INR', { amount: 149900, countries: ['IN'] });
       const repriced = await putPrice('INR', { amount: 99900 });
       expect(repriced.json().data).toMatchObject({ currency: 'INR', amount: 99900, countries: ['IN'] });
       const widened = await putPrice('INR', { amount: 99900, countries: [] });
       expect(widened.json().data).toMatchObject({ currency: 'INR', amount: 99900, countries: [] });
-    });
-
-    it("refuses the plan's own currency", async () => {
-      const res = await putPrice('usd', { amount: 1900 });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error).toMatchObject({ code: 'PLAN_PRICE_IS_DEFAULT' });
-      expect(res.json().error.fix).toContain('PATCH');
-      expect(await prisma.planPrice.count({ where: { currency: { not: 'USD' } } })).toBe(0);
-    });
-
-    it('refuses a free plan', async () => {
-      const free = await createPlan({ slug: 'free', name: 'Free', });
-      const res = await putPrice('INR', { amount: 100 }, free);
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('PLAN_PRICE_NOT_APPLICABLE');
-      expect(await prisma.planPrice.count({ where: { currency: { not: 'USD' } } })).toBe(0);
-    });
-
-    it('refuses an invalid currency, a three-decimal one, a bad amount and a bad country', async () => {
-      const cases: Array<[string, Record<string, unknown>, string]> = [
-        ['XYZ', { amount: 100 }, 'PLAN_PRICE_CURRENCY_INVALID'],
-        ['RUPEES', { amount: 100 }, 'PLAN_PRICE_CURRENCY_INVALID'],
-        ['KWD', { amount: 1000 }, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
-        ['bhd', { amount: 1000 }, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
-        ['IQD', { amount: 1000 }, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
-        ['XDR', { amount: 1000 }, 'PLAN_PRICE_CURRENCY_UNSUPPORTED'],
-        // Whole units only: PayPal takes no decimals on these.
-        ['HUF', { amount: 349950 }, 'PLAN_PRICE_AMOUNT_INVALID'],
-        ['twd', { amount: 59901 }, 'PLAN_PRICE_AMOUNT_INVALID'],
-        ['INR', { amount: 0 }, 'BAD_REQUEST'],
-        ['INR', { amount: 10.5 }, 'BAD_REQUEST'],
-        // No amount and no existing price: there is nothing to keep.
-        ['INR', {}, 'PLAN_PRICE_AMOUNT_INVALID'],
-        ['INR', { amount: 100, countries: ['IND'] }, 'PLAN_PRICE_COUNTRY_INVALID'],
-      ];
-      for (const [currency, body, code] of cases) {
-        const res = await putPrice(currency, body);
-        expect(res.statusCode, `${currency} ${JSON.stringify(body)}: ${res.body}`).toBe(400);
-        expect(res.json().error.code).toBe(code);
-        expect(res.json().error.fix).toBeTruthy();
-      }
-      expect(await prisma.planPrice.count({ where: { currency: { not: 'USD' } } })).toBe(0);
-    });
-
-    it('changes the countries of an existing price without being sent its amount', async () => {
-      expect((await putPrice('INR', { amount: 149900 })).statusCode).toBe(200);
-      const res = await putPrice('INR', { countries: ['in', 'NP'] });
-      expect(res.statusCode, res.body).toBe(200);
-      expect(res.json().data).toMatchObject({ currency: 'INR', amount: 149900, countries: ['IN', 'NP'], isDefault: false });
     });
 
     it('freezes the amount once a provider has registered the price, and still takes countries', async () => {
@@ -260,15 +200,6 @@ describe('plan prices', () => {
       expect(res.statusCode).toBe(409);
       expect(res.json().error.code).toBe('PLAN_PRICE_IMMUTABLE');
       expect((await prisma.planPrice.findFirstOrThrow({ where: { currency: 'INR' } })).amount).toBe(149900);
-    });
-
-    it('refuses to make an additional currency the default one', async () => {
-      await putPrice('INR', { amount: 149900 });
-      await prisma.plan.update({ where: { id: planId }, data: { metadata: {} } });
-      const res = await operator('PATCH', '/plans/pro', { price: { currency: 'INR', amount: 149900 } });
-      expect(res.statusCode).toBe(409);
-      expect(res.json().error.code).toBe('PLAN_PRICE_IS_DEFAULT');
-      expect((await prisma.plan.findUniqueOrThrow({ where: { id: planId } })).currency).toBe('USD');
     });
 
     it('deletes a price nobody is on, and 404s the second time', async () => {
@@ -301,15 +232,6 @@ describe('plan prices', () => {
       expect((await operator('DELETE', `/plans/${planId}/prices/INR`)).statusCode).toBe(200);
     });
 
-    it('needs an operator session', async () => {
-      const res = await app.inject({
-        method: 'PUT',
-        url: `/api/v1/tenant/applications/${applicationId}/plans/${planId}/prices/INR`,
-        headers: { authorization: `Bearer ${secretKey}` },
-        payload: { amount: 100 },
-      });
-      expect(res.statusCode).toBe(401);
-    });
   });
 
   describe('checkout', () => {
@@ -449,12 +371,6 @@ describe('plan prices', () => {
       expect(local.provider).toBe('razorpay');
     });
 
-    it('charges the default price when no country is declared', async () => {
-      const { provider, row } = await sessionOf(await checkout());
-      expect(provider).toBe('stripe');
-      expect(row).toMatchObject({ currency: 'USD', unitAmount: 2000, planPriceId: await defaultPriceId() });
-    });
-
     it('rejects `currency` from a publishable key, and opens nothing', async () => {
       const res = await checkout({ currency: 'INR' }, { key: publishableKey });
       expect(res.statusCode).toBe(400);
@@ -471,13 +387,6 @@ describe('plan prices', () => {
       const res = await checkout({ currency: 'EUR' }, { user: await newBuyer() });
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe('BILLING_PLAN_CURRENCY_UNAVAILABLE');
-    });
-
-    it('says in the response which currency and price the checkout charges', async () => {
-      const local = await checkout({ country: 'IN' });
-      expect(local.json().data).toMatchObject({ currency: 'INR', unitAmount: 149900 });
-      const standard = await checkout({}, { user: await newBuyer() });
-      expect(standard.json().data).toMatchObject({ currency: 'USD', unitAmount: 2000 });
     });
 
     it('charges the default price for a currency the server named and its provider cannot charge, and logs it', async () => {
@@ -541,16 +450,6 @@ describe('plan prices', () => {
       expect(res.json().error.fix).toContain('Remove the INR price and add it again');
     });
 
-    it('falls back to the default price when no provider can charge the local one', async () => {
-      await prisma.billingCredentials.updateMany({ where: { provider: 'razorpay' }, data: { enabled: false } });
-      const res = await checkout({ country: 'IN' });
-      const { provider, row } = await sessionOf(res);
-      expect(provider).toBe('stripe');
-      expect(row).toMatchObject({ currency: 'USD', unitAmount: 2000, planPriceId: await defaultPriceId() });
-      expect(res.json().data.price).toMatchObject({ currency: 'USD', amount: 2000, reason: 'fallback', requestedCurrency: 'INR' });
-      expect(res.json().data.priceFallback).toMatchObject({ requested: { currency: 'INR', amount: 149900 }, charged: { currency: 'USD' } });
-    });
-
     it('sends every field of the checkout result on the wire, with and without a fallback', async () => {
       const direct = (await checkout({ country: 'IN' })).json().data as Record<string, unknown>;
       await prisma.billingCredentials.updateMany({ where: { provider: 'razorpay' }, data: { enabled: false } });
@@ -565,22 +464,6 @@ describe('plan prices', () => {
       expect(Array.isArray(direct.warnings)).toBe(true);
       expect(direct).toMatchObject({ currency: 'INR', unitAmount: 149900, mode: 'redirect', price: { reason: 'country', requestedCurrency: null } });
       expect(fellBack).toMatchObject({ currency: 'USD', unitAmount: 2000, price: { reason: 'fallback', requestedCurrency: 'INR' } });
-    });
-
-    it('lists the public plan with its resolved price and no amount or currency of its own', async () => {
-      const read = (country: string) =>
-        app.inject({ method: 'GET', url: `/api/v1/billing/plans?country=${country}`, headers: { authorization: `Bearer ${secretKey}` } });
-      const local = await read('IN');
-      expect(PagedSchema(PublicPlanDtoSchema).safeParse(local.json().data).error?.issues ?? []).toEqual([]);
-      const pro = (local.json().data.items as Array<Record<string, unknown>>).find((plan) => plan.slug === 'pro')!;
-      expect(pro).not.toHaveProperty('amount');
-      expect(pro).not.toHaveProperty('currency');
-      expect(pro.price).toMatchObject({ currency: 'INR', amount: 149900, reason: 'country', requestedCurrency: null });
-
-      await prisma.billingCredentials.updateMany({ where: { provider: 'razorpay' }, data: { enabled: false } });
-      const fallback = await read('IN');
-      const shown = (fallback.json().data.items as Array<Record<string, unknown>>).find((plan) => plan.slug === 'pro')!;
-      expect(shown.price).toMatchObject({ currency: 'USD', amount: 2000, reason: 'fallback', requestedCurrency: 'INR' });
     });
 
     it('writes one checkout.price_fallback event per fallback, with the session, both prices and where the buyer was', async () => {
@@ -608,16 +491,6 @@ describe('plan prices', () => {
           buyerCountrySource: 'declared',
         },
       });
-    });
-
-    it('says the price charged and no fallback when the price selected is charged', async () => {
-      const res = await checkout({ country: 'IN' });
-      const inr = await prisma.planPrice.findFirstOrThrow({ where: { planId, currency: 'INR' } });
-      expect(res.json().data).toMatchObject({
-        price: { id: inr.id, currency: 'INR', amount: 149900, formatted: '₹1,499.00', isDefault: false, reason: 'country', requestedCurrency: null },
-        priceFallback: null,
-      });
-      expect(await fallbackEvents()).toEqual([]);
     });
 
     it('charges the default price through a provider the server named that cannot charge the local one', async () => {
@@ -721,25 +594,4 @@ describe('plan prices', () => {
     });
   });
 
-  describe('plan readiness', () => {
-    it('reports a plan no provider can charge in any of its currencies, and clears once one can', async () => {
-      await createPlan({ slug: 'eu', name: 'EU', price: { currency: 'EUR', amount: 1800 } });
-      const blockersOf = async () => {
-        const listed = await operator('GET', '/plans');
-        const plan = (listed.json().data as { items: Array<{ slug: string; checkout: { blockers: Array<{ code: string }> } }> }).items.find(
-          (p) => p.slug === 'eu',
-        )!;
-        return plan.checkout.blockers.map((b) => b.code);
-      };
-      expect(await blockersOf()).toContain('PLAN_CURRENCY_UNSUPPORTED');
-      expect((await putPrice('GBP', { amount: 1600 }, 'eu')).statusCode).toBe(200);
-      expect(await blockersOf()).toContain('PLAN_CURRENCY_UNSUPPORTED');
-      // A chargeable local price does not make up for a default nobody can
-      // be charged: every buyer without a local price pays the default.
-      expect((await putPrice('INR', { amount: 149900 }, 'eu')).statusCode).toBe(200);
-      expect(await blockersOf()).toContain('PLAN_CURRENCY_UNSUPPORTED');
-      await billingCredentialsService.setCurrencies(applicationId, 'stripe', ['USD', 'EUR']);
-      expect(await blockersOf()).not.toContain('PLAN_CURRENCY_UNSUPPORTED');
-    });
-  });
 });

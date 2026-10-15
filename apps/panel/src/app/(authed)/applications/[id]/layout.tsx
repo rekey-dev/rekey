@@ -66,8 +66,7 @@ export default async function ApplicationDetailLayout({
       <AppNav
         id={id}
         billingEnabled={app.billingConfig.enabled}
-        scopes={app.access?.scopes ?? null}
-        usersOverview={app.reportingTimezone !== undefined}
+        scopes={app.access.scopes}
       />
 
       {/* In the LAYOUT, not on one page. A disabled application looks entirely

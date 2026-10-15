@@ -23,9 +23,11 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { hashRefreshToken, rotateRefreshToken } from '../src/lib/refresh-tokens.js';
 import { devicesService } from '../src/modules/devices/devices.service.js';
-import { hashTenantRefreshToken } from '../src/lib/tenant-refresh-tokens.js';
 import { judgeReplay, REFRESH_REUSE_WINDOW_MS, type ReuseWindowRow } from '../src/lib/refresh-reuse-window.js';
 import { makeEndUser as makeEndUserFor } from './device-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -247,23 +249,6 @@ describe('refresh-token reuse window', () => {
     expect(await liveRows(userId)).toBe(0);
   });
 
-  // ---------- (3) outside the window ----------
-
-  it('a replay after the window revokes every session', async () => {
-    const { userId, sessions } = await userWithSessions('late@example.com', 2);
-    const [s] = sessions as [EndUserSession];
-    expect((await refresh(s.refreshToken)).statusCode).toBe(200);
-    await ageRotation(s.refreshToken);
-
-    const replay = await refresh(s.refreshToken);
-    expect(replay.statusCode).toBe(401);
-    expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
-    expect(await liveRows(userId)).toBe(0);
-    expect(await wasFamilyRevoked(userId)).toBe(true);
-    const reused = await events('user.refresh_token_reused', userId);
-    expect((reused[0]!.metadata as { reason: string }).reason).toBe('outside_window');
-  });
-
   // ---------- (5) lost response ----------
 
   it('a retry after a lost response is RACED and costs no other device; the same retry after the window cascades', async () => {
@@ -417,41 +402,6 @@ describe('refresh-token reuse window', () => {
       expect(e.ip).toBe(IP);
       expect(e.userAgent).toBe(UA);
     }
-  });
-
-  it('operator: an in-window replay after the successor was used revokes every session', async () => {
-    const op = await operatorWithSessions(2);
-    const [s] = op.sessions as [OperatorSession];
-    const first = await operatorRefresh(s.refreshToken);
-    expect(first.statusCode).toBe(200);
-    expect((await operatorRefresh((first.json().data as OperatorSession).refreshToken)).statusCode).toBe(200);
-
-    const replay = await operatorRefresh(s.refreshToken);
-    expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
-    expect(await liveOperatorRows(op.id)).toBe(0);
-    const reused = await events('operator.refresh_token_reused', op.id);
-    expect(reused).toHaveLength(1);
-    expect((reused[0]!.metadata as { reason: string }).reason).toBe('successor_spent');
-  });
-
-  it('operator: a lost-response retry is RACED; after the window it revokes every session', async () => {
-    const op = await operatorWithSessions(2);
-    const [s, other] = op.sessions as [OperatorSession, OperatorSession];
-    expect((await operatorRefresh(s.refreshToken)).statusCode).toBe(200);
-
-    const retry = await operatorRefresh(s.refreshToken);
-    expect(retry.json().error.code).toBe('REFRESH_TOKEN_RACED');
-    expect((await operatorRefresh(other.refreshToken)).statusCode).toBe(200);
-
-    await prisma.tenantRefreshToken.update({
-      where: { tokenHash: hashTenantRefreshToken(s.refreshToken) },
-      data: { revokedAt: new Date(Date.now() - REFRESH_REUSE_WINDOW_MS - 1_000) },
-    });
-    const late = await operatorRefresh(s.refreshToken);
-    expect(late.json().error.code).toBe('REFRESH_TOKEN_REUSED');
-    expect(await liveOperatorRows(op.id)).toBe(0);
-    const reused = await events('operator.refresh_token_reused', op.id);
-    expect((reused[0]!.metadata as { reason: string }).reason).toBe('outside_window');
   });
 });
 

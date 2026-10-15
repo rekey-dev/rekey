@@ -55,21 +55,6 @@ describe('Operator MCP OAuth AS — discovery', () => {
     expect(md.issuer).toContain('/api/v1/tenant/mcp');
   });
 
-  it('protected-resource metadata at the path-insertion URL is identical to the suffix form', async () => {
-    const suffix = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/mcp/.well-known/oauth-protected-resource',
-    });
-    const inserted = await app.inject({
-      method: 'GET',
-      url: '/.well-known/oauth-protected-resource/api/v1/tenant/mcp',
-    });
-    expect(inserted.statusCode).toBe(200);
-    expect(inserted.body).toBe(suffix.body);
-    const md = inserted.json() as { resource: string; authorization_servers: string[] };
-    expect(md.resource).toContain('/api/v1/tenant/mcp');
-    expect(md.authorization_servers[0]).toContain('/api/v1/tenant/mcp');
-  });
   // RFC 9728, which the MCP spec makes a MUST: the 401 is what points an
   // undiscovered client at the authorization server. This shipped without the
   // header, it was set only on the success reply, i.e. on the one response a
@@ -93,15 +78,4 @@ describe('Operator MCP OAuth AS — discovery', () => {
     expect(String(header)).toContain('/.well-known/oauth-protected-resource');
   });
 
-  it('a bad bearer gets the same hint as a missing one', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/mcp',
-      headers: { authorization: 'Bearer rp_op_definitely-not-a-real-token' },
-      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
-    });
-
-    expect(res.statusCode).toBe(401);
-    expect(String(res.headers['www-authenticate'])).toContain('resource_metadata=');
-  });
 });

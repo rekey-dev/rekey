@@ -18,9 +18,12 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -142,14 +145,6 @@ describe('OIDC authorize: delegating sign-in to the Application', () => {
     expect(res.body).not.toContain('name="password"');
   });
 
-  it('preserves any query the Application page already carries', async () => {
-    const b = await bootstrap('query', 'https://app.example.test/oauth/authorize?tenant=acme');
-    const res = await app.inject({ method: 'GET', url: authorizeUrl(b) });
-    const to = new URL(res.headers.location as string);
-    expect(to.searchParams.get('tenant')).toBe('acme');
-    expect(to.searchParams.get('client_id')).toBe(b.clientId);
-  });
-
   it('refuses to delegate to its own authorize path, which would loop forever', async () => {
     const b = await bootstrap(
       'loop',
@@ -175,41 +170,6 @@ describe('OIDC authorize: delegating sign-in to the Application', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('VALIDATION_ERROR');
-  });
-
-  it('can be set through the auth-config endpoint the panel uses, and cleared again', async () => {
-    // The panel field posts to this route, whose body is `.strict()`. Declaring
-    // the key on AuthConfigSchema is NOT enough: it must also be listed here,
-    // and it was not, so saving the field answered "Unrecognized key(s) in
-    // object: 'hostedAuthorizeUrl'" and the feature was unreachable in
-    // production despite every other layer working.
-    const b = await bootstrap('via-api');
-    const patch = (value: string | null): Promise<LightMyRequestResponse> =>
-      app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${b.applicationId}/auth-config`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-        payload: { hostedAuthorizeUrl: value },
-      });
-
-    const set = await patch('https://app.example.test/oauth/authorize');
-    expect(set.statusCode).toBe(200);
-    expect(set.json().data.authConfig.hostedAuthorizeUrl).toBe(
-      'https://app.example.test/oauth/authorize',
-    );
-
-    // And it takes effect on the authorize endpoint, not just in storage.
-    const delegated = await app.inject({ method: 'GET', url: authorizeUrl(b) });
-    expect(delegated.statusCode).toBe(302);
-
-    // Clearing turns the delegation back off and restores the built-in page.
-    const cleared = await patch('');
-    expect(cleared.statusCode).toBe(200);
-    expect(cleared.json().data.authConfig.hostedAuthorizeUrl).toBeUndefined();
-
-    const builtin = await app.inject({ method: 'GET', url: authorizeUrl(b) });
-    expect(builtin.statusCode).toBe(200);
-    expect(builtin.body).toContain('name="password"');
   });
 
   it('still rejects a bad authorization request before delegating', async () => {

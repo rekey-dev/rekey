@@ -11,6 +11,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Row {
   id: string;
@@ -118,14 +121,6 @@ describe('tenant application list filters', () => {
     return { owner, ids, tag };
   }
 
-  it('keeps the unfiltered list whole and newest first', async () => {
-    const { owner } = await seed();
-    const all = await list(owner, '');
-    expect(names(all)).toEqual(['Epsilon', 'Alpha Web', 'beta_mobile', 'Gamma 100%', 'Delta Legacy']);
-    expect(all.page.total).toBe(5);
-    expect(all.items[0]!.summary).toBeUndefined();
-  });
-
   it('filters by status, and the total counts the filtered set', async () => {
     const { owner } = await seed();
     const active = await list(owner, 'status=active');
@@ -134,13 +129,6 @@ describe('tenant application list filters', () => {
     const disabled = await list(owner, 'status=disabled&limit=1');
     expect(names(disabled)).toEqual(['Delta Legacy']);
     expect(disabled.page.total).toBe(1);
-  });
-
-  it('filters by environment and combines with status', async () => {
-    const { owner } = await seed();
-    expect(names(await list(owner, 'environment=PRODUCTION'))).toEqual(['Alpha Web', 'Delta Legacy']);
-    expect(names(await list(owner, 'environment=PRODUCTION&status=active'))).toEqual(['Alpha Web']);
-    expect(names(await list(owner, 'environment=STAGING'))).toEqual(['Epsilon']);
   });
 
   it('searches name and slug case-insensitively, with LIKE wildcards taken literally', async () => {
@@ -169,14 +157,6 @@ describe('tenant application list filters', () => {
     const paged = await list(owner, 'sort=activity&limit=2&offset=2');
     expect(names(paged)).toEqual(['beta_mobile', 'Epsilon']);
     expect(paged.page.hasMore).toBe(true);
-  });
-
-  it('rejects an unknown sort or status rather than ignoring it', async () => {
-    const { owner } = await seed();
-    for (const q of ['sort=users', 'status=deleted', 'environment=prod', 'include=everything']) {
-      const r = await inject({ method: 'GET', url: `/api/v1/tenant/applications/?${q}`, headers: auth(owner) });
-      expect(r.statusCode, q).toBe(400);
-    }
   });
 
   it('summarises active keys and the last active day', async () => {

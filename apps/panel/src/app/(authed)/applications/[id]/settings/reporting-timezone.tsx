@@ -55,8 +55,7 @@ export function timezoneOptions(current: string): string[] {
 
 /**
  * The zone the Users overview counts days in, saved with
- * `PATCH /tenant/applications/:id/settings`. Only rendered when the API
- * reports the field, since an older API has nowhere to store it.
+ * `PATCH /tenant/applications/:id/settings`.
  */
 export function ReportingTimezone({
   applicationId,

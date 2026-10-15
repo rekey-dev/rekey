@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { ALL_SCOPES } from './all-scopes';
 
 const calls: string[] = [];
 let scopes: string[] | null = null;
@@ -66,7 +67,7 @@ vi.mock('@/lib/api', async () => {
       authConfig: { methods: ['password'], organizationsEnabled: false },
       billingConfig: { enabled: billingEnabled, currency: 'USD' },
       oauthConfig: {},
-      access: scopes === null ? undefined : { level: 'read', scopes },
+      access: { level: 'read', scopes: scopes ?? ALL_SCOPES },
     }),
     api: async ({ path }: { path: string }) => {
       const suffix = path.replace(/^\/api\/v1\/tenant\/applications\/app_1/, '');

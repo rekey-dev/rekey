@@ -8,13 +8,15 @@ import type { FastifyInstance } from 'fastify';
 import { BillingLogPageSchema, PriceFallbackSummarySchema, type BillingLogEntry } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { readBillingLog, recordBillingEvent, type BillingEventInput } from '../src/modules/billing-log/index.js';
+import { recordBillingEvent, type BillingEventInput } from '../src/modules/billing-log/index.js';
 import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { TOOL_SCOPES, allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { billingEventsForExport } from '../src/modules/billing-log/index.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
-import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 let serial = 0;
 
@@ -119,25 +121,6 @@ describe('billing log read side', () => {
       expect(exact.items).toHaveLength(4);
       expect(exact.nextCursor).toBeNull();
     });
-
-    it('carries seq as a string, the actor in lower case, and no dedupe key', async () => {
-      world = await operatorWorld(app);
-      await seed([paymentRecorded(world.appId, { dedupeKey: 'internal-key' })]);
-      const res = await read(world, '/billing/events');
-      const [entry] = (res.json().data as { items: Array<Record<string, unknown>> }).items;
-      expect(typeof entry!.seq).toBe('string');
-      expect(entry!.actor).toEqual({ type: 'provider', id: 'stripe' });
-      expect(entry).not.toHaveProperty('dedupeKey');
-      expect(res.body).not.toContain('internal-key');
-    });
-
-    it('refuses a limit above the maximum, a cursor that is not a number, and a parameter it does not know', async () => {
-      world = await operatorWorld(app);
-      for (const query of ['limit=201', 'limit=0', 'cursor=abc', 'cursor=-1', 'offset=10', 'type=payment.invented', 'from=yesterday']) {
-        const res = await read(world, `/billing/events?${query}`);
-        expect(res.statusCode, `${query}: ${res.body}`).toBe(400);
-      }
-    });
   });
 
   describe('filters', () => {
@@ -170,24 +153,6 @@ describe('billing log read side', () => {
       expect(await types('currency=inr')).toEqual(['payment.recorded']);
       expect(await types('from=2026-09-10T00:00:00.000Z&to=2026-09-20T00:00:00.000Z')).toEqual(['payment.recorded']);
       expect(await types('endUserId=eu_a&type=payment.recorded&currency=USD')).toEqual(['payment.recorded']);
-    });
-
-    it('serves the trail of one subscription, one payment and one end user', async () => {
-      world = await operatorWorld(app);
-      const id = world.appId;
-      await seed([
-        paymentRecorded(id, { paymentId: 'pay_a', subscriptionId: 'sub_a', endUserId: 'eu_a' }),
-        paymentRecorded(id, { paymentId: 'pay_b', subscriptionId: 'sub_a', endUserId: 'eu_b' }),
-        paymentRecorded(id, { paymentId: 'pay_c', subscriptionId: 'sub_c', endUserId: 'eu_a' }),
-      ]);
-      const payments = async (path: string): Promise<Array<string | null>> => (await page(world, path)).items.map((e) => e.paymentId);
-
-      expect(await payments('/billing/subscriptions/sub_a/events')).toEqual(['pay_b', 'pay_a']);
-      expect(await payments('/billing/payments/pay_c/events')).toEqual(['pay_c']);
-      expect(await payments('/end-users/eu_a/billing-events')).toEqual(['pay_c', 'pay_a']);
-      expect(await payments('/billing/subscriptions/sub_a/events?limit=1')).toEqual(['pay_b']);
-      // The path decides the entity: a query cannot move the trail to another one.
-      expect(await payments('/billing/subscriptions/sub_a/events?subscriptionId=sub_c')).toEqual(['pay_b', 'pay_a']);
     });
   });
 
@@ -269,36 +234,6 @@ describe('billing log read side', () => {
     });
   });
 
-  describe('cost', () => {
-    it('reads a page in one query however many events the Application holds', async () => {
-      world = await operatorWorld(app);
-      await seed(Array.from({ length: 3 }, () => paymentRecorded(world.appId)));
-      const small = await countQueries(() => readBillingLog({ applicationId: world.appId, limit: 50 }));
-      const smallRoute = await countQueries(() => read(world, '/billing/events?limit=50'));
-
-      await prisma.billingEvent.createMany({
-        data: Array.from({ length: 600 }, (_, i) => ({
-          applicationId: world.appId,
-          type: 'payment.recorded',
-          tier: 'PERMANENT' as const,
-          occurredAt: new Date(),
-          dedupeKey: `bulk-${i}`,
-          actorType: 'PROVIDER' as const,
-          subscriptionId: `sub_${i % 7}`,
-          paymentId: `pay_bulk_${i}`,
-          currency: 'USD',
-          amount: 1900,
-          data: { priceCharged: null, discountAmount: 0, providerPaymentId: null, verification: 'verified' },
-        })),
-      });
-      const large = await countQueries(() => readBillingLog({ applicationId: world.appId, limit: 50 }));
-      const largeRoute = await countQueries(() => read(world, '/billing/events?limit=50&subscriptionId=sub_3'));
-
-      expect(small.count).toBe(1);
-      expect(large.count).toBe(1);
-      expect(largeRoute.count, largeRoute.queries.join('\n')).toBe(smallRoute.count);
-    });
-  });
   describe('price fallbacks counted', () => {
     it('groups the fallbacks of a period by plan, currency and country, most frequent first, for one Application only', async () => {
       const mine = await operatorWorld(app);

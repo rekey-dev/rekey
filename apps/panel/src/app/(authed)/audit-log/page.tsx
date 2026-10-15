@@ -15,7 +15,7 @@ import {
   eventDetails,
   eventTypeOptions,
   humanizeEventType,
-  resolveActorEmails,
+  actorEmailsOf,
 } from '@/lib/security-events';
 import { savedStateKey } from '@/lib/saved-state-key';
 
@@ -93,7 +93,7 @@ export default async function AuditLogPage({
     path: `/api/v1/tenant/security-events?${qs.toString()}`,
   });
   // Resolve actor CUIDs to emails for THIS page of rows. See lib/security-events.
-  const actorEmails = await resolveActorEmails(events);
+  const actorEmails = actorEmailsOf(events);
 
   const filterQsStr = filterQs.toString();
   const exportHref = `/audit-log/export${filterQsStr ? `?${filterQsStr}` : ''}`;

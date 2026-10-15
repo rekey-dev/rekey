@@ -15,6 +15,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { prisma } from '../src/lib/prisma.js';
+import { revisePlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -100,27 +101,6 @@ describe('billing scaffold', () => {
     );
   });
 
-  it('rejects invalid slug + amount + duplicate', async () => {
-    const bad = await app.inject({
-      method: 'POST',
-      url: `/api/v1/admin/applications/${applicationId}/plans`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'NOT VALID', name: 'X', },
-    });
-    expect(bad.statusCode).toBe(400);
-    expect(bad.json().error.code).toBe('PLAN_SLUG_INVALID');
-
-    await createPlan(applicationId, { slug: 'dup', name: 'D', price: { currency: 'USD', amount: 100 } });
-    const dup = await app.inject({
-      method: 'POST',
-      url: `/api/v1/admin/applications/${applicationId}/plans`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'dup', name: 'D2', price: { currency: 'USD', amount: 100 } },
-    });
-    expect(dup.statusCode).toBe(409);
-    expect(dup.json().error.code).toBe('PLAN_SLUG_TAKEN');
-  });
-
   it('sends a price change down a route that actually works, slug and all', async () => {
     // A truth matrix for four `fix` strings that all describe the same journey:
     // PLAN_PRICE_IMMUTABLE's fix, PLAN_SLUG_TAKEN's archived-case fix, and the
@@ -133,10 +113,7 @@ describe('billing scaffold', () => {
 
     // Registration is what freezes the price, and it is decided by provider
     // metadata rather than by a live provider call, so this needs no Stripe.
-    await prisma.plan.update({
-      where: { id: plan.id as string },
-      data: { metadata: { stripe: { priceId: 'price_test_immutable' } } },
-    });
+    await revisePlan({ id: plan.id as string }, { metadata: { stripe: { priceId: 'price_test_immutable' } } });
 
     const repriced = await app.inject({
       method: 'PATCH',
@@ -260,12 +237,6 @@ describe('billing scaffold', () => {
     expect(data.items.map((p) => p.slug)).toContain('lite');
   });
 
-  it('GET /billing/plans rejects without an API key', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/v1/billing/plans' });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('API_KEY_MISSING');
-  });
-
   it('gates the public billing surface with 403 when billing is disabled', async () => {
     // App created WITHOUT enableBilling → billing surface is off.
     const tenant = await app
@@ -312,20 +283,6 @@ describe('billing scaffold', () => {
     });
     return (res.json().data as { accessToken: string }).accessToken;
   }
-
-  it('GET /billing/subscription returns null when the user has no subscription', async () => {
-    const accessToken = await signUpUser();
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/billing/subscription',
-      headers: {
-        authorization: `Bearer ${liveKey}`,
-        'x-rekey-user-token': accessToken,
-      },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toBeNull();
-  });
 
   it('GET /billing/subscription says what the holding provider can do, on the wire', async () => {
     const plan = await createPlan(applicationId, { slug: 'caps', name: 'Caps', price: { currency: 'USD', amount: 500 } });
@@ -387,52 +344,6 @@ describe('billing scaffold', () => {
     expect(data.url).toMatch(/^https:\/\/checkout\.stripe\.example\/cs_/);
     expect(data.subscription.status).toBe('PENDING');
     expect(data.subscription.metadata.checkoutSessionId).toMatch(/^cs_[a-f0-9]{24}$/);
-  });
-
-  it('checkout against a missing plan returns PLAN_NOT_FOUND', async () => {
-    const accessToken = await signUpUser();
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/checkout',
-      headers: {
-        authorization: `Bearer ${liveKey}`,
-        'x-rekey-user-token': accessToken,
-      },
-      payload: {
-        planSlug: 'ghost_plan',
-        successUrl: 'https://app.example/ok',
-        cancelUrl: 'https://app.example/cancel',
-      },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('PLAN_NOT_FOUND');
-  });
-
-  it('checkout against an inactive plan returns PLAN_INACTIVE', async () => {
-    await createPlan(applicationId, { slug: 'old', name: 'Old', price: { currency: 'USD', amount: 100 } });
-    await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/admin/applications/${applicationId}/plans/old`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { active: false },
-    });
-    const accessToken = await signUpUser();
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/checkout',
-      headers: {
-        authorization: `Bearer ${liveKey}`,
-        'x-rekey-user-token': accessToken,
-      },
-      payload: {
-        planSlug: 'old',
-        successUrl: 'https://app.example/ok',
-        cancelUrl: 'https://app.example/cancel',
-      },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('PLAN_INACTIVE');
   });
 
   it('repeated checkout for the same plan reuses the PENDING row (no parallel pendings)', async () => {

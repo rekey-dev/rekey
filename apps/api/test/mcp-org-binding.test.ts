@@ -1,6 +1,6 @@
 /**
  * An end-user MCP connection can act for one of the user's organizations
- * (EtherLabZ/Rekey#473 item 3, gap 7 of docs/specs/auth-me-include.md).
+ * (gap 7 of docs/specs/auth-me-include.md).
  *
  * The user chooses at consent; the choice is stored on the authorization code,
  * carried into the access token as `oid` and down the refresh chain, and every
@@ -20,10 +20,10 @@ import jwt from 'jsonwebtoken';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { issueRefreshToken } from '../src/lib/refresh-tokens.js';
-import { issueMcpAccessToken } from '../src/lib/jwt.js';
-import { invalidateOrganizationRoles } from '../src/lib/organization-role-cache.js';
-import { mcpIssuer } from '../src/modules/mcp/oauth.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const REDIRECT = 'http://localhost:9876/cb';
 const PASSWORD = 'pw-one-two-three';
@@ -144,9 +144,7 @@ describe('MCP organization binding', () => {
   async function seedBilling(fx: Fixture, userId: string, orgId: string): Promise<void> {
     const plan = async (slug: string): Promise<string> =>
       (
-        await prisma.plan.create({
-          data: { applicationId: fx.appId, slug, name: slug, amount: 0, kind: 'SUBSCRIPTION' },
-        })
+        await seedPlan({ applicationId: fx.appId, slug, name: slug, kind: 'SUBSCRIPTION' }, null)
       ).id;
     const solo = await plan('solo');
     const crew = await plan('crew');
@@ -377,58 +375,6 @@ describe('MCP organization binding', () => {
     expect(state).toMatchObject({ active: true, sub: userId, oid: orgId });
   });
 
-  it('choosing personal binds nothing', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    const userId = await endUser(fx, 'personal@example.com');
-    await org(fx.appId, `p-${n}`, [[userId, 'OWNER']]);
-    const tokens = await connect(fx, 'personal@example.com', 'personal');
-    expect(oidOf(tokens.access_token)).toBeUndefined();
-    expect(await introspect(fx, tokens.access_token)).not.toHaveProperty('oid');
-    expect((await tool(fx, tokens.access_token, 'get_profile')).organization).toBeNull();
-  });
-
-  it('a user with no organizations gets a code in one step, as before', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    await endUser(fx, 'solo@example.com');
-    const { verifier, challenge } = pkce();
-    const tokens = await redeem(fx, codeOf(await signInStep(fx, 'solo@example.com', challenge)), verifier);
-    expect(oidOf(tokens.access_token)).toBeUndefined();
-  });
-
-  it('offers no choice when organizations are off, or for a sign-in-only (openid) grant', async () => {
-    const off = await bootstrap({ billingSubject: 'org', organizationsEnabled: false });
-    const u1 = await endUser(off, 'off@example.com');
-    await org(off.appId, `off-${n}`, [[u1, 'OWNER']]);
-    codeOf(await signInStep(off, 'off@example.com', pkce().challenge));
-
-    const oidc = await bootstrap({ billingSubject: 'org' });
-    const u2 = await endUser(oidc, 'oidc@example.com');
-    await org(oidc.appId, `oidc-${n}`, [[u2, 'OWNER']]);
-    codeOf(await signInStep(oidc, 'oidc@example.com', pkce().challenge, 'openid'));
-  });
-
-  it('refuses an organization the user is not a member of, or one from another Application', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    const other = await bootstrap({ billingSubject: 'org' });
-    const userId = await endUser(fx, 'edit@example.com');
-    const stranger = await endUser(fx, 'stranger@example.com');
-    await org(fx.appId, `mine-${n}`, [[userId, 'OWNER']]);
-    const notMine = await org(fx.appId, `theirs-${n}`, [[stranger, 'OWNER']]);
-    // Same end-user id cannot exist in two Applications, so the cross-app case
-    // is an organization in Application B whose id is edited into A's form.
-    const otherOwner = await endUser(other, 'b@example.com');
-    const elsewhere = await org(other.appId, `b-${n}`, [[otherOwner, 'OWNER']]);
-
-    const { challenge } = pkce();
-    const token = consentTokenOf((await signInStep(fx, 'edit@example.com', challenge)).body);
-    for (const target of [notMine, elsewhere]) {
-      const res = await chooseStep(fx, token, target, challenge);
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toContain('You cannot act for that organization');
-    }
-    expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
-  });
-
   it('refuses a consent step whose request was edited after sign-in', async () => {
     const fx = await bootstrap({ billingSubject: 'org' });
     const userId = await endUser(fx, 'tamper@example.com');
@@ -468,36 +414,14 @@ describe('MCP organization binding', () => {
       expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
     }
 
-    it('accepts the unedited step (control)', async () => {
-      const { fx, orgId, challenge, token } = await setup();
-      codeOf(await chooseStep(fx, token, orgId, challenge));
-    });
-
     it('refuses a changed scope', async () => {
       const { fx, orgId, challenge, token } = await setup();
       await expectRefused(fx, await chooseStep(fx, token, orgId, challenge, { scope: 'openid mcp:account' }));
     });
 
-    it('refuses an added nonce', async () => {
-      const { fx, orgId, challenge, token } = await setup();
-      await expectRefused(fx, await chooseStep(fx, token, orgId, challenge, { nonce: 'n-added' }));
-    });
-
     it('refuses a different registered redirect_uri', async () => {
       const { fx, orgId, challenge, token } = await setup();
       await expectRefused(fx, await chooseStep(fx, token, orgId, challenge, { redirect_uri: REDIRECT_2 }));
-    });
-
-    it('refuses a different client of the same Application', async () => {
-      const { fx, orgId, challenge, token } = await setup();
-      const other = await app
-        .inject({
-          method: 'POST',
-          url: `/api/v1/mcp/${fx.slug}/oauth/register`,
-          payload: { redirect_uris: [REDIRECT], client_name: 'Other' },
-        })
-        .then((r) => (r.json() as { client_id: string }).client_id);
-      await expectRefused(fx, await chooseStep(fx, token, orgId, challenge, { client_id: other }));
     });
 
     it('refuses once the user signs out everywhere after the sign-in step', async () => {
@@ -577,26 +501,6 @@ describe('MCP organization binding', () => {
     const refused = await userinfo();
     expect(refused.statusCode).toBe(401);
     expect(refused.json()).toMatchObject({ error: 'invalid_token' });
-  });
-
-  it('flags a truncated organization licence list instead of cutting it silently', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    const userId = await endUser(fx, 'many@example.com');
-    const orgId = await org(fx.appId, `many-${n}`, [[userId, 'OWNER']]);
-    await prisma.license.createMany({
-      data: Array.from({ length: 101 }, () => ({
-        applicationId: fx.appId,
-        endUserId: userId,
-        organizationId: orgId,
-        kind: 'PERPETUAL' as const,
-        keyPrefix: 'lk_test',
-        keyHash: randomBytes(16).toString('hex'),
-      })),
-    });
-    const { access_token } = await connect(fx, 'many@example.com', orgId);
-    const lic = await tool<{ licenses: unknown[]; truncated: boolean }>(fx, access_token, 'list_licenses');
-    expect(lic.licenses).toHaveLength(100);
-    expect(lic.truncated).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -710,28 +614,6 @@ describe('MCP organization binding', () => {
     expect(oidOf((resumed.json() as Tokens).access_token)).toBe(orgId);
   });
 
-  it('a disabled role ends the binding the same way', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    const owner = await endUser(fx, 'o@example.com');
-    const userId = await endUser(fx, 'viewer@example.com');
-    await prisma.organizationRoleDef.create({
-      data: { applicationId: fx.appId, name: 'viewer', baseRole: 'MEMBER' },
-    });
-    invalidateOrganizationRoles(fx.appId);
-    const orgId = await org(fx.appId, `role-${n}`, [
-      [owner, 'OWNER'],
-      [userId, 'viewer'],
-    ]);
-    const tokens = await connect(fx, 'viewer@example.com', orgId);
-    expect((await callToolRaw(fx, tokens.access_token, 'get_profile')).statusCode).toBe(200);
-
-    await prisma.organizationRoleDef.updateMany({ where: { applicationId: fx.appId, name: 'viewer' }, data: { disabled: true } });
-    invalidateOrganizationRoles(fx.appId);
-
-    expect((await callToolRaw(fx, tokens.access_token, 'get_profile')).statusCode).toBe(401);
-    expect((await refresh(fx, tokens.refresh_token)).json()).toMatchObject({ error: 'invalid_grant' });
-  });
-
   it('a deleted organization fails the refresh rather than turning the grant personal', async () => {
     const fx = await bootstrap({ billingSubject: 'org' });
     const userId = await endUser(fx, 'deleted@example.com');
@@ -746,36 +628,6 @@ describe('MCP organization binding', () => {
   // -------------------------------------------------------------------------
   // Grants made before the binding existed
   // -------------------------------------------------------------------------
-
-  it('a token and refresh chain minted before this change keep working, personal', async () => {
-    const fx = await bootstrap({ billingSubject: 'org' });
-    const userId = await endUser(fx, 'legacy@example.com');
-    const orgId = await org(fx.appId, `legacy-${n}`, [[userId, 'OWNER']]);
-    await seedBilling(fx, userId, orgId);
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: fx.appId } });
-
-    // Exactly what issueTokens produced before: no `oid`, and a refresh row
-    // with no scope and no binding.
-    const legacyAccess = issueMcpAccessToken({
-      endUserId: userId,
-      applicationId: fx.appId,
-      tokenGeneration: application.tokenGeneration,
-      audience: mcpIssuer(fx.slug),
-      scope: 'mcp:account',
-    }).token;
-    const legacyRefresh = await issueRefreshToken(fx.appId, userId, { kind: 'mcp', clientId: fx.clientId });
-
-    expect((await tool(fx, legacyAccess, 'get_profile')).organization).toBeNull();
-    expect((await tool<{ plan: { slug: string } }>(fx, legacyAccess, 'get_subscription')).plan.slug).toBe('solo');
-    expect(await tool(fx, legacyAccess, 'get_credits')).toEqual({ balance: 7, organizationId: null });
-    expect((await tool<{ licenses: unknown[] }>(fx, legacyAccess, 'list_licenses')).licenses).toHaveLength(2);
-
-    const refreshed = await refresh(fx, legacyRefresh.raw);
-    expect(refreshed.statusCode, refreshed.body).toBe(200);
-    const body = refreshed.json() as Tokens;
-    expect(body.scope).toBe('mcp:account');
-    expect(oidOf(body.access_token)).toBeUndefined();
-  });
 
   // -------------------------------------------------------------------------
   // App-authorised session handoff

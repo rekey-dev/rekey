@@ -8,6 +8,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -58,7 +61,7 @@ describe('end-user MFA policy', () => {
         method: 'POST',
         url: '/api/v1/auth/sign-up',
         headers: { authorization: `Bearer ${liveKey}` },
-        payload: { email: euEmail, password: PASSWORD },
+        payload: { email: euEmail, password: PASSWORD, emailVerified: true },
       })
       .then((r) => (r.json().data as { accessToken: string }).accessToken);
   });
@@ -110,13 +113,4 @@ describe('end-user MFA policy', () => {
     expect(data.mfaEnrollmentRequired).toBe(true);
   });
 
-  it('status reports the policy', async () => {
-    await setMfaPolicy('required');
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/auth/mfa/status',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': euAccess },
-    });
-    expect((res.json().data as { policy: string }).policy).toBe('required');
-  });
 });

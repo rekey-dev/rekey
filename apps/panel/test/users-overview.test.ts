@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { activeFilterCount, effectiveFilters, filterParams, isUnnarrowed, parseUsersQuery, usersHref } from '@/lib/users-filters';
 import type { AnalyticsActivity, AnalyticsKpis } from '@rekey.dev/shared-types';
 import { describeDelta, needsLivePath } from '@/lib/users-analytics';
+import { ALL_SCOPES } from './all-scopes';
 
 // ── filters ────────────────────────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ vi.mock('@/lib/api', async () => {
         name: 'Northwind',
         billingConfig: { enabled: true },
         reportingTimezone: 'Europe/Berlin',
-        access: scopes === null ? undefined : { level: 'read', scopes },
+        access: { level: 'read', scopes: scopes ?? ALL_SCOPES },
       })),
   };
 });
@@ -446,14 +447,6 @@ describe('Users overview page', () => {
     expect(t).toContain('Total users 48.2K');
   });
 
-  it('says so when the API predates the route', async () => {
-    const { PanelApiError } = (await import('@/lib/api')) as unknown as { PanelApiError: new (s: number, c: string) => Error };
-    reply = (p) => (p.includes('/analytics/users') ? new PanelApiError(404, 'ROUTE_NOT_FOUND') : {});
-    const html = await renderPage();
-    expect(text(html)).toContain('This API does not serve the Users overview yet');
-    expect(html).toContain('href="/applications/app_1/end-users"');
-  });
-
   it('shows the API refusal with its fix', async () => {
     const { PanelApiError } = (await import('@/lib/api')) as unknown as {
       PanelApiError: new (s: number, c: string, f?: string) => Error;
@@ -569,7 +562,7 @@ describe('Users overview page', () => {
 });
 
 describe('AppNav', () => {
-  async function nav(props: { usersOverview?: boolean; scopes?: string[] | null }): Promise<string> {
+  async function nav(props: { scopes?: string[] | null }): Promise<string> {
     pathname = '/applications/app_1/end-users';
     const { AppNav } = await import('@/components/AppNav');
     return renderToStaticMarkup(createElement(AppNav, { id: 'app_1', billingEnabled: true, ...props }));
@@ -582,8 +575,7 @@ describe('AppNav', () => {
     expect(html.indexOf('href="/applications/app_1/users"')).toBeLessThan(html.lastIndexOf('href="/applications/app_1/end-users"'));
   });
 
-  it('hides the tab when the API predates it, or the caller lacks overview:read', async () => {
-    expect(await nav({ usersOverview: false })).not.toContain('href="/applications/app_1/users"');
+  it('hides the tab when the caller lacks overview:read', async () => {
     expect(await nav({ scopes: ['end-users:read'] })).not.toContain('href="/applications/app_1/users"');
   });
 });

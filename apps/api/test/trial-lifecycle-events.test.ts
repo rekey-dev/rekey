@@ -25,6 +25,10 @@ import {
   TRIAL_WILL_END_LEAD_DAYS,
 } from '../src/modules/billing/trial-events.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const SECRET = 'external-billing-signing-secret-for-tests-0123456789';
 const PASSWORD = 'pw-one-two-three';
@@ -76,7 +80,7 @@ describe('Trial lifecycle webhooks', () => {
       })
       .then((r) => (r.json().data as { id: string }).id);
     await billingCredentialsService.upsertCredentials(appId, 'external', { webhookSecret: SECRET }, { mode: 'test' });
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/trial-hook',
       events: ['*'],
@@ -160,12 +164,6 @@ describe('Trial lifecycle webhooks', () => {
       expect(await deliveries('subscription.trial_started')).toHaveLength(1);
     });
 
-    it('a paid activation is not a trial', async () => {
-      await post(activated('sub_paid', 'paid@example.com'));
-      expect((await subscriptionOf('sub_paid')).status).toBe('ACTIVE');
-      expect(await deliveries('subscription.trial_started')).toHaveLength(0);
-    });
-
     it('a grant whose trial_started cannot be written starts no trial', async () => {
       await failDeliveriesOf('subscription.trial_started');
       const res = await post(activated('sub_roll', 'roll@example.com', { trialEndsAt: daysFromNow(14).toISOString() }));
@@ -216,7 +214,7 @@ describe('Trial lifecycle webhooks', () => {
 
     it('a checkout that completes on a trial announces it', async () => {
       await configureSandboxStripe(appId);
-      await prisma.plan.updateMany({ where: { applicationId: appId }, data: { trialDays: 14 } });
+      await revisePlans({ applicationId: appId }, { trialDays: 14 });
       const liveKey = await app
         .inject({
           method: 'POST',

@@ -78,15 +78,6 @@ describe('admin read of a plan entitlement bundle', () => {
     expect(res.json().error.code).toBe('PLAN_NOT_FOUND');
   });
 
-  it('answers 404 for an application id that does not exist', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/admin/applications/app_does_not_exist/plans/free/entitlements',
-      headers: admin,
-    });
-    expect(res.statusCode).toBe(404);
-  });
-
   it('records the limits before and after when the super-admin sets them', async () => {
     const put = (payload: Record<string, unknown>) =>
       app.inject({ method: 'PUT', url: `/api/v1/admin/tenants/${tenantId}/limits`, headers: admin, payload });

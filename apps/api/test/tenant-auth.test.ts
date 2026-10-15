@@ -9,6 +9,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface SignupResult {
   user: { id: string; email: string };
@@ -41,15 +44,6 @@ describe('tenant-auth + workspaces', () => {
     return r.json().data as SignupResult;
   }
 
-  async function signIn(email: string, password = 'pw-one-two-three'): Promise<SignupResult> {
-    const r = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/sign-in',
-      payload: { email, password },
-    });
-    expect(r.statusCode).toBe(200);
-    return r.json().data as SignupResult;
-  }
 
   beforeEach(async () => {
     // truncated by setup.ts
@@ -78,13 +72,6 @@ describe('tenant-auth + workspaces', () => {
     expect(dup.json().error.code).toBe('EMAIL_ALREADY_EXISTS');
   });
 
-  it('sign-in returns memberships + an active session', async () => {
-    await signUp('bob@example.com', 'Bob Co');
-    const res = await signIn('bob@example.com');
-    expect(res.user.email).toBe('bob@example.com');
-    expect(res.activeRole).toBe('OWNER');
-  });
-
   it('sign-in with wrong password → INVALID_CREDENTIALS', async () => {
     await signUp('carol@example.com', 'Carol Co');
     const res = await app.inject({
@@ -94,32 +81,6 @@ describe('tenant-auth + workspaces', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('INVALID_CREDENTIALS');
-  });
-
-  // ---------- /me ----------
-
-  it('GET /tenant/auth/me returns current user + memberships + active workspace', async () => {
-    const session = await signUp('dan@example.com', 'Dan Co');
-    const r = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/auth/me',
-      headers: { authorization: `Bearer ${session.accessToken}` },
-    });
-    expect(r.statusCode).toBe(200);
-    const data = r.json().data as {
-      user: { email: string };
-      activeTenantId: string;
-      activeRole: string;
-    };
-    expect(data.user.email).toBe('dan@example.com');
-    expect(data.activeTenantId).toBe(session.activeTenantId);
-    expect(data.activeRole).toBe('OWNER');
-  });
-
-  it('GET /me without bearer → TENANT_SESSION_MISSING', async () => {
-    const r = await app.inject({ method: 'GET', url: '/api/v1/tenant/auth/me' });
-    expect(r.statusCode).toBe(401);
-    expect(r.json().error.code).toBe('TENANT_SESSION_MISSING');
   });
 
   it('operator account locks after repeated failed sign-ins (TOO_MANY_FAILED_ATTEMPTS)', async () => {

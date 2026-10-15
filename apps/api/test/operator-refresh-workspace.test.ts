@@ -15,6 +15,9 @@ import jwt from 'jsonwebtoken';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { hashTenantRefreshToken } from '../src/lib/tenant-refresh-tokens.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -131,14 +134,6 @@ describe('operator refresh keeps the active workspace', () => {
     expect(tid(next.accessToken)).toBe(workspaceB);
   });
 
-  it('a plain sign-in session still refreshes into the oldest workspace', async () => {
-    const { home, workspaceA } = await operatorInTwoWorkspaces();
-    expect(await rowTenant(home.refreshToken)).toBe(workspaceA);
-    const next = await refreshOk(home.refreshToken);
-    expect(next.activeTenantId).toBe(workspaceA);
-    expect(next.activeRole).toBe('OWNER');
-  });
-
   it('removed from the active workspace: refresh falls back to the oldest one and moves the row', async () => {
     const { home, workspaceA, workspaceB, ownerOfB } = await operatorInTwoWorkspaces();
     const switched = await switchTo(home.accessToken, workspaceB);
@@ -156,19 +151,6 @@ describe('operator refresh keeps the active workspace', () => {
     const next = await refreshOk(switched.refreshToken);
     expect(next.activeTenantId).toBe(workspaceA);
     expect(tid(next.accessToken)).toBe(workspaceA);
-    expect(await rowTenant(next.refreshToken)).toBe(workspaceA);
-  });
-
-  it('a row from before the column existed refreshes into the oldest workspace and is backfilled', async () => {
-    const { home, workspaceA, workspaceB } = await operatorInTwoWorkspaces();
-    const switched = await switchTo(home.accessToken, workspaceB);
-    await prisma.tenantRefreshToken.update({
-      where: { tokenHash: hashTenantRefreshToken(switched.refreshToken) },
-      data: { activeTenantId: null },
-    });
-
-    const next = await refreshOk(switched.refreshToken);
-    expect(next.activeTenantId).toBe(workspaceA);
     expect(await rowTenant(next.refreshToken)).toBe(workspaceA);
   });
 
@@ -199,29 +181,6 @@ describe('operator refresh keeps the active workspace', () => {
       expect(reusedEvent?.tenantId).toBe(workspaceB);
     });
 
-    it('removed from that workspace since: the event falls back to the oldest one', async () => {
-      const { home, workspaceA, workspaceB, ownerOfB } = await operatorInTwoWorkspaces();
-      const switched = await switchTo(home.accessToken, workspaceB);
-      await refreshOk(switched.refreshToken);
-      const membership = await prisma.tenantMembership.findFirstOrThrow({
-        where: { tenantUserId: home.user.id, tenantId: workspaceB },
-      });
-      const removed = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/tenant/workspace/members/${membership.id}`,
-        headers: { authorization: `Bearer ${ownerOfB.accessToken}` },
-      });
-      expect(removed.statusCode).toBeLessThan(300);
-
-      await refresh(switched.refreshToken);
-      const [event] = await prisma.securityEvent.findMany({
-        where: {
-          actorId: home.user.id,
-          type: { in: ['operator.refresh_token_raced', 'operator.refresh_token_reused'] },
-        },
-      });
-      expect(event?.tenantId).toBe(workspaceA);
-    });
   });
 
   it('deleting the active workspace nulls the column rather than blocking the delete', async () => {

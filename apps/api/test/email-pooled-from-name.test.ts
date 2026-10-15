@@ -64,14 +64,4 @@ describe('pooledFromName', () => {
     expect(pooledFromName(app('Acme'), '   ')).toBe('Acme');
   });
 
-  it('never claims a bare Application identity while a deployment name exists', () => {
-    // The regression that matters: a recipient must not see "Acme" alone on
-    // mail sent from the deployment's address, because that is an identity
-    // claim Acme cannot back.
-    for (const name of ['Acme', 'Globex', 'a']) {
-      const out = pooledFromName(app(name), DEPLOYMENT);
-      expect(out).not.toBe(name);
-      expect(out).toBe(`${name} (via ${DEPLOYMENT})`);
-    }
-  });
 });

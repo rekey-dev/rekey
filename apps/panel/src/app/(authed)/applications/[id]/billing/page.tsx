@@ -13,7 +13,6 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
 import { setBillingEnabled } from './actions';
-import { LegacyHashRedirect } from './legacy-hash-redirect';
 import { ReturnUrlNotice, UnbuyablePlansNotice } from './notices';
 import {
   BILLING_ERR,
@@ -69,7 +68,7 @@ export default async function BillingStatusPage({
   const live = active.filter((d) => d.status!.mode === 'live');
   const missingWebhook = active.filter((d) => !d.status!.webhookConfigured);
   const activePlans = plans.filter((p) => p.active).length;
-  const canWrite = hasScope(app.access?.scopes ?? null, 'billing:write');
+  const canWrite = hasScope(app.access.scopes, 'billing:write');
   const rekeyPageModes = checkout
     ? (['test', 'live'] as const).filter((m) =>
         (m === 'test' ? checkout.settings.checkoutModeTest : checkout.settings.checkoutModeLive) === 'EMBEDDED',
@@ -78,7 +77,6 @@ export default async function BillingStatusPage({
 
   return (
     <div className="space-y-5">
-      <LegacyHashRedirect hash="#checkout-page" to={`${billingBase(id)}/checkout`} />
       {saved === 'billing' && (
         <SavedBanner message={`Billing ${billingEnabled ? 'enabled' : 'disabled'} for this application.`} />
       )}

@@ -26,14 +26,14 @@ const stripe: ChargingProvider = {
   name: 'stripe',
   label: 'Stripe',
   supportedCurrencies: 'all-sellable',
-  capabilities: {},
+  capabilities: { checkout: true },
   status: status(['USD', 'EUR']),
 };
 const razorpay: ChargingProvider = {
   name: 'razorpay',
   label: 'Razorpay',
   supportedCurrencies: ['INR', 'USD'],
-  capabilities: {},
+  capabilities: { checkout: true },
   status: null,
 };
 const external: ChargingProvider = {

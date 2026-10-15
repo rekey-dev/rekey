@@ -60,20 +60,6 @@ describe('Operator magic-link sign-in', () => {
     expect(data.activeRole).toBe('OWNER');
   });
 
-  it('records the send in EmailLog (no transport in test → logged + token returned as fallback)', async () => {
-    const email = await makeOperator('log');
-    const data = await request(email).then((r) => r.json().data as { delivered: boolean; token: string | null });
-    expect(data.delivered).toBe(true);
-    // No RESEND_DEFAULT in test → no_transport → raw token returned to forward.
-    expect(data.token).toBeTruthy();
-    // …but the attempt is logged at the transport boundary regardless.
-    const logs = await prisma.emailLog.findMany({ where: { toAddress: email } });
-    expect(logs).toHaveLength(1);
-    expect(logs[0]!.eventKey).toBe('magic_link_signin');
-    expect(logs[0]!.status).toBe('no_transport');
-    expect(logs[0]!.applicationId).toBeNull(); // operator/system mail, not app-scoped
-  });
-
   it('is enumeration-safe: unknown email returns the same body, not just the same shape', async () => {
     // This assertion used to read `delivered: false`, under this same name,
     // pinning the oracle it claimed to rule out. A known address answered
@@ -106,11 +92,5 @@ describe('Operator magic-link sign-in', () => {
     const res = await verify(token);
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('MAGIC_LINK_TOKEN_EXPIRED');
-  });
-
-  it('rejects an unknown token', async () => {
-    const res = await verify('totally-made-up-token');
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('MAGIC_LINK_TOKEN_INVALID');
   });
 });

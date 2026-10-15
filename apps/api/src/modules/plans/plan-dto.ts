@@ -41,7 +41,7 @@ import {
 } from '@rekey.dev/shared-types';
 import type { CheckoutPrice } from '../billing/checkout-price.js';
 import { resolvePlanPrices, type PlanPriceContext } from '../billing/checkout-price-resolution.js';
-import { malformedPlanCurrency, withDefaultPrices, type PlanWithDefaultPrice } from './default-price.js';
+import { withDefaultPrices, type PlanWithDefaultPrice } from './default-price.js';
 import { planCheckoutReadiness, type PlanReadiness } from './plan-readiness.js';
 import { planPricesService, toPlanPriceDto, toPublicPlanPriceDto } from './plan-prices.service.js';
 import { NO_PRICE_USAGE, priceUsageFor, type PriceUsage } from './price-usage.js';
@@ -180,28 +180,6 @@ function publicPlan(
 }
 
 /**
- * A plan whose stored currency is not a currency cannot be given a price row,
- * so nothing can charge it. Said to the operator as a blocker; the public
- * catalogue reads it as not ready.
- */
-function withCurrencyProblem(plan: PlanWithDefaultPrice, readiness: PlanReadiness): PlanReadiness {
-  const malformed = malformedPlanCurrency(plan);
-  if (malformed === null) return readiness;
-  return {
-    ready: false,
-    blockers: [
-      {
-        provider: null,
-        code: 'PLAN_CURRENCY_INVALID',
-        message: `Plan "${plan.slug}" is stored with the currency "${malformed}", which is not a three-letter ISO 4217 code, so it has no price a buyer can be charged.`,
-        fix: `Set the plan's price again with PATCH /api/v1/tenant/applications/${plan.applicationId}/plans/${plan.slug} and a body such as {"price": {"currency": "USD", "amount": 2000}} (Panel → Application → Plans → Edit).`,
-      },
-      ...readiness.blockers,
-    ],
-  };
-}
-
-/**
  * One plan with its prices, for an operator route that returns a single plan.
  *
  * @example
@@ -254,7 +232,7 @@ export async function serializePlans(
     audience === 'operator' ? priceUsageFor(priceIdsOf(pricesByPlan)) : NO_USAGE,
   ]);
   return plans.map((plan) => {
-    const checkout = withCurrencyProblem(plan, readiness.get(plan.id) ?? READY);
+    const checkout = readiness.get(plan.id) ?? READY;
     const prices = defaultFirst(plan, pricesByPlan.get(plan.id) ?? []);
     const selection = selected.get(plan.id);
     const price = toResolvedPriceDto(selection?.price);

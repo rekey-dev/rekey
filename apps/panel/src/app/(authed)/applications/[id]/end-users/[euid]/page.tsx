@@ -80,7 +80,7 @@ export default async function EndUserOverviewPage({
   const done = typeof sp.support === 'string' ? sp.support : flash.done;
   const supportError = typeof sp.supportError === 'string' ? sp.supportError : flash.error;
   const application = await getApplication(id);
-  const scopes = application.access?.scopes ?? null;
+  const scopes = application.access.scopes;
   const canReadBilling = hasScope(scopes, 'billing:read');
   const [detail, billing, credits, devices, events, insights] = await Promise.all([
     getEndUserDetail(id, euid),

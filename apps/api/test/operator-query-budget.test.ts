@@ -14,6 +14,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { flushApiRequestLogs } from '../src/lib/request-log.js';
 import { countQueries } from './query-counter.js';
 import { __resetForTests } from '../src/lib/operator-auth-cache.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 

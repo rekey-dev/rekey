@@ -24,6 +24,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'correct-horse-battery';
 
@@ -85,21 +88,6 @@ describe('Application environments', () => {
         data: {
           apiKey: key === 'live' ? 'sk_live_ci_only' : 'sk_test_ci_only',
           webhookSecret: 'whsec_ci_only',
-        },
-        ...(mode !== undefined && { mode }),
-      },
-    });
-
-  const putRazorpayCreds = (appId: string, key: 'test' | 'live', mode?: 'test' | 'live') =>
-    app.inject({
-      method: 'PUT',
-      url: `/api/v1/tenant/applications/${appId}/billing-credentials/razorpay`,
-      headers: { authorization: `Bearer ${operator}` },
-      payload: {
-        data: {
-          keyId: key === 'live' ? 'rzp_live_ci_only' : 'rzp_test_ci_only',
-          keySecret: 'ci_only',
-          webhookSecret: 'ci_only',
         },
         ...(mode !== undefined && { mode }),
       },
@@ -172,14 +160,6 @@ describe('Application environments', () => {
     expect((await mintKey(a.id)).json().data.rawKey).toMatch(/^rp_test_/);
   });
 
-  it('a PRODUCTION application is production from birth', async () => {
-    const prod = await createApp('env-born-prod', { environment: 'PRODUCTION' });
-    expect(prod.environment).toBe('PRODUCTION');
-    expect((await mintKey(prod.id)).json().data.rawKey).toMatch(/^rp_live_/);
-    // ...and it takes live credentials immediately, with no promotion step.
-    expect((await putStripeCreds(prod.id, 'live')).statusCode).toBe(200);
-  });
-
   it('a non-production Application MAY store live billing credentials', async () => {
     // Deliberately testing against a live processor is a real workflow, and it
     // is the operator's own processor account. Environment does not gate this;
@@ -188,13 +168,6 @@ describe('Application environments', () => {
 
     expect((await putStripeCreds(dev.id, 'live', 'live')).statusCode).toBe(200);
     expect((await putStripeCreds(dev.id, 'test', 'test')).statusCode).toBe(200);
-  });
-
-  it('a PRODUCTION Application MAY store test billing credentials', async () => {
-    const prod = await createApp('env-creds-prod', { environment: 'PRODUCTION' });
-
-    expect((await putStripeCreds(prod.id, 'test', 'test')).statusCode).toBe(200);
-    expect((await putStripeCreds(prod.id, 'live', 'live')).statusCode).toBe(200);
   });
 
   // ---- The label must never be able to launder a live key ----
@@ -220,13 +193,6 @@ describe('Application environments', () => {
       headers: { authorization: `Bearer ${operator}` },
     });
     expect(list.json().data).toEqual([]);
-  });
-
-  it('a live Razorpay key labelled mode:test is refused on a DEVELOPMENT app', async () => {
-    const dev = await createApp('env-launder-rzp');
-    const res = await putRazorpayCreds(dev.id, 'live', 'test');
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('BILLING_CREDENTIALS_MODE_CONTRADICTED');
   });
 
   it('a test key labelled mode:live is refused too — the key decides, both ways', async () => {

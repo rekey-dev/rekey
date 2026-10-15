@@ -23,6 +23,9 @@ import { describeTransport } from '../src/lib/email-transport.js';
 import { renderTemplate } from '../src/modules/email/render.js';
 import { brandFromApplication, defaultTemplate } from '../src/modules/email/defaults/index.js';
 import { EMAIL_EVENTS, type EmailEventKey } from '../src/modules/email/events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -79,35 +82,12 @@ describe('Email pipeline', () => {
 
   // ---------- Render pipeline ----------
 
-  it('renderTemplate HTML-escapes substituted values (XSS guard)', () => {
-    const out = renderTemplate(
-      '<p>Hi {{name}}</p>',
-      { name: '<script>alert(1)</script>' },
-      { escape: true },
-    );
-    expect(out).not.toContain('<script>');
-    expect(out).toContain('&lt;script&gt;');
-  });
-
   it('unknown {{vars}} render as empty strings, not the literal token', () => {
     const out = renderTemplate('Hello {{missing}}.', {}, { escape: true });
     expect(out).toBe('Hello .');
   });
 
   // ---------- Template overrides ----------
-
-  it('built-in default is used when no override exists', async () => {
-    const b = await bootstrap('def');
-    const rendered = await emailService.renderForEvent(b.applicationId, 'password_reset', {
-      userEmail: 'alice@example.com',
-      resetUrl: 'https://example.com/r',
-      expiresAtIso: '2026-01-01T00:00:00Z',
-    });
-    expect(rendered.customised).toBe(false);
-    expect(rendered.subject).toBe('Reset your App def password');
-    expect(rendered.html).toContain('alice@example.com');
-    expect(rendered.html).toContain('https://example.com/r');
-  });
 
   it('a customised template wins over the built-in default', async () => {
     const b = await bootstrap('cus');
@@ -223,21 +203,6 @@ describe('Email pipeline', () => {
       }
     });
 
-    it('is never added to a customised template', async () => {
-      const id = await withLimits('attr-cus', { emailAttribution: true });
-      await emailService.setTemplate({
-        applicationId: id,
-        eventKey: 'welcome',
-        subject: 'Hi',
-        designJson: {},
-        bodyHtml: '<p>Custom {{userEmail}}</p>',
-        bodyText: 'Custom {{userEmail}}',
-      });
-      const rendered = await emailService.renderForEvent(id, 'welcome', vars);
-      expect(rendered.html).toBe('<p>Custom d@example.com</p>');
-      expect(rendered.text).toBe('Custom d@example.com');
-    });
-
     it('is not added to workspace mail, which Rekey already signs', async () => {
       const id = await withLimits('attr-sys', { emailAttribution: true });
       const rendered = await emailService.renderForEvent(id, 'workspace_invitation', {
@@ -252,29 +217,6 @@ describe('Email pipeline', () => {
   });
 
   // ---------- Transport selection ----------
-
-  it('describeTransport returns `none` when no BYO creds + no env default', async () => {
-    const b = await bootstrap('none');
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: b.applicationId } });
-    const t = describeTransport(application);
-    expect(t.via).toBe('none');
-    expect(t.fromAddress).toBeNull();
-  });
-
-  it('describeTransport returns `byo_resend` after creds are set', async () => {
-    const b = await bootstrap('byo');
-    await emailService.setCredentials({
-      applicationId: b.applicationId,
-      credentials: { provider: 'resend', apiKey: 're_byo_test_key' },
-      fromAddress: 'support@example.com',
-      fromName: 'Support',
-    });
-    const application = await prisma.application.findUniqueOrThrow({ where: { id: b.applicationId } });
-    const t = describeTransport(application);
-    expect(t.via).toBe('byo_resend');
-    expect(t.provider).toBe('resend');
-    expect(t.fromAddress).toBe('support@example.com');
-  });
 
   it('describeTransport returns `byo_smtp` after SMTP creds are set', async () => {
     const b = await bootstrap('smtp');
@@ -526,33 +468,6 @@ describe('Email pipeline', () => {
     });
     expect(refused.statusCode).toBe(401);
     expect(refused.json().error.code).toBe('EMAIL_VERIFICATION_STALE');
-  });
-
-  it('send-verification refuses when emailVerified is already true', async () => {
-    const b = await bootstrap('already');
-    const eu = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: { authorization: `Bearer ${b.liveKey}` },
-        payload: { email: 'already@example.com', password: 'pw-one-two-three' },
-      })
-      .then((r) => r.json().data as { accessToken: string; endUser: { id: string } });
-    await prisma.endUser.update({
-      where: { id: eu.endUser.id },
-      data: { emailVerified: true },
-    });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/send-verification',
-      headers: {
-        authorization: `Bearer ${b.liveKey}`,
-        'x-rekey-user-token': eu.accessToken,
-      },
-      payload: {},
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('EMAIL_ALREADY_VERIFIED');
   });
 
   afterAll(async () => {

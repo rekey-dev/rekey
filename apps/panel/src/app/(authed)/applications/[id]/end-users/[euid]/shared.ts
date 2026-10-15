@@ -40,10 +40,10 @@ export interface EndUserDetailDto {
     /** GDPR tombstone, set once the user has been erased. */
     erasedAt: string | null;
     erasedBy: string | null;
-    /** Operator ban. Absent from an older API, so read with `?? null`. */
-    bannedAt?: string | null;
-    bannedBy?: string | null;
-    banReason?: string | null;
+    /** Operator ban: when, by whom and why, each null for a user who is not banned. */
+    bannedAt: string | null;
+    bannedBy: string | null;
+    banReason: string | null;
     createdAt: string;
     updatedAt: string;
   };
@@ -57,8 +57,8 @@ export interface EndUserDetailDto {
   recentImpersonations: Array<{
     id: string;
     operatorUserId: string;
-    /** Resolved by the API at read time; absent from an older API. */
-    operatorEmail?: string | null;
+    /** Resolved by the API at read time; null when the operator's account is gone. */
+    operatorEmail: string | null;
     reason: string | null;
     startedAt: string;
     endedAt: string | null;

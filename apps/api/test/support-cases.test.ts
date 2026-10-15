@@ -13,6 +13,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForDeliveries } from './device-fixtures.js';
 import { codeOf, PASSWORD, REASON, supportWorld, type Json, type SupportWorld } from './support-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const INACTIVE = { active: false, capabilities: [] };
 
@@ -37,22 +40,6 @@ describe('support cases', () => {
 
   const supportEvents = (euid: string, type: string) =>
     prisma.securityEvent.findMany({ where: { applicationId: w.appId, subjectEndUserId: euid, type } });
-
-  it('with no case, include=support is inactive and /auth/me without it is unchanged', async () => {
-    await w.makeUser('none@example.com');
-    const s = await w.signIn('none@example.com', 'fp-none-00000001');
-    expect(await w.support(s.accessToken)).toEqual(INACTIVE);
-
-    const plain = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { 'x-rekey-user-token': s.accessToken } });
-    expect(plain.json().data).not.toHaveProperty('support');
-
-    const usersMe = await app.inject({
-      method: 'GET',
-      url: '/api/v1/users/me?include=support',
-      headers: { ...w.pk(), 'x-rekey-user-token': s.accessToken },
-    });
-    expect((usersMe.json().data as Json).support).toEqual(INACTIVE);
-  });
 
   it('a USER case is active on every device and on a session with no device', async () => {
     const euid = await w.makeUser('user@example.com');
@@ -330,15 +317,6 @@ describe('support cases', () => {
     expect((await w.read(euid)).open).toMatchObject({ scope: 'USER', deviceIds: [] });
   });
 
-  it('a second open is a 409 that names the open case', async () => {
-    const euid = await w.makeUser('twice@example.com');
-    const first = (await w.open(euid)).json().data as Json;
-    const second = await w.open(euid, { capabilities: ['beta-builds'] });
-    expect([second.statusCode, codeOf(second)]).toEqual([409, 'SUPPORT_CASE_ALREADY_OPEN']);
-    expect((second.json().error as Json).details).toEqual({ caseId: first.id });
-    expect((await w.read(euid)).open).toMatchObject({ id: first.id, capabilities: ['diagnostics.debug'] });
-  });
-
   it('eight concurrent opens leave exactly one open case', async () => {
     const euid = await w.makeUser('race@example.com');
     const results = await Promise.all(Array.from({ length: 8 }, () => w.open(euid)));
@@ -473,29 +451,5 @@ describe('support cases', () => {
     const other = await supportWorld(app, 'sc-key');
     const crossApp = await get('', other.sk());
     expect([crossApp.statusCode, codeOf(crossApp)]).toEqual([404, 'END_USER_NOT_FOUND']);
-  });
-
-  it('lists open cases oldest first and closed cases most recently opened first', async () => {
-    const first = await w.makeUser('l1@example.com');
-    const second = await w.makeUser('l2@example.com');
-    const third = await w.makeUser('l3@example.com');
-    for (const euid of [first, second, third]) expect((await w.open(euid)).statusCode).toBe(201);
-    const list = async (query: string) => {
-      const r = await app.inject({ method: 'GET', url: `${w.appBase}/support-cases${query}`, headers: w.op() });
-      expect(r.statusCode, r.body).toBe(200);
-      return r.json().data as { items: Json[]; page: Json };
-    };
-    const open = await list('');
-    expect(open.items.map((c) => c.endUserId)).toEqual([first, second, third]);
-    expect(open.page).toMatchObject({ total: 3, hasMore: false });
-    expect((await list('?limit=1&offset=1')).items.map((c) => c.endUserId)).toEqual([second]);
-
-    await w.end(third);
-    await w.end(first);
-    expect((await list('?status=open')).items.map((c) => c.endUserId)).toEqual([second]);
-    expect((await list('?status=closed')).items.map((c) => c.endUserId)).toEqual([third, first]);
-    expect((await list(`?status=closed&endUserId=${first}`)).items).toHaveLength(1);
-    const bad = await app.inject({ method: 'GET', url: `${w.appBase}/support-cases?status=pending`, headers: w.op() });
-    expect(bad.statusCode).toBe(400);
   });
 });

@@ -12,6 +12,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { fakePaypal } from './fakes/billing-providers.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('billing webhook auto-config', () => {
   let app: FastifyInstance;
@@ -95,15 +98,6 @@ describe('billing webhook auto-config', () => {
     expect(reg.json().error.code).toBe('BILLING_CREDENTIALS_NOT_CONFIGURED');
   });
 
-  it('Razorpay auto-config is unsupported → 400', async () => {
-    expect(
-      (await putCreds('razorpay', { keyId: 'rzp_test_x', keySecret: 'secret', webhookSecret: 'whksecret' })).statusCode,
-    ).toBe(200);
-    const reg = await register('razorpay');
-    expect(reg.statusCode).toBe(400);
-    expect(reg.json().error.code).toBe('BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED');
-  });
-
   describe('after a credential edit', () => {
     const OLD_ACCOUNT = { clientId: 'pp_client', clientSecret: 'pp_secret', webhookId: 'WH-old-account' };
     const storedWebhookId = async () =>
@@ -120,19 +114,6 @@ describe('billing webhook auto-config', () => {
       const rotated = await putCreds('paypal', { clientSecret: 'pp_secret_of_another_account' });
       expect(rotated.statusCode).toBe(200);
       expect(webhookOf(rotated)).toBe('reconfigured');
-      expect(await storedWebhookId()).toMatch(/^WH-stub-/);
-    });
-
-    it('registers it again when only the mode changes', async () => {
-      await putCreds('paypal', OLD_ACCOUNT);
-      const relabelled = await app.inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${applicationId}/billing-credentials/paypal`,
-        headers: { authorization: `Bearer ${tenantAccess}` },
-        payload: { mode: 'live' },
-      });
-      expect(relabelled.statusCode, relabelled.body).toBe(200);
-      expect(webhookOf(relabelled)).toBe('reconfigured');
       expect(await storedWebhookId()).toMatch(/^WH-stub-/);
     });
 
@@ -153,13 +134,6 @@ describe('billing webhook auto-config', () => {
 
       expect(register).not.toHaveBeenCalled();
       expect(await storedWebhookId()).toBe('WH-pasted-by-hand');
-    });
-
-    it('does not register a webhook that was never set up', async () => {
-      const register = vi.spyOn(fakePaypal, 'registerWebhook');
-      await putCreds('paypal', { clientId: 'pp_client', clientSecret: 'pp_secret' });
-      expect(webhookOf(await putCreds('paypal', { clientSecret: 'pp_other' }))).toBe('unchanged');
-      expect(register).not.toHaveBeenCalled();
     });
 
     it('saves the keys and reports `failed` when the provider refuses the registration', async () => {

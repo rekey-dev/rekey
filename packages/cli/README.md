@@ -1,7 +1,5 @@
 # `@rekey.dev/cli`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 `rekey` — command-line interface for **[Rekey](https://rekey.dev)** deployments. Designed for both human developers and AI agents.
 
 > **Which commands need which credential.** `init`, `apps` and
@@ -18,7 +16,7 @@
 
 > **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This CLI manages a deployment — tenants, applications, API keys — from your terminal or an agent.
 
-> **For AI agents**: start at [AGENTS.md](../../AGENTS.md).
+> **For AI agents**: start at [AGENTS.md](./AGENTS.md).
 
 ## Install
 
@@ -123,7 +121,7 @@ These are on the roadmap but **not shipped** — don't script against them yet:
 - `rekey api-keys list/create/revoke` — key lifecycle (today: panel, admin API, or the [MCP server's](https://www.npmjs.com/package/@rekey.dev/mcp) `mint_api_key`).
 - `rekey tunnel-webhooks` — the `stripe listen` equivalent for local webhook development.
 
-See [AGENTS.md](../../AGENTS.md) for the full agent-facing contract.
+See [AGENTS.md](./AGENTS.md) for the full agent-facing contract.
 
 ---
 

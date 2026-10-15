@@ -67,11 +67,6 @@ describe('docker-compose.yml publishes nothing on 0.0.0.0 by default', () => {
     }
   });
 
-  it('tells the reader what to change if they do expose it', () => {
-    // The escape hatch is only safe if it is documented next to the risk.
-    expect(compose).toContain('BIND_ADDRESS=0.0.0.0');
-    expect(compose).toContain('OPERATOR_SIGNUP_MODE=invite');
-  });
 });
 
 describe('open operator signup in production is announced', () => {

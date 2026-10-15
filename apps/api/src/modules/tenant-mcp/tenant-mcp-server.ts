@@ -12,6 +12,7 @@ import { type Scope } from '../../lib/operator-scopes.js';
 import { isWorkspaceAdmin } from '../../lib/access-context.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { RekeyError } from '../../lib/error.js';
+import { adminTierRequired } from './admin-tier.js';
 import { effectiveToolScopes, operatorTools, type OperatorTool, type OperatorToolContext } from './operator-tools.js';
 import { operatorWriteTools } from './operator-write-tools.js';
 import { operatorOrganizationTools } from './operator-organization-tools.js';
@@ -24,6 +25,7 @@ import { operatorPlanTools } from './operator-plan-tools.js';
 import { operatorCouponTools } from './operator-coupon-tools.js';
 import { operatorBillingReadTools } from './operator-billing-read-tools.js';
 import { operatorBillingWriteTools } from './operator-billing-write-tools.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'rekey-operator', version: '1.0.0' };
@@ -179,6 +181,15 @@ function error(id: string | number | null, code: number, message: string): objec
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
+/** A RekeyError keeps its code and fix, so an agent gets the same remediation a REST caller does. */
+function toolError(id: string | number | null, e: unknown): object {
+  const body =
+    e instanceof RekeyError
+      ? { error: e.message, code: e.code, ...(e.fix !== undefined && { fix: e.fix }) }
+      : { error: (e as Error).message };
+  return result(id, { content: [{ type: 'text', text: JSON.stringify(body) }], isError: true });
+}
+
 /**
  * Handle a single JSON-RPC message. Returns the response object, or `null` for
  * notifications (no `id`) which get no reply.
@@ -230,11 +241,9 @@ export async function handleOperatorMcpMessage(
       // scope (or with an insufficient role) gets an explicit, non-leaky
       // refusal rather than the tool silently running.
       if (!toolAllowed(ctx, tool)) {
+        if (tool.admin && !ctx.canAdmin) return toolError(id, adminTierRequired('This tool'));
         let reason: string;
-        if (tool.admin && !ctx.canAdmin) {
-          reason =
-            'This tool requires admin access (destructive/financial). Re-authorize the connector with the "mcp:operator:admin" scope.';
-        } else if (tool.write && !ctx.canWrite) {
+        if (tool.write && !ctx.canWrite) {
           reason =
             'This tool requires write access. Re-authorize the connector with the "mcp:operator:write" scope (or use a PAT with the "applications:write" scope).';
         } else if (TOOL_SCOPES[tool.name] !== undefined && !effectiveToolScopes(ctx).has(TOOL_SCOPES[tool.name]!)) {
@@ -279,19 +288,13 @@ export async function handleOperatorMcpMessage(
       });
 
       try {
+        if (tool.confirmedOperatorOnly !== undefined) {
+          await assertOperatorVerifiedForCredential(ctx.tenantUserId, tool.confirmedOperatorOnly);
+        }
         const data = await tool.handler(ctx, args);
         return result(id, { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
       } catch (e) {
-        // A RekeyError keeps its code and fix, so an agent gets the same
-        // remediation a REST caller does instead of the prose alone.
-        const body =
-          e instanceof RekeyError
-            ? { error: e.message, code: e.code, ...(e.fix !== undefined && { fix: e.fix }) }
-            : { error: (e as Error).message };
-        return result(id, {
-          content: [{ type: 'text', text: JSON.stringify(body) }],
-          isError: true,
-        });
+        return toolError(id, e);
       }
     }
 

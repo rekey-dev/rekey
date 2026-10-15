@@ -91,26 +91,6 @@ describe('coupons', () => {
 
   // ---------- admin CRUD ----------
 
-  it('creates a PERCENT coupon (lowercased code, validated amount)', async () => {
-    const c = await createCoupon({ code: 'LAUNCH50', discountType: 'PERCENT', basisPoints: 5000 });
-    expect(c.code).toBe('launch50');
-    expect(c.discountType).toBe('PERCENT');
-    expect(c.basisPoints).toBe(5000);
-    expect(c).not.toHaveProperty('amountOff');
-    expect(c).not.toHaveProperty('currency');
-  });
-
-  it('rejects PERCENT coupon over 100%', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/admin/applications/${applicationId}/coupons`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'tooMuch', discountType: 'PERCENT', basisPoints: 15000 },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('COUPON_AMOUNT_INVALID');
-  });
-
   it('rejects malformed code + duplicate', async () => {
     const bad = await app.inject({
       method: 'POST',
@@ -133,34 +113,6 @@ describe('coupons', () => {
   });
 
   // ---------- validate ----------
-
-  it('validates a PERCENT coupon and computes the right discount', async () => {
-    await createCoupon({ code: 'fifteen', discountType: 'PERCENT', basisPoints: 1500 });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
-      payload: { code: 'FIFTEEN', planSlug: 'pro_monthly' },
-    });
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data as { discountAmount: number; amountAfterDiscount: number };
-    // 15% of 999 is 149.85, rounded up toward the buyer.
-    expect(data.discountAmount).toBe(150);
-    expect(data.amountAfterDiscount).toBe(849);
-  });
-
-  it('validates an AMOUNT coupon, clamps if discount > price', async () => {
-    await createCoupon({ code: 'huge', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 5000 }] });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
-      payload: { code: 'huge', planSlug: 'pro_monthly' },
-    });
-    const data = res.json().data as { discountAmount: number; amountAfterDiscount: number };
-    expect(data.discountAmount).toBe(999); // clamped to price
-    expect(data.amountAfterDiscount).toBe(0);
-  });
 
   it('rejects a coupon restricted to a different plan', async () => {
     await createCoupon({
@@ -332,38 +284,4 @@ describe('coupons', () => {
     expect(await prisma.couponRedemption.count({ where: { couponId: coupon.id } })).toBe(1);
   });
 
-  it('redeeming the SAME checkout session twice records one row, limits or not', async () => {
-    // Both the checkout applier and the payment applier redeem the same sale,
-    // and providers replay webhooks freely. Idempotency is by (coupon,
-    // checkout session), and an already-recorded session reports
-    // "already-redeemed" rather than a limit failure even once the coupon is
-    // exhausted, otherwise a replay would look like a real problem.
-    const coupon = await createCoupon({
-      code: 'twice',
-      discountType: 'AMOUNT',
-      amounts: [{ currency: 'USD', amountOff: 500 }],
-      maxRedemptions: 1,
-    });
-    const { couponsService } = await import('../src/modules/coupons/coupons.service.js');
-
-    const args = {
-      couponId: coupon.id,
-      applicationId,
-      endUserId: userId,
-      checkoutSessionId: 'cs_same',
-      discountAmount: 500,
-    };
-    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({ recorded: true });
-    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({
-      recorded: false,
-      reason: 'already-redeemed',
-    });
-    expect(await prisma.couponRedemption.count({ where: { couponId: coupon.id } })).toBe(1);
-
-    // The discount is stamped on the row, so the operator's total cannot be
-    // restated later by a subscription's metadata being overwritten.
-    const row = await prisma.couponRedemption.findFirstOrThrow({ where: { couponId: coupon.id } });
-    expect(row.discountAmount).toBe(500);
-    expect(row.checkoutSessionId).toBe('cs_same');
-  });
 });

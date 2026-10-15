@@ -352,20 +352,43 @@ credentials.
 Hidden from `tools/list` unless the caller has write capability **and** the role,
 and re-checked on `tools/call`:
 
-`create_application`, `update_auth_config`, `create_plan`, `update_plan`,
+`create_application`, `create_plan`, `update_plan`,
 `set_plan_price`, `remove_plan_price`, `create_coupon`, `update_coupon`,
-`set_reporting_currency`, `set_plan_active`, `create_webhook_endpoint`, `update_webhook_endpoint`,
-`invite_member`, `revoke_invitation`, `change_member_role`, `remove_member`,
+`set_reporting_currency`, `set_plan_active`, `register_plan_with_provider`,
+`create_usage_meter`, `put_plan_entitlement`, `revoke_api_key`,
+`invite_member`, `revoke_invitation`, `remove_member`,
 `create_organization_role`, `update_organization_role`,
 `delete_organization_role`, `add_organization_member`,
-`set_organization_member_role`.
+`set_organization_member_role`, the three device tools and `close_support_case`.
+
+#### What write access cannot do
+
+Write access is for configuration that gives nobody authority. A write token
+(an OAuth grant without `mcp:operator:admin`, or any PAT) cannot make an
+OWNER or ADMIN, cannot change where sign-in links or events are sent, and
+cannot obtain a credential. Seven of the tools above are capped for that
+reason. Each still does MEMBER-level work with write access, and answers
+`OPERATOR_MCP_ADMIN_REQUIRED` for the rest:
+
+| Tool | With write access | Needs admin access |
+|---|---|---|
+| `invite_member` | invite a MEMBER | invite an OWNER or ADMIN |
+| `remove_member` | remove a MEMBER | remove an OWNER or ADMIN |
+| `create_organization_role` | a role with `baseRole: MEMBER` | a role with `baseRole` OWNER or ADMIN |
+| `update_organization_role` | edit a MEMBER-tier role | edit an OWNER- or ADMIN-tier role, or raise a role to those tiers |
+| `delete_organization_role` | delete a MEMBER-tier role, reassigning onto a MEMBER-tier role | delete an OWNER- or ADMIN-tier role, or reassign onto one |
+| `add_organization_member` | add with a MEMBER-tier role | add with an OWNER- or ADMIN-tier role, including a default role of that tier |
+| `set_organization_member_role` | move a MEMBER-tier member between MEMBER-tier roles | promote to, or change a member who holds, an OWNER- or ADMIN-tier role |
+
+A PAT never carries admin access, so over MCP a PAT can never do the right-hand
+column. Use an OAuth connection with `mcp:operator:admin`, or the panel.
 
 The three `*_organization_role` tools author an application's **organization**
 role vocabulary: the names a member can hold inside one organization, each
 mapped to an OWNER/ADMIN/MEMBER tier that Rekey enforces on. They refuse with
 `ORGANIZATIONS_NOT_ENABLED` when the application has organizations switched
-off, and the `fix` names `update_auth_config` so the agent can offer to turn
-the feature on rather than dead-ending.
+off, and the `fix` names `update_auth_config` (an admin tool) so the agent
+knows what turns the feature on.
 
 `add_organization_member` and `set_organization_member_role` assign from that
 vocabulary: they put an existing end-user into an organization with a role, or
@@ -382,7 +405,8 @@ so the rules match the panel's:
   assigned.
 - Both need `organizations:write`, write capability and at least the ADMIN
   workspace role, and refuse with `ORGANIZATIONS_NOT_ENABLED` while the
-  application has organizations switched off.
+  application has organizations switched off. Giving or changing an OWNER- or
+  ADMIN-tier role also needs admin access (see the table above).
 - An Application, organization or end-user outside the caller's workspace
   reads as not found.
 - Each refusal names the tool that repairs it in `fix` (for example
@@ -395,7 +419,7 @@ so the rules match the panel's:
   `app.organization_member_role_changed`) are recorded by the service, so the
   panel and REST routes log the same writes; MCP ones carry `via: operator_mcp`.
 
-Note the axis: `change_member_role` above is a **workspace** (operator) role.
+Note the axis: `change_member_role` (an admin tool, below) is a **workspace** (operator) role.
 The organization tools act on an end-user's role inside one organization. An
 org OWNER/ADMIN can still do the same from your app with their own end-user
 session, without an operator.
@@ -410,15 +434,24 @@ capabilities stop being reported. There is deliberately no tool to open or
 change a case: that is done in the panel or over REST. See
 [support-mode.md](support-mode.md).
 
-Two more are flagged `admin`, needing `mcp:operator:admin` rather than plain
-write: `configure_billing_provider` (the secret travels through the MCP client;
-its `provider` enum comes from the billing-provider registry, so it includes
-`external`, which takes only `webhookSecret`) and `cancel_subscription`
-(irreversible).
+### Admin tools
 
-A third admin tool, `create_refund`, refunds a recorded payment in full or in
-part. It pays money out and cannot be undone. Repeating the same call is one
-refund.
+These need `mcp:operator:admin` rather than plain write. They are hidden from
+`tools/list` without it, and a call answers `OPERATOR_MCP_ADMIN_REQUIRED`:
+
+| Tool | Why it is admin |
+|---|---|
+| `update_auth_config` | `appUrl` and `redirectUrls` decide where magic-link and password-reset links land, and the tool can switch off MFA and email verification and open sign-up. |
+| `create_webhook_endpoint`, `update_webhook_endpoint` | The URL receives every subscribed event with its end-user data, and creating one returns the signing secret. |
+| `change_member_role` | Every role change gives or takes OWNER or ADMIN authority. |
+| `mint_api_key` | Returns a raw secret key. |
+| `configure_billing_provider` | The secret travels through the MCP client. Its `provider` enum comes from the billing-provider registry, so it includes `external`, which takes only `webhookSecret`. |
+| `cancel_subscription` | Irreversible. |
+| `create_refund` | Refunds a recorded payment in full or in part. It pays money out and cannot be undone. Repeating the same call is one refund. |
+
+`update_auth_config`, the two webhook tools and `change_member_role` were write
+tools before 2.2.0. An agent that used them with a write-only connection must
+reconnect and approve admin access; a PAT can no longer call them over MCP.
 
 Every amount a billing tool takes or returns is an integer in the minor unit
 of its currency. `create_coupon` and `update_coupon` take `basisPoints` for a

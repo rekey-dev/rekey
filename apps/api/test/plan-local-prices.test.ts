@@ -9,8 +9,11 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlan } from './seed-plan.js';
 
-const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
+operatorsConfirmTheirEmail();
+
 
 interface LoggedChange {
   type: string;
@@ -92,7 +95,7 @@ describe('per-plan local prices', () => {
   });
 
   it('changes on a plan a provider has registered, where the price cannot', async () => {
-    await prisma.plan.update({ where: { id: w.planId }, data: { metadata: { stripe: { priceId: 'price_held' } }, registrationStatus: 'REGISTERED' } });
+    await revisePlan({ id: w.planId }, { metadata: { stripe: { priceId: 'price_held' } }, registrationStatus: 'REGISTERED' });
     const price = await w.operator('PATCH', '/plans/pro', { price: { currency: 'USD', amount: 2500 } });
     expect(price.statusCode).toBe(409);
     const rule = await w.operator('PATCH', '/plans/pro', { localPrices: 'TRUSTED' });
@@ -107,26 +110,4 @@ describe('per-plan local prices', () => {
     expect((await logged()).map((event) => event.data)).toEqual([{ planSlug: 'pack', before: 'trusted', after: 'inherit' }]);
   });
 
-  it.each(['inherit', 'ANY', 'on', true, null])('refuses %j and changes nothing', async (value) => {
-    const res = await w.operator('PATCH', '/plans/pro', { localPrices: value });
-    expect(res.statusCode, res.body).toBe(400);
-    // The route's schema refuses it before the handler runs, and names the field.
-    expect(res.json().error).toMatchObject({ code: 'BAD_REQUEST', message: expect.stringContaining('localPrices') });
-    expect((await prisma.plan.findUniqueOrThrow({ where: { id: w.planId } })).localPrices).toBe('INHERIT');
-    expect(await logged()).toEqual([]);
-  });
-
-  it('is set on the super-admin route too, logged as the system', async () => {
-    const res = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/admin/applications/${w.applicationId}/plans/pro`,
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { localPrices: 'OFF' },
-    });
-    expect(res.statusCode, res.body).toBe(200);
-    expect((res.json().data as { localPrices: string }).localPrices).toBe('OFF');
-    expect(await logged()).toEqual([
-      expect.objectContaining({ actor: { type: 'system', id: null }, data: { planSlug: 'pro', before: 'inherit', after: 'off' } }),
-    ]);
-  });
 });

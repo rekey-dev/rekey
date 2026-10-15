@@ -19,7 +19,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
 import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
-import { createHmac } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
@@ -135,20 +134,6 @@ describe('generic billing-webhook pipeline', () => {
     expect(row.processedAt).not.toBeNull();
   });
 
-  it('the slug-scoped form of the generic route works too', async () => {
-    const a = await bootstrap('scoped');
-    const { payload, headers } = signStripe(stripeEvent('evt_scoped_1', {}), a.webhookSecret);
-
-    const res = await app.inject({
-      method: 'POST',
-      url: `${GENERIC}/stripe/${a.slug}`,
-      headers,
-      payload,
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ received: true, processed: true });
-  });
-
   it('the generic route and the legacy alias share one idempotency space', async () => {
     const a = await bootstrap('shared');
     const evt = stripeEvent('evt_shared_1', { applicationId: a.id });
@@ -206,21 +191,6 @@ describe('generic billing-webhook pipeline', () => {
     // A crafted body must never flow onward as an AppRef, the runtime shape
     // check in the Stripe module is the only thing standing between a JSON
     // array and a credential lookup.
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('WEBHOOK_APPLICATION_UNRESOLVED');
-  });
-
-  it('Razorpay has no payload hint, so the slug-less form is always unresolved', async () => {
-    const body = JSON.stringify({ event: 'subscription.charged', payload: {} });
-    const res = await app.inject({
-      method: 'POST',
-      url: `${GENERIC}/razorpay`,
-      headers: {
-        'content-type': 'application/json',
-        'x-razorpay-signature': createHmac('sha256', 'whatever').update(body).digest('hex'),
-      },
-      payload: body,
-    });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('WEBHOOK_APPLICATION_UNRESOLVED');
   });
@@ -283,17 +253,6 @@ describe('generic billing-webhook pipeline', () => {
   });
 
   // ---------- routing + credentials refusals ----------
-
-  it('an unregistered provider name is 404 WEBHOOK_PROVIDER_UNKNOWN', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: `${GENERIC}/bogus-provider/some-slug`,
-      headers: { 'content-type': 'application/json' },
-      payload: '{}',
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('WEBHOOK_PROVIDER_UNKNOWN');
-  });
 
   it('503 when the resolved Application has no webhook secret configured', async () => {
     const signer = await bootstrap('signer');

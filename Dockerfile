@@ -76,14 +76,11 @@ RUN pnpm --filter @rekey.dev/api build
 # app's explicit unconfigured state.
 ARG NEXT_PUBLIC_API_URL=
 ARG NEXT_PUBLIC_APP_URL=
-# No defaults for these two, deliberately. NEXT_PUBLIC_GA_MEASUREMENT_ID must
-# never default to Rekey's own property (a self-hosted panel would ship its
-# operators' behaviour to us), and NEXT_PUBLIC_PORTAL_URL must never default to
-# Rekey's hosted portal (a self-hoster would be shown someone else's origin as
-# the place to send THEIR customers). Pass both as build args when you build
-# the panel image.
+# No default, deliberately. NEXT_PUBLIC_GA_MEASUREMENT_ID must never default to
+# Rekey's own property (a self-hosted panel would ship its operators'
+# behaviour to us). Pass it as a build arg when you build the panel
+# image.
 ARG NEXT_PUBLIC_GA_MEASUREMENT_ID=
-ARG NEXT_PUBLIC_PORTAL_URL=
 ARG NEXT_PUBLIC_CHATWOOT_TOKEN=
 ARG NEXT_PUBLIC_AHREFS_KEY=
 # Names the "Continue with …" button when this deployment signs operators in
@@ -92,7 +89,6 @@ ARG NEXT_PUBLIC_AHREFS_KEY=
 ARG NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL=
 RUN NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     NEXT_PUBLIC_GA_MEASUREMENT_ID=$NEXT_PUBLIC_GA_MEASUREMENT_ID \
-    NEXT_PUBLIC_PORTAL_URL=$NEXT_PUBLIC_PORTAL_URL \
     NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL=$NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL \
     pnpm --filter @rekey.dev/panel build
 RUN pnpm --filter @rekey.dev/portal build

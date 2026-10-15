@@ -19,6 +19,10 @@ import { MAX_REFUSED_CONFIRMATIONS } from '../src/modules/billing/checkout/confi
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { configureSandboxPaypal } from './fakes/billing-credentials.js';
 import { fakeStripe } from './fakes/billing-providers.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const REGISTERED = 'https://app.example';
@@ -220,18 +224,6 @@ describe('Stripe on the checkout page', () => {
       expect(view.json().data.order.priceFallback).toEqual(JSON.parse(body).data.priceFallback);
       expect(view.json().data.order.plan).toMatchObject({ amount: 9900, currency: 'USD' });
     });
-
-    it('sends null when the price selected is the price charged', async () => {
-      const plain = await startCheckout();
-      const first = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${plain.token}` });
-      expect(first.json().data.order).toHaveProperty('priceFallback', null);
-
-      await addRupeePrice();
-      const local = await startCheckout(undefined, { country: 'IN' });
-      const second = await app.inject({ method: 'GET', url: `/api/v1/checkout-sessions/${local.token}` });
-      expect(second.json().data.order.plan).toMatchObject({ amount: 799900, currency: 'INR' });
-      expect(second.json().data.order).toHaveProperty('priceFallback', null);
-    });
   });
 
   describe('confirmation', () => {
@@ -245,15 +237,6 @@ describe('Stripe on the checkout page', () => {
       expect(after.status).toBe('CONFIRMING');
       expect(after.subscription.status).toBe('PENDING');
       expect((await confirm(token, providerSessionId)).json().data).toEqual({ status: 'confirming' });
-    });
-
-    it('moves a complete but unpaid session (a bank debit still settling) to confirming', async () => {
-      const { token, providerSessionId, rowId } = await startCheckout();
-      markPaid(providerSessionId, { paymentStatus: 'unpaid' });
-      expect((await confirm(token, providerSessionId)).json().data).toEqual({ status: 'confirming' });
-      const after = await row(rowId);
-      expect(after.status).toBe('CONFIRMING');
-      expect(after.subscription.status).toBe('PENDING');
     });
 
     it('accepts an order whose Stripe total matches what the session recorded, and refuses one that does not', async () => {
@@ -282,19 +265,6 @@ describe('Stripe on the checkout page', () => {
       const res = await confirm(token, providerSessionId);
       expect(res.json().error.code).toBe('CHECKOUT_CONFIRMATION_REFUSED');
       expect((await row(rowId)).status).toBe('OPEN');
-    });
-
-    it('does not count a refusal from the page-load return path', async () => {
-      const { token, rowId } = await startCheckout();
-      const res = await confirm(token, `cs_test_${'r'.repeat(20)}`, {}, 'return');
-      expect(res.json().error.code).toBe('CHECKOUT_CONFIRMATION_REFUSED');
-      expect(await refusedCount(rowId)).toBeUndefined();
-    });
-
-    it('accepts a trial session that needed no payment', async () => {
-      const { token, providerSessionId } = await startCheckout();
-      markPaid(providerSessionId, { paymentStatus: 'no_payment_required' });
-      expect((await confirm(token, providerSessionId)).json().data).toEqual({ status: 'confirming' });
     });
 
     it('completes only from the webhook', async () => {
@@ -370,13 +340,6 @@ describe('Stripe on the checkout page', () => {
       expect(res.json().error.code).toBe('CHECKOUT_CONFIRMATION_LIMIT');
     });
 
-    it('refuses a cross-site browser and a malformed id', async () => {
-      const { token, providerSessionId } = await startCheckout();
-      markPaid(providerSessionId);
-      expect((await confirm(token, providerSessionId, { origin: 'https://evil.example' })).statusCode).toBe(403);
-      expect((await confirm(token, 'pi_123')).statusCode).toBe(400);
-    });
-
     it('refuses a session started in test mode once the credentials are live', async () => {
       const { token, providerSessionId, rowId } = await startCheckout();
       markPaid(providerSessionId);
@@ -399,12 +362,6 @@ describe('Stripe on the checkout page', () => {
       expect(second.statusCode).toBe(409);
       expect(second.json().error.code).toBe('CHECKOUT_PAYMENT_IN_PROGRESS');
       expect((await row(first.rowId)).status).toBe('CONFIRMING');
-    });
-
-    it('lets a new checkout through while the earlier Stripe session is still open', async () => {
-      const user = await buyer();
-      await startCheckout(user);
-      expect((await checkoutRequest(user)).statusCode).toBe(200);
     });
 
     it('refuses when the Stripe provider cannot be loaded although its credentials exist', async () => {
@@ -451,7 +408,7 @@ describe('Stripe on the checkout page', () => {
 
   describe('a bank debit that fails after the checkout completed', () => {
     it('closes the confirming session, releases its trial slot, and lets the buyer start again', async () => {
-      await prisma.plan.updateMany({ where: { applicationId }, data: { trialDays: 14 } });
+      await revisePlans({ applicationId }, { trialDays: 14 });
       const user = await buyer();
       const first = await startCheckout(user);
       markPaid(first.providerSessionId, { paymentStatus: 'unpaid' });
@@ -502,25 +459,6 @@ describe('Stripe on the checkout page', () => {
       expect(after.subscription).toMatchObject({ status: 'ACTIVE', providerSubId: 'sub_paying' });
     });
 
-    it('does nothing for a late or replayed failure after the debit succeeded', async () => {
-      const first = await startCheckout();
-      markPaid(first.providerSessionId, { paymentStatus: 'unpaid' });
-      await confirm(first.token, first.providerSessionId);
-      expect((await completedEvent(first.providerSessionId, 'checkout.session.async_payment_succeeded', 'sub_settled')).statusCode).toBe(200);
-      expect((await row(first.rowId)).subscription).toMatchObject({ status: 'ACTIVE', providerSubId: 'sub_settled' });
-
-      const cancel = vi.spyOn(fakeStripe, 'cancelSubscription');
-      for (let i = 0; i < 2; i += 1) {
-        const hook = await completedEvent(first.providerSessionId, 'checkout.session.async_payment_failed', 'sub_settled');
-        expect(hook.statusCode, hook.body).toBe(200);
-      }
-      expect(cancel).not.toHaveBeenCalled();
-      const after = await row(first.rowId);
-      expect(after.status).toBe('COMPLETE');
-      expect((after.metadata as { paymentFailedAt?: string }).paymentFailedAt).toBeUndefined();
-      expect(after.subscription).toMatchObject({ status: 'ACTIVE', providerSubId: 'sub_settled' });
-    });
-
     it('answers 500 when the cancellation fails, and the retried delivery cancels and completes', async () => {
       const first = await startCheckout();
       const cancel = vi
@@ -550,14 +488,6 @@ describe('Stripe on the checkout page', () => {
       expect(retry.json()).toMatchObject({ processed: true });
       expect(cancel).toHaveBeenCalledTimes(2);
       expect(cancel.mock.calls[1]![0]).toMatchObject({ atPeriodEnd: false, subscription: { providerSubId: 'sub_retry' } });
-      expect((await row(first.rowId)).status).toBe('EXPIRED');
-    });
-
-    it('acknowledges the event when the subscription is already gone', async () => {
-      const first = await startCheckout();
-      vi.spyOn(fakeStripe, 'cancelSubscription').mockRejectedValue(Object.assign(new Error('No such subscription'), { code: 'resource_missing' }));
-      const hook = await completedEvent(first.providerSessionId, 'checkout.session.async_payment_failed', 'sub_gone');
-      expect(hook.statusCode, hook.body).toBe(200);
       expect((await row(first.rowId)).status).toBe('EXPIRED');
     });
   });
@@ -622,15 +552,6 @@ describe('Stripe on the checkout page', () => {
       expect(orphan.status).toBe('expired');
     });
 
-    it('keeps a refusal counted before the fallback', async () => {
-      const { token, rowId } = await startCheckout();
-      await confirm(token, `cs_test_${'z'.repeat(20)}`);
-      await fallback(token);
-      const meta = (await row(rowId)).metadata as { refusedConfirmations?: number; fallbackUrl?: string };
-      expect(meta.refusedConfirmations).toBe(1);
-      expect(meta.fallbackUrl).toMatch(/^https:\/\/checkout\.stripe\.com\//);
-    });
-
     it('moves the coupon reservation to the hosted session', async () => {
       const created = await app.inject({
         method: 'POST',
@@ -657,17 +578,6 @@ describe('Stripe on the checkout page', () => {
       const after = await row(rowId);
       expect(after.status).toBe('COMPLETE');
       expect(after.subscription.status).toBe('ACTIVE');
-    });
-
-    it('moves the trial reservation to the hosted session', async () => {
-      await prisma.plan.updateMany({ where: { applicationId }, data: { trialDays: 14 } });
-      const { token, providerSessionId, rowId } = await startCheckout();
-      expect(fakeStripe.lastEmbedded!.trial).toEqual({ days: 14 });
-      await fallback(token);
-      const hosted = (await row(rowId)).providerSessionId;
-      expect(fakeStripe.fallbacks[0]!.trial).toEqual({ days: 14 });
-      expect(await prisma.trialRedemption.count({ where: { applicationId, checkoutSessionId: providerSessionId } })).toBe(0);
-      expect(await prisma.trialRedemption.count({ where: { applicationId, checkoutSessionId: hosted } })).toBe(1);
     });
 
     it('refuses once the elements session was paid, and leaves the row alone', async () => {

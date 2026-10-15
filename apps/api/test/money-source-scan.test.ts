@@ -1,15 +1,18 @@
 /**
- * Two rules about where money is read and written, held by type-checking
+ * Three rules about where money is read and written, held by type-checking
  * `apps/api/src`:
  *
  *   - a subscription's price columns are written only by
  *     `billing/subscription-snapshot.ts`;
- *   - a plan's price columns are read and written only by
- *     `plans/default-price.ts`.
+ *   - a plan row is written only by `plans/default-price.ts`, which keeps
+ *     the default price row and `isFree` with it;
+ *   - no raw SQL names a money column the model dropped.
  *
- * No database constraint holds the first, and the second is what lets the
- * plan columns be dropped. The rules read types, so a column that arrives by
- * shorthand, by spread or in a variable is seen like one written out.
+ * The database holds that a subscription's three price columns are set
+ * together; the first rule is what keeps them agreeing with each other. A
+ * typed read of a dropped column no longer compiles, so only SQL strings need
+ * the third. The rules read types, so a column that arrives by shorthand, by
+ * spread or in a variable is seen like one written out.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -17,12 +20,13 @@ import { sourceProgram } from './source-scan/program.js';
 import {
   PLAN_PRICE_OWNER,
   SUBSCRIPTION_PRICE_WRITER,
-  planPriceColumnUses,
+  droppedColumnsInSql,
+  planWritesOutsideOwner,
   subscriptionPriceWrites,
 } from './source-scan/money-rules.js';
 
 const HEADER = `
-import { Prisma, type Plan } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 `;
 
@@ -38,8 +42,12 @@ describe('the source tree', { timeout: 120_000 }, () => {
     expect(subscriptionPriceWrites(sourceProgram())).toEqual([]);
   });
 
-  it('reads and writes a plan price column in one file', () => {
-    expect(planPriceColumnUses(sourceProgram())).toEqual([]);
+  it('writes a plan row in one file', () => {
+    expect(planWritesOutsideOwner(sourceProgram())).toEqual([]);
+  });
+
+  it('names no dropped money column in raw SQL', () => {
+    expect(droppedColumnsInSql(sourceProgram())).toEqual([]);
   });
 
   it('is really being read: both owners exist and the tree is the size it should be', () => {
@@ -94,31 +102,45 @@ describe('the subscription price rule catches', { timeout: 120_000 }, () => {
   });
 });
 
-describe('the plan price rule catches', { timeout: 120_000 }, () => {
+describe('the plan write rule catches', { timeout: 120_000 }, () => {
   const cases: Array<[string, string]> = [
-    ['a property read', `export const f = (plan: Plan) => plan.amount;`],
-    ['a read through a relation', `export const f = async (id: string) => (await prisma.subscription.findUniqueOrThrow({ where: { id }, include: { plan: true } })).plan.currency;`],
-    ['destructuring', `export const f = (plan: Plan) => { const { pricePerUnitCents } = plan; return pricePerUnitCents; };`],
-    ['a select on the plan', `export const f = () => prisma.plan.findMany({ select: { id: true, amount: true } });`],
-    ['a select under another model', `export const f = () => prisma.subscription.findMany({ include: { plan: { select: { currency: true } } } });`],
-    ['a filter on the column', `export const f = () => prisma.plan.findMany({ where: { amount: { gt: 0 } } });`],
-    ['an ordering on the column', `export const f = () => prisma.plan.findMany({ orderBy: { amount: 'asc' } });`],
-    ['a plan write', `export const f = (id: string) => prisma.plan.update({ where: { id }, data: { active: false } });`],
-    [
-      'raw SQL',
-      'export const f = () => prisma.$queryRaw(Prisma.sql`SELECT p."amount" FROM "subscriptions" s JOIN "plans" AS p ON p."id" = s."plan_id"`);',
-    ],
+    ['an update', `export const f = (id: string) => prisma.plan.update({ where: { id }, data: { active: false } });`],
+    ['a create', `export const f = (applicationId: string) => prisma.plan.create({ data: { applicationId, slug: 'pro', name: 'Pro' } });`],
+    ['an upsert', `export const f = (id: string, applicationId: string) => prisma.plan.upsert({ where: { id }, create: { applicationId, slug: 'pro', name: 'Pro' }, update: {} });`],
+    ['raw SQL', 'export const f = (id: string) => prisma.$executeRaw`UPDATE "plans" SET "is_free" = true WHERE "id" = ${id}`;'],
   ];
   const harmless = `
     export const a = () => prisma.plan.findMany({ where: { active: true }, include: { defaultPrice: true }, orderBy: { defaultPrice: { amount: 'asc' } } });
-    export const b = async (id: string) => (await prisma.plan.findUniqueOrThrow({ where: { id }, include: { defaultPrice: true } })).defaultPrice?.amount;
-    export const c = () => prisma.subscription.findMany({ include: { plan: { select: { slug: true, defaultPrice: { select: { amount: true, currency: true } } } } } });
+    export const b = (id: string) => prisma.plan.delete({ where: { id } });
+    export const c = () => prisma.$queryRaw\`SELECT "id" FROM "plans" WHERE "is_free"\`;
   `;
 
-  it('each of them, and leaves the default price row and a plan read that names no price column alone', () => {
+  it('each of them, and leaves a plan read and a delete alone', () => {
     const all = [...cases, ['harmless', harmless] as const];
     const { program, fileOf } = plantAll(all);
-    const findings = planPriceColumnUses(program);
+    const findings = planWritesOutsideOwner(program);
+    const caught = all.map(([label], index) => [label, findings.some((line) => line.startsWith(fileOf(index)))]);
+    expect(caught).toEqual([...cases.map(([label]) => [label, true]), ['harmless', false]]);
+  });
+});
+
+describe('the dropped column rule catches', { timeout: 120_000 }, () => {
+  const cases: Array<[string, string]> = [
+    ['a plan column through an alias', 'export const f = () => prisma.$queryRaw(Prisma.sql`SELECT p."amount" FROM "subscriptions" s JOIN "plans" AS p ON p."id" = s."plan_id"`);'],
+    ['a plan column in a filter', 'export const f = () => prisma.$queryRaw`SELECT "id" FROM "plans" WHERE "price_per_unit_cents" IS NULL`;'],
+    ['a coupon column through an alias', 'export const f = () => prisma.$queryRaw`SELECT c."amount_off" FROM "coupons" c`;'],
+    ['a coupon column in an update', 'export const f = (id: string) => prisma.$executeRaw`UPDATE "coupons" SET "currency" = NULL WHERE "id" = ${id}`;'],
+  ];
+  const harmless = `
+    export const a = () => prisma.$queryRaw\`SELECT dp."amount", dp."currency" FROM "plans" AS p JOIN "plan_prices" AS dp ON dp."id" = p."default_price_id"\`;
+    export const b = () => prisma.$queryRaw\`SELECT ca."amount_off", ca."currency" FROM "coupons" AS c JOIN "coupon_amounts" AS ca ON ca."coupon_id" = c."id"\`;
+    export const c = () => prisma.$queryRaw\`SELECT "currency", "unit_amount" FROM "subscriptions"\`;
+  `;
+
+  it('each of them, and leaves the price row and the coupon amount row alone', () => {
+    const all = [...cases, ['harmless', harmless] as const];
+    const { program, fileOf } = plantAll(all);
+    const findings = droppedColumnsInSql(program);
     const caught = all.map(([label], index) => [label, findings.some((line) => line.startsWith(fileOf(index)))]);
     expect(caught).toEqual([...cases.map(([label]) => [label, true]), ['harmless', false]]);
   });

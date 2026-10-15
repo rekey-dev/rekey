@@ -19,6 +19,9 @@ import {
   setDeliveryScheduler,
   webhookService,
 } from '../src/modules/webhooks/webhook.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -350,7 +353,7 @@ describe('Outbound webhooks', () => {
     const b = await bootstrap('poller');
     const sink = await makeSink();
     try {
-      const { endpoint } = await webhookService.createEndpoint({
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: b.applicationId,
         url: sink.url,
         events: ['user.created'],
@@ -393,12 +396,12 @@ describe('Outbound webhooks', () => {
     const b = await bootstrap('opretry');
     const sink = await makeSink();
     try {
-      const { endpoint } = await webhookService.createEndpoint({
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: b.applicationId,
         url: sink.url,
         events: ['user.created'],
       });
-      const { endpoint: other } = await webhookService.createEndpoint({
+      const { endpoint: other } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: b.applicationId,
         url: 'https://example.invalid/hook',
         events: ['user.created'],

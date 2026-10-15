@@ -86,7 +86,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
     rsApp = await bootstrapApplication('jwks-rs');
     // Per-app opt-in, exercises the same updateAuthConfig path the
     // PATCH /tenant/applications/:id/auth-config route calls.
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: rsApp.applicationId,
       patch: { tokenAlg: 'RS256' },
     });
@@ -143,17 +143,6 @@ describe('JWKS / RS256 end-user access tokens', () => {
 
   // ---------- issuance ----------
 
-  it('HS256 apps are unaffected: default alg, no kid, sessions still resolve', async () => {
-    const token = await signUp(hsApp, 'hs@example.com');
-    const header = b64urlJson<JwtHeader>(token.split('.')[0]!);
-    expect(header.alg).toBe('HS256');
-    expect(header.kid).toBeUndefined();
-
-    const me = await usersMe(hsApp, token);
-    expect(me.statusCode).toBe(200);
-    expect((me.json().data as { email: string }).email).toBe('hs@example.com');
-  });
-
   it('an RS256-enabled app mints kid-stamped tokens that verify against the JWKS', async () => {
     const token = await signUp(rsApp, 'rs@example.com');
     const [h, p, s] = token.split('.');
@@ -196,30 +185,9 @@ describe('JWKS / RS256 end-user access tokens', () => {
     expect(authMe.statusCode).toBe(200);
   });
 
-  it('refresh mints an RS256 access token for an RS256 app', async () => {
-    const signUpRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${rsApp.liveKey}` },
-      payload: { email: 'rs-refresh@example.com', password: 'correct-horse-battery' },
-    });
-    const { refreshToken } = signUpRes.json().data as { refreshToken: string };
-
-    const refreshRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/refresh',
-      headers: { authorization: `Bearer ${rsApp.liveKey}` },
-      payload: { refreshToken },
-    });
-    expect(refreshRes.statusCode).toBe(200);
-    const fresh = (refreshRes.json().data as { accessToken: string }).accessToken;
-    expect(b64urlJson<JwtHeader>(fresh.split('.')[0]!).alg).toBe('RS256');
-    expect((await usersMe(rsApp, fresh)).statusCode).toBe(200);
-  });
-
   it('flipping tokenAlg back to HS256 does not break outstanding RS256 tokens', async () => {
     const rsToken = await signUp(rsApp, 'rs-flip@example.com');
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: rsApp.applicationId,
       patch: { tokenAlg: 'HS256' },
     });

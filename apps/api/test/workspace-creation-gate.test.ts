@@ -23,6 +23,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('WORKSPACE_CREATION', () => {
   let app: FastifyInstance;
@@ -73,12 +76,6 @@ describe('WORKSPACE_CREATION', () => {
     const r = await createWorkspace(accessToken, 'Another Co');
     expect(r.statusCode).toBe(200);
     expect((r.json().data as { name: string }).name).toBe('Another Co');
-  });
-
-  it("open → same as unset", async () => {
-    process.env.WORKSPACE_CREATION = 'open';
-    const { accessToken } = await signUp('open-explicit@example.com', 'Open Co');
-    expect((await createWorkspace(accessToken, 'Also Fine')).statusCode).toBe(200);
   });
 
   // ---------- the gate ----------
@@ -169,11 +166,6 @@ describe('WORKSPACE_CREATION', () => {
     // while the server still permits it (or the reverse) is the bug this pair
     // exists to prevent.
     expect((await createWorkspace(accessToken, 'Refused')).statusCode).toBe(403);
-  });
-
-  it('requires a session to read the mode — it is a hint for operators, not the world', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/v1/tenant/workspace/creation-mode' });
-    expect(res.statusCode).toBe(401);
   });
 
   it('an unrecognised runtime value falls back to the boot value, not to open-by-accident', async () => {

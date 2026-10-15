@@ -27,7 +27,6 @@ import type { BuyerCountrySource } from './buyer-country.js';
 import { assertNoApprovalInFlight } from './checkout/in-flight.js';
 import { resolveCheckoutPrice, unavailableCurrencyRule } from './checkout-price-resolution.js';
 import type { CheckoutPrice } from './checkout-price.js';
-import { malformedPlanCurrency } from '../plans/default-price.js';
 import { findBindingSubscription } from './checkout-binding.js';
 import { assertBindingAllowsCheckout, assertSubjectUnchanged } from './checkout-binding-refusals.js';
 import { claimCheckout } from './checkout-claim.js';
@@ -113,17 +112,6 @@ export async function createCheckoutSession(input: {
 
   const plan = await plansService.getBySlug(input.application.id, input.planSlug);
   if (!plan.active) throw planInactive(input.application.id, plan);
-  // With no price row it would be sold as a plan with no flat price: for nothing.
-  const malformedCurrency = malformedPlanCurrency(plan);
-  if (malformedCurrency !== null) {
-    throw new RekeyError({
-      statusCode: 409,
-      code: 'PLAN_CURRENCY_INVALID',
-      message: `Plan "${plan.slug}" cannot be bought: it is stored with the currency "${malformedCurrency}", which is not a three-letter ISO 4217 code.`,
-      fix: `The operator sets the plan's price again with PATCH /api/v1/tenant/applications/${input.application.id}/plans/${plan.slug} and a body such as {"amount": 2000, "currency": "USD"}. Nothing was charged.`,
-    });
-  }
-
   // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases,
   // route them through the provider's one-time payment flow so they DON'T
   // create a recurring subscription. TIMED licenses + SUBSCRIPTION plans

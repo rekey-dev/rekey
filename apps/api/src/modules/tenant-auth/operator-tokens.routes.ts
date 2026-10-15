@@ -31,7 +31,7 @@ import {
 } from '../../middleware/operator-token-auth.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
-import { stripApplicationSecrets } from '../../lib/app-access.js';
+import { applicationPayload } from '../../lib/app-access.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 
 /**
@@ -151,7 +151,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       ]);
       return {
         success: true,
-        data: paged(items.map(stripApplicationSecrets), total, take, skip),
+        data: paged(items.map(applicationPayload), total, take, skip),
       };
     },
   );
@@ -262,6 +262,8 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
         name: body.name,
         scopes: body.scopes,
         revealsEndUserIps: mayReadRawIps(minter.role, minter.scopes),
+        // The operator the personal access token belongs to.
+        createdByTenantUserId: req.tenantUser!.id,
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });
       void recordSecurityEvent({

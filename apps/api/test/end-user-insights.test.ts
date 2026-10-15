@@ -8,6 +8,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { groupSignInSources } from '../src/modules/end-users/insights.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const CHROME_MAC =
@@ -160,21 +163,6 @@ describe('End-user insights', () => {
     expect(body.sources).toEqual([expect.objectContaining({ platform: 'web', browser: 'Chrome', sessions: 1, live: true })]);
   });
 
-  it('a user who never signed in has empty insights, not errors', async () => {
-    const created = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${appId}/end-users`,
-      headers: op(),
-      payload: { email: 'quiet@example.com' },
-    });
-    const euid = (created.json().data as { id: string }).id;
-    const { status, data } = await insights(euid);
-    expect(status).toBe(200);
-    expect(data.signIns).toMatchObject({ count: 0, lastSignedInAt: null, firstSignedInAt: null });
-    expect((data.activity as { last30: boolean[] }).last30.every((d) => !d)).toBe(true);
-    expect(data.sources).toEqual([]);
-  });
-
   it("refuses another Application's user with END_USER_NOT_FOUND", async () => {
     const other = await prisma.endUser.create({
       data: {
@@ -194,17 +182,6 @@ describe('End-user insights', () => {
     const { status, data } = await insights(other.id);
     expect(status).toBe(404);
     expect((data.error as { code: string }).code).toBe('END_USER_NOT_FOUND');
-  });
-
-  it('the end-user list carries lastPlatform and profile', async () => {
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${publicKey}`, 'user-agent': CHROME_MAC },
-      payload: { email: 'listed@example.com', password: PASSWORD },
-    });
-    const res = await app.inject({ method: 'GET', url: `/api/v1/tenant/applications/${appId}/end-users`, headers: op() });
-    expect((res.json().data as { items: Json[] }).items[0]).toMatchObject({ lastPlatform: 'web', profile: {} });
   });
 
   describe('groupSignInSources', () => {

@@ -9,6 +9,10 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { activeWithin, seedUsers, shiftDay, utcToday, type SeedUser } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 type Json = Record<string, any>;
 
@@ -164,9 +168,7 @@ describe('users analytics: live sections', () => {
       where: { id: w.appId },
       data: { billingConfig: { ...(current.billingConfig as object), enabled: true } },
     });
-    const plan = await prisma.plan.create({
-      data: { applicationId: w.appId, slug: 'pro', name: 'Pro', amount: 1000, currency: 'usd', interval: 'MONTH' },
-    });
+    const plan = await seedPlan({ applicationId: w.appId, slug: 'pro', name: 'Pro', interval: 'MONTH' }, { currency: 'usd', amount: 1000 });
     const yesterday = new Date(Date.now() - 86_400_000);
     await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: users[0]!.id, planId: plan.id, status: 'ACTIVE', trialEndsAt: yesterday } });
     await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: users[1]!.id, planId: plan.id, status: 'CANCELED', trialEndsAt: yesterday } });

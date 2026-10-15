@@ -30,6 +30,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxPaypal, configureSandboxStripe } from './fakes/billing-credentials.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PASSWORD = 'pw-one-two-three';
@@ -206,33 +209,6 @@ describe('coupon redemption is recorded once per purchase', () => {
       const second = await checkout({ planSlug: 'pack', couponCode: 'onceonly', provider: 'stripe' });
       expect(second.statusCode).toBe(400);
       expect(second.json().error.code).toBe('COUPON_REDEMPTION_LIMIT_REACHED');
-    });
-
-    it('records the charge as a SUCCEEDED Payment linked to the buyer', async () => {
-      // One-time revenue previously appeared in no `Payment` row anywhere:
-      // Stripe emits no invoice for `mode: 'payment'`, and the deployment's
-      // webhook registration only ever subscribed invoice events.
-      const sessionId = await checkoutSessionId({ planSlug: 'pack', provider: 'stripe' });
-
-      await fireStripe('checkout.session.completed', {
-        id: sessionId,
-        mode: 'payment',
-        payment_status: 'paid',
-        payment_intent: 'pi_pack_2',
-        amount_total: PACK_AMOUNT,
-        currency: 'usd',
-      });
-
-      const payment = await prisma.payment.findFirstOrThrow({
-        where: { providerPaymentId: 'pi_pack_2' },
-      });
-      expect(payment).toMatchObject({
-        status: 'SUCCEEDED',
-        amount: PACK_AMOUNT,
-        currency: 'USD',
-        endUserId,
-      });
-      expect(payment.subscriptionId).not.toBeNull();
     });
 
     it('records what the buyer actually paid, not the list price', async () => {

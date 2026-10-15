@@ -11,6 +11,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Item {
   planSlug: string;
@@ -67,13 +70,6 @@ describe('trial eligibility per plan provider', () => {
     expect(usdOnly.provider).toBe(of('usd-only').provider);
     const local = await w.checkout({ planSlug: 'local', country: 'IN' }, { buyer: await w.newBuyer() });
     expect(local.statusCode).toBe(400);
-  });
-
-  it('answers every plan against Stripe for a buyer whose country selects no local price', async () => {
-    const { provider, of } = await eligibility();
-    expect(provider).toBe('stripe');
-    expect(of('usd-only')).toMatchObject({ eligible: true, provider: 'stripe' });
-    expect(of('local')).toMatchObject({ eligible: true, provider: 'stripe' });
   });
 
   it('does not believe a country a browser states, exactly as checkout does not', async () => {

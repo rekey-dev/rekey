@@ -39,6 +39,10 @@ import { getProviderForApplication } from '../src/modules/billing/providers/inde
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import { fakeStripe } from './fakes/billing-providers.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'correct-horse-battery';
 
@@ -387,10 +391,7 @@ describe('plan provider registration is atomic and repairable', () => {
     // buyer clicked.
     const created = await createPlan({ slug: 'legacyplan', name: 'Legacy' });
     expect(created.statusCode).toBe(201);
-    await prisma.plan.update({
-      where: { applicationId_slug: { applicationId: ctx.appId, slug: 'legacyplan' } },
-      data: { metadata: {}, active: true, registrationStatus: 'NOT_REQUIRED' },
-    });
+    await revisePlan({ applicationId_slug: { applicationId: ctx.appId, slug: 'legacyplan' } }, { metadata: {}, active: true, registrationStatus: 'NOT_REQUIRED' });
 
     // The REAL Stripe provider, not the fake: the fake would happily mint a
     // session and the assertion would be vacuous. No socket is opened, the

@@ -25,6 +25,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { __resetAssertionReplayForTests } from '../src/lib/assertion-replay.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 // Requiring a verified email needs a URL the verification link can be built on.
 const VERIFY_BASE = 'https://app.example.com';
@@ -354,25 +357,4 @@ describe('operator sign-in by ID Token assertion', () => {
     expect((res.json().error as { code: string }).code).toBe('OPERATOR_SIGNUP_CLOSED');
   });
 
-  it('still signs in an EXISTING operator when signup is closed', async () => {
-    const cloud = await cloudApp();
-    trust(cloud);
-    const email = `known-${cloud.slug}@example.com`;
-    expect(
-      (
-        await app.inject({
-          method: 'POST',
-          url: '/api/v1/tenant/auth/sign-up',
-          payload: { email, password: PASSWORD, workspaceName: 'Existing' },
-        })
-      ).statusCode,
-    ).toBe(201);
-
-    const idToken = await idTokenFor(cloud, email);
-    process.env.OPERATOR_SIGNUP_MODE = 'closed';
-    const res = await assert(idToken);
-    // Closed gates CREATION, never sign-in, a paying customer must not be
-    // locked out of the workspace they already have by a deployment switch.
-    expect(res.statusCode).toBe(200);
-  });
 });

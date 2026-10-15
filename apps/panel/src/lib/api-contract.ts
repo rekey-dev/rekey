@@ -10,6 +10,7 @@
  */
 
 import type {
+  ApplicationDto,
   BillingConfig,
   BillingCredentialDto,
   BillingProviderModuleDto,
@@ -39,6 +40,8 @@ import type {
 } from './api';
 
 type MoneySetting = 'localPrices' | 'reportingCurrency' | 'onUnavailableCurrency';
+/** Fields of an Application the API sends on every route, which the panel reads without a guard. */
+type ApplicationAlways = 'environment' | 'promotedAt' | 'disabledAt' | 'disabledReason' | 'reportingTimezone';
 
 type Fits<Wire, Panel> = [Wire] extends [Panel] ? true : { wire: Wire; doesNotFit: Panel };
 
@@ -64,6 +67,9 @@ export const CONTRACT: {
    * so the panel type may not call one optional and default it itself.
    */
   billingSettings: Fits<Pick<ApplicationRow['billingConfig'], MoneySetting>, Pick<BillingConfig, MoneySetting>>;
+  application: Fits<Pick<ApplicationDto, ApplicationAlways>, Pick<ApplicationRow, ApplicationAlways>>;
+  /** And the other way round: the panel may not call one of them optional. */
+  applicationAlways: Fits<Pick<ApplicationRow, ApplicationAlways>, Pick<ApplicationDto, ApplicationAlways>>;
   /** `capabilities` is an open record on the wire; the panel names the flags it reads. */
   providerModule: Fits<Omit<BillingProviderModuleDto, 'capabilities'>, Omit<BillingProviderDescriptor, 'capabilities'>>;
 } = {
@@ -80,4 +86,6 @@ export const CONTRACT: {
   billingConfig: true,
   billingSettings: true,
   providerModule: true,
+  application: true,
+  applicationAlways: true,
 };

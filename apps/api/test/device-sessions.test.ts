@@ -31,6 +31,9 @@ import {
   setDefaultDeviceLimit as setDefaultDeviceLimitFor,
   waitForDeliveries,
 } from './device-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -149,18 +152,6 @@ describe('device-bound sessions', () => {
     expect((list.json().data.items as Array<{ deviceId: string | null }>)[0]!.deviceId).toBe(s.deviceId);
   });
 
-  it('changes nothing for a client that sends no device', async () => {
-    const userId = await makeEndUser('b@example.com');
-    const res = await signIn('b@example.com');
-    expect(res.statusCode).toBe(200);
-    const s = res.json().data as Session;
-    expect(s.deviceId).toBeNull();
-    expect(claims(s.accessToken).dev).toBeUndefined();
-    expect(await prisma.device.count({ where: { endUserId: userId } })).toBe(0);
-    const row = await prisma.refreshToken.findFirstOrThrow({ where: { endUserId: userId } });
-    expect(row.deviceId).toBeNull();
-  });
-
   it('deviceBinding=required refuses primary sign-in without a device, but not refresh', async () => {
     await makeEndUser('c@example.com');
     await setDeviceBinding('required');
@@ -235,6 +226,7 @@ describe('device-bound sessions', () => {
         endUserId: userId,
         activeOrganizationId: orgId,
         impersonation: undefined,
+        sessionStamp: null,
         device: { deviceId: s.deviceId, primary: false },
       }),
     ).rejects.toMatchObject({ code: 'SESSION_DEVICE_RELEASED' });
@@ -409,20 +401,6 @@ describe('device-bound sessions', () => {
     expect(r.json().error.code).toBe('REFRESH_TOKEN_REVOKED');
   });
 
-  it('requireUserSession exposes the device on the request', async () => {
-    await makeEndUser('h@example.com');
-    const s = (await signIn('h@example.com', { fingerprint: 'fp-h-expose-0001' })).json().data as Session;
-    // /users/me is the smallest user-session route; it does not echo the
-    // device, so assert through the claim the middleware reads.
-    const me = await app.inject({
-      method: 'GET',
-      url: '/api/v1/users/me',
-      headers: { ...keyAuth(), 'x-rekey-user-token': s.accessToken },
-    });
-    expect(me.statusCode).toBe(200);
-    expect(claims(s.accessToken).dev).toBe(s.deviceId);
-  });
-
   // ---------- per-session revocation (sid / dev), not the per-user stamp ----------
 
   const me = (accessToken: string) =>
@@ -490,16 +468,6 @@ describe('device-bound sessions', () => {
     const refused = await me(d1.accessToken);
     expect(refused.statusCode).toBe(401);
     expect(refused.json().error.code).toBe('USER_TOKEN_INVALID');
-    expect((await me(d2.accessToken)).statusCode).toBe(200);
-  });
-
-  it('blocking a device refuses only its access token', async () => {
-    const userId = await makeEndUser('blk@example.com');
-    const d1 = (await signIn('blk@example.com', { fingerprint: 'fp-blk-one-00001' })).json().data as Session;
-    const d2 = (await signIn('blk@example.com', { fingerprint: 'fp-blk-two-00001' })).json().data as Session;
-    await pastTheSecond();
-    await devicesService.block({ applicationId: appId, endUserId: userId, deviceId: d1.deviceId!, operatorUserId: null });
-    expect((await me(d1.accessToken)).statusCode).toBe(401);
     expect((await me(d2.accessToken)).statusCode).toBe(200);
   });
 

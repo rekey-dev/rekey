@@ -75,7 +75,7 @@ describe('OAuth sign-up with an unverified provider email', () => {
     const application = await prisma.application.findUniqueOrThrow({
       where: { id: applicationId },
     });
-    await deliverVerificationEmail({ application, endUser: created });
+    await deliverVerificationEmail({ application, endUser: created, allowance: 'reserve' });
 
     // A live token is the thing that makes the account recoverable. Whether the
     // mail was delivered depends on a transport this test does not configure,

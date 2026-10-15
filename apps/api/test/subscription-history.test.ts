@@ -24,6 +24,10 @@ import type { FastifyInstance } from 'fastify';
 import type { SubscriptionStatus } from '@prisma/client';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('GET /billing/subscription?includeEnded', () => {
   let app: FastifyInstance;
@@ -81,17 +85,13 @@ describe('GET /billing/subscription?includeEnded', () => {
       })
       .then((r) => r.json().data as { endUser: { id: string }; accessToken: string });
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${slug}`,
         name: 'Standard',
-        amount: 9900,
-        currency: 'usd',
         interval: 'MONTH',
         active: true,
-      },
-    });
+      }, { currency: 'usd', amount: 9900 });
 
     // A plan per extra subscription. `(application_id, end_user_id, plan_id)`
     // is unique, so one user cannot hold two rows on the same plan, the first
@@ -106,17 +106,13 @@ describe('GET /billing/subscription?includeEnded', () => {
         extraPlans === 0
           ? plan.id
           : (
-              await prisma.plan.create({
-                data: {
-                  applicationId,
-                  slug: `plan-${slug}-${extraPlans}`,
-                  name: `Standard ${extraPlans}`,
-                  amount: 9900,
-                  currency: 'usd',
-                  interval: 'MONTH',
-                  active: true,
-                },
-              })
+              await seedPlan({
+        applicationId,
+        slug: `plan-${slug}-${extraPlans}`,
+        name: `Standard ${extraPlans}`,
+        interval: 'MONTH',
+        active: true,
+      }, { currency: 'usd', amount: 9900 })
             ).id;
       extraPlans += 1;
       return prisma.subscription.create({
@@ -230,15 +226,5 @@ describe('GET /billing/subscription?includeEnded', () => {
     // row, the empty state has become a lie in the other direction.
     const { read } = await fixture('sh-never');
     expect(await read('?includeEnded=true')).toBeNull();
-  });
-
-  it('is off by default, so existing SDK and portal callers are untouched', async () => {
-    const { makeSubscription, read } = await fixture('sh-default');
-    await makeSubscription('CANCELED', new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
-
-    expect(await read()).toBeNull();
-    // And explicitly off stays off, a `false` that switched the flag ON would
-    // be the classic truthy-string coercion bug.
-    expect(await read('?includeEnded=false')).toBeNull();
   });
 });

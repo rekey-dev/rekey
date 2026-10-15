@@ -65,6 +65,10 @@ function toApplicationDto(app: Application): ApplicationDto {
     authConfig: AuthConfigSchema.parse(app.authConfig),
     billingConfig: BillingConfigSchema.parse(app.billingConfig),
     supportEmail: emailSenderIdentity(app).supportEmail,
+    reportingTimezone: app.reportingTimezone,
+    promotedAt: app.promotedAt?.toISOString() ?? null,
+    disabledAt: app.disabledAt?.toISOString() ?? null,
+    disabledReason: app.disabledReason,
     createdAt: app.createdAt.toISOString(),
   };
 }

@@ -15,6 +15,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const CLAIM = /^UPDATE "public"\."webhook_deliveries" SET "next_attempt_at"/;
 
@@ -72,7 +75,7 @@ describe('webhook delivery scheduler teardown', () => {
         payload: { name: 'WST', slug: `wst-${slug}` },
       })
       .then((r) => (r.json().data as { id: string }).id);
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/teardown',
       events: ['user.created'],

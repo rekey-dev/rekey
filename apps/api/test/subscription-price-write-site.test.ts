@@ -8,16 +8,18 @@ import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { snapshotSubscriptionPrice } from '../src/modules/billing/subscription-snapshot.js';
+import { seedPlan } from './seed-plan.js';
 
 describe('snapshotSubscriptionPrice', () => {
   let applicationId: string;
   let planId: string;
   let subscriptionId: string;
 
-  async function plan(data: { amount: number; currency?: string; pricePerUnitCents?: number }): Promise<string> {
-    const row = await prisma.plan.create({
-      data: { applicationId, slug: `p-${randomUUID().slice(0, 8)}`, name: 'Plan', ...data },
-    });
+  async function plan(data: { amount: number; currency?: string; metered?: boolean }): Promise<string> {
+    const row = await seedPlan(
+      { applicationId, slug: `p-${randomUUID().slice(0, 8)}`, name: 'Plan', ...(data.metered === true && { kind: 'USAGE' as const }) },
+      data.amount > 0 ? { currency: data.currency ?? 'USD', amount: data.amount } : null,
+    );
     return row.id;
   }
 
@@ -78,7 +80,7 @@ describe('snapshotSubscriptionPrice', () => {
   });
 
   it('writes nothing for a plan with no flat price', async () => {
-    for (const free of [await plan({ amount: 0 }), await plan({ amount: 0, pricePerUnitCents: 5 })]) {
+    for (const free of [await plan({ amount: 0 }), await plan({ amount: 0, metered: true })]) {
       subscriptionId = await subscribe(free);
       const result = await snapshotSubscriptionPrice(prisma, {
         subscriptionId,

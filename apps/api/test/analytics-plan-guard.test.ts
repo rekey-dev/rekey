@@ -12,6 +12,9 @@ import { seedUsers } from './analytics-seed.js';
 import { rollupApplication } from '../src/modules/analytics/rollup/job.js';
 import { recordStatements, seqScansOnBigTables } from './analytics-explain.js';
 import { bearer, operatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('analytics plan guard', () => {
   let app: FastifyInstance;

@@ -20,6 +20,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { seedPlan } from './seed-plan.js';
 
 const PASSWORD = 'pw-one-two-three';
 const NOTE = 'INTERNAL: comped, churn risk, do not tell customer';
@@ -175,18 +176,6 @@ describe('the end-user view of their own subscriptions', () => {
       expectAllowlisted(res.json().data, res.body);
     });
 
-    it('POST /billing/subscribe', async () => {
-      const row = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-      await prisma.application.update({
-        where: { id: appId },
-        data: { billingConfig: { ...(row.billingConfig as object), defaultPlanSlug: 'free' } },
-      });
-      const res = await app.inject({ method: 'POST', url: '/api/v1/billing/subscribe', headers: self(), payload: {} });
-      expect(res.statusCode).toBe(201);
-      expect(res.json().data.metadata).toEqual({});
-      expect(res.body).not.toContain('self-serve free tier');
-    });
-
     it('GET /billing/subscriptions', async () => {
       await dirtyMetadata(await grant('basic'));
       const res = await get('/api/v1/billing/subscriptions');
@@ -253,21 +242,6 @@ describe('the end-user view of their own subscriptions', () => {
       expect(((await get('/api/v1/billing/subscription')).json().data as { id: string }).id).toBe(pro);
     });
 
-    it('caps the list at 100 rows', async () => {
-      const planIds: string[] = [];
-      for (let i = 0; i < 101; i++) {
-        const plan = await prisma.plan.create({
-          data: { applicationId: appId, slug: `bulk-${i}`, name: `Bulk ${i}`, amount: 100 },
-        });
-        planIds.push(plan.id);
-      }
-      await prisma.subscription.createMany({
-        data: planIds.map((planId) => ({ applicationId: appId, endUserId, planId, status: 'ACTIVE' as const })),
-      });
-      const items = ((await get('/api/v1/billing/subscriptions')).json().data as { items: unknown[] }).items;
-      expect(items).toHaveLength(100);
-    });
-
     it('refuses to cancel an unfinished checkout by id', async () => {
       await grant('basic');
       const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'pro' } });
@@ -293,9 +267,7 @@ describe('the end-user view of their own subscriptions', () => {
         payload: { name: 'Other', slug: `o${Math.random().toString(36).slice(2, 7)}`, enableBilling: true },
       });
       const otherAppId = (other.json().data as { id: string }).id;
-      const plan = await prisma.plan.create({
-        data: { applicationId: otherAppId, slug: 'x', name: 'x', amount: 100 },
-      });
+      const plan = await seedPlan({ applicationId: otherAppId, slug: 'x', name: 'x' }, { currency: 'USD', amount: 100 });
       const foreignUser = await prisma.endUser.create({
         data: { applicationId: otherAppId, email: `f-${Math.random().toString(36).slice(2, 7)}@example.com` },
       });

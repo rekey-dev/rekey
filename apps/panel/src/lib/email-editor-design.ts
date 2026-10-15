@@ -3,7 +3,7 @@
  *
  * The API returns a design for every template: the operator's saved one, or
  * the built-in default as editable blocks. Anything that is not a design
- * document (null from an older API, or a customised row saved without one)
+ * document (a customised row saved without one)
  * leaves the editor on its empty canvas rather than handing Unlayer a value
  * it cannot load.
  */

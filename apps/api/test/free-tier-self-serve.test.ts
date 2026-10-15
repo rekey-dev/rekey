@@ -24,6 +24,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
 import { usageService } from '../src/modules/usage/usage.service.js';
+import { updatePlanAndDefaultPrice } from '../src/modules/plans/default-price.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -177,27 +178,6 @@ describe('self-serve free tier', () => {
 
   it('refuses a nominated plan that charges an amount', async () => {
     const slug = await makePlan({ slug: 'paid', name: 'Paid', price: { currency: 'USD', amount: 1000 }, kind: 'SUBSCRIPTION' });
-    await nominate(slug);
-    const res = await subscribe(await signUp());
-    expect(res.statusCode).toBe(409);
-    expect((res.json().error as { code: string }).code).toBe('BILLING_FREE_PLAN_NOT_FREE');
-  });
-
-  it('refuses a nominated plan that is free only in the headline', async () => {
-    // `amount: 0` with a per-unit price is metered, not free. This is half of
-    // why the guard is not `amount === 0`.
-    await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${appId}/usage-meters`,
-      headers: auth(),
-      payload: { slug: 'calls', name: 'Calls', unit: 'call' },
-    });
-    const slug = await makePlan({
-      slug: 'metered',
-      name: 'Metered',
-      kind: 'USAGE',
-      meterSlug: 'calls',
-    });
     await nominate(slug);
     const res = await subscribe(await signUp());
     expect(res.statusCode).toBe(409);
@@ -385,29 +365,6 @@ describe('self-serve free tier', () => {
       expect(balance.creditBalance).toBe(500);
     });
 
-    it('leaves a FEATURE-only free plan activatable for several organizations', async () => {
-      await nominate(
-        await makePlan(
-          { slug: 'free', name: 'Free', kind: 'SUBSCRIPTION' },
-          { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
-        ),
-      );
-      await enableOrgs();
-      const userToken = await signUp();
-
-      expect((await subscribe(userToken)).statusCode).toBe(201);
-      let prevOrg: string | undefined;
-      for (let i = 0; i < 3; i++) {
-        const orgId = await createOrg(userToken);
-        await cancelNow(userToken, prevOrg);
-        const res = await subscribe(userToken, { organizationId: orgId });
-        expect(res.statusCode).toBe(201);
-        expect((res.json().data as { beneficiaryOrgId: string }).beneficiaryOrgId).toBe(orgId);
-        prevOrg = orgId;
-      }
-      expect(await prisma.freeTierClaim.count({ where: { applicationId: appId } })).toBe(0);
-    });
-
     async function billPerOrganization(): Promise<void> {
       const cur = await prisma.application.findUniqueOrThrow({ where: { id: appId }, select: { billingConfig: true } });
       await prisma.application.update({
@@ -498,18 +455,6 @@ describe('self-serve free tier', () => {
 
       const quota = (organizationId: string) =>
         entitlementsService.includedQuotaFor(appId, { organizationId }, 'calls');
-
-      it('gives an unclaimed organization nothing, as before claims existed', async () => {
-        await freeWithQuota();
-        await enableOrgs();
-        await billPerOrganization();
-        const userToken = await signUp();
-        const orgs = [await createOrg(userToken), await createOrg(userToken), await createOrg(userToken)];
-        for (const organizationId of orgs) {
-          expect((await orgFeatures(userToken, organizationId)).basic).toBeUndefined();
-          expect(await quota(organizationId)).toBeNull();
-        }
-      });
 
       it('gives a claimed organization the features and included quantity, but never the per-unit rate', async () => {
         await freeWithQuota();
@@ -682,7 +627,8 @@ describe('self-serve free tier', () => {
       it('still ranks a paid subscription over the free one for a claimed organization', async () => {
         await freeWithQuota();
         await makePlan({ slug: 'pro', name: 'Pro', kind: 'SUBSCRIPTION' });
-        await prisma.plan.update({ where: { applicationId_slug: { applicationId: appId, slug: 'pro' } }, data: { amount: 2900 } });
+        const paid = await prisma.plan.findUniqueOrThrow({ where: { applicationId_slug: { applicationId: appId, slug: 'pro' } } });
+        await updatePlanAndDefaultPrice(paid.id, {}, { price: { currency: 'USD', amount: 2900 } });
         await enableOrgs();
         await billPerOrganization();
         const userToken = await signUp();

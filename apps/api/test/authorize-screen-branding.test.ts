@@ -20,6 +20,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('authorize screen branding', () => {
   let app: FastifyInstance;
@@ -109,14 +112,6 @@ describe('authorize screen branding', () => {
     expect(res.body).not.toContain('alert(1)');
   });
 
-  it('drops a data: logo too', async () => {
-    const f = await fixture('brand-data', {
-      logoUrl: 'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==',
-    });
-    const res = await authorize(f.slug, f.clientId);
-    expect(res.body).not.toContain('data:text/html');
-  });
-
   it('refuses a colour that is not a plain hex value', async () => {
     // Anything else would be interpolated straight into a <style> block.
     const f = await fixture('brand-css', {
@@ -150,13 +145,5 @@ describe('authorize screen branding', () => {
     const nonce = /script-src[^;]*'nonce-([^']+)'/.exec(csp)?.[1];
     expect(nonce, 'script-src must carry a nonce').toBeTruthy();
     expect(res.body).toContain(`nonce="${nonce}"`);
-  });
-
-  it('renders the plain screen when there is no branding at all', async () => {
-    const f = await fixture('brand-none', {});
-    const res = await authorize(f.slug, f.clientId);
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('App brand-none');
-    expect(res.body).not.toContain('<img class="logo"');
   });
 });

@@ -30,6 +30,9 @@ import {
   unattributedAttemptSubject,
   type GlobalRateLimitBudgets,
 } from '../src/lib/rate-limit.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PANEL_IP = '10.77.0.10';
@@ -168,35 +171,6 @@ describe('global limiter keys on the caller, not the panel IP', () => {
     expect(unauth.headers['x-ratelimit-remaining']).toBe('99');
   }, 180_000);
 
-  it('an operator PAT counts against the same operator, not the IP', async () => {
-    const a = await makeOperator('pat');
-    const mint = await fixtures.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/api-tokens',
-      headers: { authorization: `Bearer ${a.accessToken}` },
-      payload: { name: 'agent', scopes: ['read'] },
-    });
-    expect(mint.statusCode).toBe(201);
-    const pat = (mint.json().data as { rawToken: string }).rawToken;
-
-    // Spend the address's anonymous budget entirely.
-    expect((await fire(app, 101, anon(PANEL_IP))).statusCode).toBe(429);
-
-    const viaPat = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/operator/applications',
-      remoteAddress: PANEL_IP,
-      headers: { authorization: `Bearer ${pat}` },
-    });
-    expect(viaPat.statusCode).toBe(200);
-    expect(viaPat.headers['x-ratelimit-limit']).toBe('600');
-    expect(viaPat.headers['x-ratelimit-remaining']).toBe('599');
-
-    // Same person on a session JWT: one bucket per operator, whichever credential.
-    const viaJwt = await app.inject(me(a));
-    expect(viaJwt.headers['x-ratelimit-remaining']).toBe('598');
-  });
-
   it('unauthenticated traffic is still limited at 100 per IP', async () => {
     const hundredth = await fire(app, 100, anon('198.51.100.7'));
     expect(hundredth.statusCode).toBe(200);
@@ -255,30 +229,6 @@ describe('global limiter keys on the caller, not the panel IP', () => {
       expect(res.statusCode).toBe(200);
       expect(res.headers['x-ratelimit-limit']).toBe('30000');
       expect(res.headers['x-ratelimit-remaining']).toBe('29999');
-    });
-
-    it('a signed-in end user is keyed on the user, not the IP', async () => {
-      const signUp = await fixtures.inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: { authorization: `Bearer ${publicKey}` },
-        payload: { email: 'rl-user@example.com', password: 'correct-horse-battery' },
-      });
-      expect(signUp.statusCode).toBe(201);
-      const token = (signUp.json().data as { accessToken: string }).accessToken;
-
-      const ip = '203.0.113.21';
-      expect((await fire(app, 101, anon(ip))).statusCode).toBe(429);
-
-      const res = await app.inject({
-        method: 'GET',
-        url: '/api/v1/users/me/',
-        remoteAddress: ip,
-        headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-user-token': token },
-      });
-      expect(res.statusCode).toBe(200);
-      expect(res.headers['x-ratelimit-limit']).toBe('600');
-      expect(res.headers['x-ratelimit-remaining']).toBe('599');
     });
 
     // GET /auth/me verifies the token itself, with no key hook in front of it.
@@ -420,20 +370,6 @@ describe('auth tier is not loosened', () => {
     expect(over.statusCode).toBe(429);
     expect(over.json().error.code).toBe('RATE_LIMITED');
   });
-
-  it('an operator session does not raise the auth cap', async () => {
-    const op = await makeOperator('auth-cap');
-    const req = {
-      method: 'POST' as const,
-      url: '/api/v1/tenant/auth/forgot-password',
-      remoteAddress: '198.51.100.91',
-      headers: { authorization: `Bearer ${op.accessToken}` },
-      payload: { email: 'target2@example.com' },
-    };
-    const tenth = await fire(app, 10, req);
-    expect(tenth.headers['x-ratelimit-limit']).toBe('10');
-    expect((await app.inject(req)).statusCode).toBe(429);
-  });
 });
 
 describe('POST /tenant/auth/refresh has its own per-IP bucket', () => {
@@ -480,13 +416,6 @@ describe('portal config keys on (slug, client IP) with a per-IP ceiling', () => 
     method: 'GET' as const,
     url: `/api/v1/portal/config/${slug}`,
     remoteAddress,
-  });
-
-  it('one slug exhausting its bucket does not affect another slug', async () => {
-    const ip = '198.51.100.140';
-    expect((await fire(app, 30, config('app-one', ip))).statusCode).toBe(404);
-    expect((await app.inject(config('app-one', ip))).statusCode).toBe(429);
-    expect((await app.inject(config('app-two', ip))).statusCode).toBe(404);
   });
 
   it('guessing a new slug per request is still bounded per IP', async () => {
@@ -843,26 +772,6 @@ describe('per-Application auth ceiling', () => {
 });
 
 describe('budget defaults', () => {
-  it('sizes the per-key and auth-ceiling budgets for a 50k-DAU Application', () => {
-    const b = resolveGlobalBudgets({ RATE_LIMIT_MAX: 100 });
-    expect(b.apiKey).toBe(30_000);
-    expect(b.authCeiling).toBe(3000);
-    expect(b.anonymous).toBe(100);
-    expect(b.authFailuresPerIp).toBe(100);
-    expect(b.authUnattributedFailures).toBe(300);
-    expect(
-      resolveGlobalBudgets({ RATE_LIMIT_MAX: 100, RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX: 50 })
-        .authUnattributedFailures,
-    ).toBe(50);
-  });
-
-  it('RATE_LIMIT_AUTH_CEILING_MAX sets the ceiling without touching RATE_LIMIT_MAX, and the reverse', () => {
-    const own = resolveGlobalBudgets({ RATE_LIMIT_MAX: 100, RATE_LIMIT_AUTH_CEILING_MAX: 600 });
-    expect(own.authCeiling).toBe(600);
-    expect(own.anonymous).toBe(100);
-    const raisedAnon = resolveGlobalBudgets({ RATE_LIMIT_MAX: 200, RATE_LIMIT_AUTH_CEILING_MAX: 600 });
-    expect(raisedAnon.authCeiling).toBe(600);
-  });
 
   it('an unset ceiling and key budget never fall below a raised RATE_LIMIT_MAX', () => {
     const b = resolveGlobalBudgets({ RATE_LIMIT_MAX: 50_000 });

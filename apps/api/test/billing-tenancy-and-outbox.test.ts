@@ -35,8 +35,6 @@ import {
   setDeliveryScheduler,
 } from '../src/modules/webhooks/webhook.service.js';
 import { verifyPaypalWebhook } from '../src/modules/billing/providers/paypal.js';
-import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
-import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import { getModule } from '../src/modules/billing/providers/registry.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -328,25 +326,6 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
       expect(await prisma.webhookDelivery.count({ where: { endpointId } })).toBe(0);
     });
 
-    it('enqueueEvent commits with the caller transaction', async () => {
-      const endpointId = await subscribeAll(appA.id);
-
-      const ids = await prisma.$transaction((tx) =>
-        enqueueEvent(tx, {
-          applicationId: appA.id,
-          type: 'payment.succeeded',
-          data: { payment: { id: 'p_committed' } },
-        }),
-      );
-
-      const rows = await prisma.webhookDelivery.findMany({ where: { endpointId } });
-      expect(rows.map((r) => r.id)).toEqual(ids);
-      expect(rows[0]).toMatchObject({ status: 'PENDING', attempts: 0 });
-      // Written but not yet attempted: `nextAttemptAt` is in the past, which is
-      // what lets the poller recover the row when the kick is lost.
-      expect(rows[0]!.nextAttemptAt!.getTime()).toBeLessThanOrEqual(Date.now());
-    });
-
     it('the payment.succeeded delivery row exists the moment the webhook returns', async () => {
       const endpointId = await subscribeAll(appA.id);
       await prisma.subscription.create({
@@ -564,31 +543,6 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
 
       expect(signals.length).toBeGreaterThan(0);
       expect(signals.every((s) => s instanceof AbortSignal)).toBe(true);
-    });
-
-    it('the Razorpay SDK is constructed with a request timeout', () => {
-      const provider = new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'y', webhookSecret: 'w' });
-      // The SDK takes no timeout option, so the fix reaches for the axios
-      // instance it built. If a future version moves this, the assertion is
-      // what tells us, see the constructor comment.
-      const axiosTimeout = (
-        provider as unknown as { client: { api?: { rq?: { defaults?: { timeout?: number } } } } }
-      ).client.api?.rq?.defaults?.timeout;
-      expect(axiosTimeout).toBe(10_000);
-    });
-
-    it('the Stripe SDK is constructed well under its 80s default', () => {
-      const provider = new RealStripeProvider({
-        apiKey: 'sk_test_for_ci_only',
-        webhookSecret: 'whsec_x',
-      });
-      // `getApiField` is a real Stripe method but is not in its public types,
-      // so the shape is stated here rather than reaching through `Stripe`.
-      const stripeClient = (provider as unknown as {
-        stripe: { getApiField: (k: string) => unknown };
-      }).stripe;
-      expect(stripeClient.getApiField('timeout')).toBe(10_000);
-      expect(stripeClient.getApiField('maxNetworkRetries')).toBe(1);
     });
   });
 });

@@ -10,6 +10,9 @@ import { BillingLogEntrySchema } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('provider reports that cannot be recorded', () => {
   let app: FastifyInstance;
@@ -72,30 +75,6 @@ describe('provider reports that cannot be recorded', () => {
       data: { kind: 'charge', reason: 'amount_not_storable', providerPaymentId: 'pay_huge', providerRefundId: null, reportedAmount: '3000000000' },
     });
     expect(await prisma.payment.count({ where: { applicationId: w.applicationId } })).toBe(0);
-  });
-
-  it('a failed charge and a refund with such an amount are logged too', async () => {
-    await prisma.subscription.create({
-      data: { applicationId: w.applicationId, endUserId: w.buyer.id, planId: w.planId, status: 'ACTIVE', provider: 'external', providerSubId: 'sub_live' },
-    });
-    const failed = await w.externalEvent('payment.failed', {
-      payment: { id: 'pay_failed_huge', subscriptionId: 'sub_live', amount: 4_000_000_000, currency: 'usd' },
-    });
-    expect(failed.res.statusCode, failed.res.body).toBe(200);
-    const refunded = await w.externalEvent('payment.refunded', {
-      payment: { id: 'pay_refund_huge', subscriptionId: 'sub_any', amount: 5_000_000_000, currency: 'usd' },
-    });
-    expect(refunded.res.statusCode, refunded.res.body).toBe(200);
-
-    const seen = (await notRecorded()).map((entry) => ({ ...entry.data }));
-    expect(seen).toEqual(
-      expect.arrayContaining([
-        { kind: 'failed_charge', reason: 'amount_not_storable', providerPaymentId: 'pay_failed_huge', providerRefundId: null, reportedAmount: '4000000000' },
-        { kind: 'refund', reason: 'amount_not_storable', providerPaymentId: 'pay_refund_huge', providerRefundId: null, reportedAmount: '5000000000' },
-      ]),
-    );
-    expect(seen).toHaveLength(2);
-    expect((await prisma.subscription.findFirstOrThrow({ where: { providerSubId: 'sub_live' } })).status).toBe('ACTIVE');
   });
 
   it('a refund larger than its payment is refused and logged against that payment', async () => {

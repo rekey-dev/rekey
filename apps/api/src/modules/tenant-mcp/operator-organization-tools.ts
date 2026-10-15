@@ -11,7 +11,9 @@
  * Authorization is the same as every other operator write tool: the dispatcher
  * demands write capability and role >= ADMIN, `organizations:write` narrows a
  * restricted MEMBER, and each handler re-scopes through `loadAppInTenant` so an
- * Application in another workspace reads as not found.
+ * Application in another workspace reads as not found. On top of that both
+ * write tools are capped: giving or taking an OWNER- or ADMIN-tier role needs
+ * the admin tier.
  */
 
 import { z } from 'zod';
@@ -22,6 +24,9 @@ import {
 } from '../organizations/organizations.service.js';
 import type { OperatorTool, OperatorToolContext } from './operator-tools.js';
 import { assertOrganizationsEnabled, loadAppInTenant } from './operator-write-tools.js';
+import { assertAdminTierFor } from './admin-tier.js';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
+import { prisma } from '../../lib/prisma.js';
 
 const LIST_ORGANIZATIONS_MAX = 100;
 const ROLE_NAME_MAX = 40;
@@ -71,6 +76,37 @@ function parseArgs<T extends z.ZodTypeAny>(schema: T, tool: string, args: Record
     message: `Invalid arguments for ${tool}: ${issues}.`,
     fix: `Check the arguments against ${tool}'s inputSchema in tools/list.`,
   });
+}
+
+/**
+ * Security: an OWNER- or ADMIN-tier membership reads and runs a customer's
+ * organization, so a write-tier token must not be able to give that tier to an
+ * end-user of its choosing, or take it from whoever holds it.
+ */
+async function assertWriteTierMayAssign(
+  ctx: OperatorToolContext,
+  target: { applicationId: string; organizationId: string; endUserId: string; role: string | undefined },
+): Promise<void> {
+  if (ctx.canAdmin) return;
+  const [tiers, defaultRole, current] = await Promise.all([
+    organizationRolesService.baseRoleMap(target.applicationId),
+    target.role === undefined ? organizationRolesService.getDefault(target.applicationId) : null,
+    prisma.organizationMembership.findFirst({
+      where: {
+        organizationId: target.organizationId,
+        endUserId: target.endUserId,
+        organization: { applicationId: target.applicationId },
+      },
+      select: { role: true },
+    }),
+  ]);
+  const assigned = defaultRole?.baseRole ?? (target.role === undefined ? undefined : tiers.get(target.role));
+  if (assigned !== undefined && assigned !== 'MEMBER') {
+    assertAdminTierFor(ctx, 'Giving an end-user an OWNER- or ADMIN-tier organization role');
+  }
+  if (current !== null && (tiers.get(current.role) ?? 'MEMBER') !== 'MEMBER') {
+    assertAdminTierFor(ctx, 'Changing the role of an organization OWNER or ADMIN');
+  }
 }
 
 function actorFrom(ctx: OperatorToolContext): OperatorMembershipActor {
@@ -170,7 +206,9 @@ export const operatorOrganizationTools: OperatorTool[] = [
       "This is operator authority: the organization's own hierarchy (only an OWNER may make " +
       'an OWNER) does not apply, but the role must exist in list_organization_roles and not ' +
       'be disabled. Refused if the end-user is already a member; use ' +
-      'set_organization_member_role for that. Requires organizations to be enabled.',
+      'set_organization_member_role for that. Requires organizations to be enabled. Write ' +
+      'access assigns MEMBER-tier roles only: an OWNER- or ADMIN-tier role (including a ' +
+      'default role of that tier) needs admin access (the mcp:operator:admin scope).',
     write: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: {
@@ -183,6 +221,7 @@ export const operatorOrganizationTools: OperatorTool[] = [
       const args = parseArgs(AddArgs, 'add_organization_member', raw);
       const app = await loadAppInTenant(ctx, args.applicationId);
       assertOrganizationsEnabled(app);
+      await assertWriteTierMayAssign(ctx, { ...args, applicationId: app.id, role: args.role });
       const membership = await withMcpFix(() =>
         organizationsService.adminAddMember({
           applicationId: app.id,
@@ -202,7 +241,10 @@ export const operatorOrganizationTools: OperatorTool[] = [
       '(list_organization_roles). The end-user must already be a member; use ' +
       'add_organization_member otherwise. This is operator authority, so there is no ' +
       "last-owner guard: demoting an organization's only OWNER-tier member leaves it without " +
-      'an owner until you assign one. Requires organizations to be enabled.',
+      'an owner until you assign one. Requires organizations to be enabled. Write access ' +
+      'moves a MEMBER-tier member between MEMBER-tier roles only: promoting to, or changing ' +
+      'a member who holds, an OWNER- or ADMIN-tier role needs admin access (the ' +
+      'mcp:operator:admin scope).',
     write: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
@@ -215,6 +257,7 @@ export const operatorOrganizationTools: OperatorTool[] = [
       const args = parseArgs(SetRoleArgs, 'set_organization_member_role', raw);
       const app = await loadAppInTenant(ctx, args.applicationId);
       assertOrganizationsEnabled(app);
+      await assertWriteTierMayAssign(ctx, { ...args, applicationId: app.id });
       const membership = await withMcpFix(() =>
         organizationsService.adminSetMemberRole({
           applicationId: app.id,

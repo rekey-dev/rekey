@@ -141,7 +141,7 @@ export default async function SettingsPage({
   // everyone out needs `auth-config:write` on this Application instead, read
   // from the same grant AppNav uses; without it the card says why.
   const isOwner = me.activeRole === 'OWNER';
-  const canSignOutAll = hasScope(app.access?.scopes ?? null, 'auth-config:write');
+  const canSignOutAll = hasScope(app.access.scopes, 'auth-config:write');
   const canReadLimits = isOwner || me.activeRole === 'ADMIN';
 
   // Fetched only when the role can read it, NOT fetched-and-caught.
@@ -227,16 +227,11 @@ export default async function SettingsPage({
         </Banner>
       )}
 
-      {app.reportingTimezone !== undefined && (
-        <ReportingTimezone
-          applicationId={id}
-          current={app.reportingTimezone}
-          canWrite={
-            (app.access === undefined || ['workspace-admin', 'APP_ADMIN'].includes(app.access.level)) &&
-            hasScope(app.access?.scopes ?? null, 'overview:write')
-          }
-        />
-      )}
+      <ReportingTimezone
+        applicationId={id}
+        current={app.reportingTimezone}
+        canWrite={['workspace-admin', 'APP_ADMIN'].includes(app.access.level) && hasScope(app.access.scopes, 'overview:write')}
+      />
 
       {/* ---------------- Environment / promote ---------------- */}
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">

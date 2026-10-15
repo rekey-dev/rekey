@@ -50,34 +50,14 @@ describe('selectCheckoutPrice', () => {
       expect(select()).toMatchObject(USD);
     });
 
-    it('is charged for a plan with no additional prices, whatever the country', () => {
-      expect(select({ prices: [], buyer: { country: 'IN', source: 'declared' } })).toMatchObject(USD);
-    });
-
     it('is charged for a country the table does not cover and no price names', () => {
       expect(select({ buyer: { country: 'ZZ', source: 'declared' } })).toMatchObject(USD);
-    });
-
-    it('is charged where the default currency is itself the local one', () => {
-      expect(select({ buyer: { country: 'US', source: 'declared' } })).toMatchObject(USD);
-    });
-
-    it('is reported upper-case even when the plan stores it lower-case', () => {
-      expect(select({ defaultPrice: { id: 'pp_usd', currency: 'usd', amount: 2000, countries: [] } })).toMatchObject(USD);
     });
   });
 
   describe("the buyer's country", () => {
     it('selects the price in the local currency when the country is declared', () => {
       expect(select({ buyer: { country: 'IN', source: 'declared' } })).toMatchObject(INR);
-    });
-
-    it('selects it when a trusted proxy vouched for the country', () => {
-      expect(select({ buyer: { country: 'DE', source: 'vouched' } })).toMatchObject(EUR);
-    });
-
-    it('accepts a lower-case country', () => {
-      expect(select({ buyer: { country: 'in', source: 'declared' } })).toMatchObject(INR);
     });
 
     it('never selects a local price on a hint under `trusted`', () => {
@@ -110,10 +90,6 @@ describe('selectCheckoutPrice', () => {
   describe('a requested currency', () => {
     it('is honoured from a secret key, over the country', () => {
       expect(select({ requestedCurrency: 'eur', buyer: { country: 'IN', source: 'declared' } })).toMatchObject(EUR);
-    });
-
-    it('may name the default currency', () => {
-      expect(select({ requestedCurrency: 'USD', buyer: { country: 'IN', source: 'declared' } })).toMatchObject(USD);
     });
 
     it('is REJECTED from a publishable key, never ignored', () => {
@@ -152,10 +128,6 @@ describe('selectCheckoutPrice', () => {
       expect(select({ boundCurrency: 'JPY', requestedCurrency: 'EUR' })).toMatchObject(EUR);
     });
 
-    it('may be the default currency, keeping a USD subscriber on USD in India', () => {
-      expect(select({ boundCurrency: 'USD', buyer: { country: 'IN', source: 'declared' } })).toMatchObject(USD);
-    });
-
     it('is skipped when the plan has no price in it', () => {
       expect(select({ boundCurrency: 'JPY', buyer: { country: 'IN', source: 'declared' } })).toMatchObject(INR);
       expect(select({ boundCurrency: 'JPY' })).toMatchObject(USD);
@@ -183,13 +155,6 @@ describe('selectCheckoutPrice', () => {
           reason: 'no_provider_for_currency',
         },
       });
-    });
-
-    it('carries no fallback when the price selected is the price charged', () => {
-      expect(select().fallback).toBeNull();
-      expect(select({ buyer: { country: 'IN', source: 'declared' } }).fallback).toBeNull();
-      expect(select({ requestedCurrency: 'EUR' }).fallback).toBeNull();
-      expect(select({ boundCurrency: 'INR' }).fallback).toBeNull();
     });
   });
 

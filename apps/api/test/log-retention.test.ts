@@ -22,6 +22,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { archiveKey, pruneLogs, type LogArchiver } from '../src/lib/log-retention.js';
 import { pruneWebhookEvents } from '../src/modules/billing/webhooks/retention.js';
 import { createS3LogArchiver, resolveLogArchiveConfig } from '../src/lib/log-archive.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const daysAgo = (n: number): Date => new Date(Date.now() - n * DAY_MS);

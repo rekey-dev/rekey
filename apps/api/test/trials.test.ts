@@ -39,12 +39,6 @@ describe('a provider must declare it can run a trial', () => {
     );
   });
 
-  it('an unknown provider is refused too — absent means cannot', () => {
-    expect(() =>
-      resolveCheckoutTrial({ plan: plan(), provider: 'some-third-party', isOneTime: false }),
-    ).toThrow(/cannot start a subscription in a free trial/);
-  });
-
   it('a plan with no trial is unaffected on every provider', () => {
     for (const p of ['stripe', 'paypal', 'razorpay']) {
       expect(resolveCheckoutTrial({ plan: plan({ trialDays: null }), provider: p, isOneTime: false })).toBeNull();

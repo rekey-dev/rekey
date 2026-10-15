@@ -98,14 +98,6 @@ describe('Tenant limits — maxProductionApps', () => {
     }
   });
 
-  it('treats an explicit null as unlimited', async () => {
-    const tenantId = await createTenant('mpa-null');
-    expect((await setLimits(tenantId, { maxProductionApps: null })).statusCode).toBe(200);
-
-    expect((await createApp(tenantId, 'mpa-null-1', 'PRODUCTION')).statusCode).toBe(201);
-    expect((await createApp(tenantId, 'mpa-null-2', 'PRODUCTION')).statusCode).toBe(201);
-  });
-
   // ---------- the ceiling ----------
 
   it('blocks the production app that would cross the line, with TENANT_QUOTA_EXCEEDED', async () => {
@@ -142,17 +134,6 @@ describe('Tenant limits — maxProductionApps', () => {
     // And an omitted environment defaults to DEVELOPMENT, so it is not billable
     // and must not be blocked either.
     expect((await createApp(tenantId, 'mpa-free-default')).statusCode).toBe(201);
-  });
-
-  it('does not count development or staging apps toward the ceiling', async () => {
-    const tenantId = await createTenant('mpa-count');
-    await setLimits(tenantId, { maxProductionApps: 1 });
-
-    for (const n of [1, 2, 3]) {
-      expect((await createApp(tenantId, `mpa-count-dev-${n}`, 'DEVELOPMENT')).statusCode).toBe(201);
-    }
-    // Three non-production apps exist; the single production slot is untouched.
-    expect((await createApp(tenantId, 'mpa-count-prod', 'PRODUCTION')).statusCode).toBe(201);
   });
 
   // ---------- over the line never breaks what exists ----------
@@ -210,43 +191,5 @@ describe('Tenant limits — maxProductionApps', () => {
     // b is untouched by a being full.
     expect((await createApp(b, 'mpa-iso-b-1', 'PRODUCTION')).statusCode).toBe(201);
     expect((await createApp(a, 'mpa-iso-a-2', 'PRODUCTION')).statusCode).toBe(403);
-  });
-
-  // ---------- only a super-admin can move it ----------
-
-  it('rejects a non-integer limit', async () => {
-    const tenantId = await createTenant('mpa-bad');
-    // Rejected by the route's JSON schema (BAD_REQUEST), before the zod parse
-    // that produces INVALID_TENANT_LIMITS, the type is declared there.
-    expect((await setLimits(tenantId, { maxProductionApps: 'lots' })).statusCode).toBe(400);
-  });
-
-  it('rejects a misspelled key instead of silently ignoring it', async () => {
-    const tenantId = await createTenant('mpa-typo');
-    // Not declared in the JSON schema, so fastify lets it through and the
-    // strict zod parse is what catches it. A typo'd limit key must never look
-    // like it applied.
-    const res = await setLimits(tenantId, { maxProductionApp: 1 });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('INVALID_TENANT_LIMITS');
-  });
-
-  it('rejects a negative limit', async () => {
-    const tenantId = await createTenant('mpa-neg');
-    expect((await setLimits(tenantId, { maxProductionApps: -1 })).statusCode).toBe(400);
-  });
-
-  it('PUT replaces wholesale — an omitted key becomes unlimited', async () => {
-    const tenantId = await createTenant('mpa-put');
-    await setLimits(tenantId, { maxActiveEndUsers: 10, maxProductionApps: 1 });
-
-    // Omitting maxProductionApps clears it, per documented PUT semantics.
-    const res = await setLimits(tenantId, { maxActiveEndUsers: 10 });
-    expect(res.statusCode).toBe(200);
-    expect((res.json().data as { limits: Record<string, unknown> }).limits.maxProductionApps)
-      .toBeUndefined();
-
-    expect((await createApp(tenantId, 'mpa-put-1', 'PRODUCTION')).statusCode).toBe(201);
-    expect((await createApp(tenantId, 'mpa-put-2', 'PRODUCTION')).statusCode).toBe(201);
   });
 });

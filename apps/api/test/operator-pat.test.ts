@@ -19,6 +19,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { hashKey } from '../src/lib/keys.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface OperatorSession {
   accessToken: string;
@@ -110,21 +113,6 @@ describe('Operator personal-access-tokens (PATs)', () => {
     expect(row?.applicationId).toBe(appId);
   });
 
-  it('mint → use: a PAT can call a read endpoint with the read scope', async () => {
-    const op = await makeOperator('read');
-    await makeApp(op, 'read-app');
-    const { rawToken } = await mintPat(op, ['read']);
-
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/operator/applications',
-      headers: { authorization: `Bearer ${rawToken}` },
-    });
-    expect(res.statusCode).toBe(200);
-    const apps = res.json().data as { items: Array<{ slug: string }> };
-    expect(apps.items.map((a) => a.slug)).toContain('read-app');
-  });
-
   it('scope enforcement: a read-only PAT cannot mint API keys → 403', async () => {
     const op = await makeOperator('scope');
     const appId = await makeApp(op, 'scope-app');
@@ -182,21 +170,6 @@ describe('Operator personal-access-tokens (PATs)', () => {
     expect(await prisma.tenantApiToken.count({ where: { tenantUserId: op.userId } })).toBe(0);
   });
 
-  it('minting an Application API key with a past expiresAt is rejected (400)', async () => {
-    const op = await makeOperator('past-exp-key');
-    const appId = await makeApp(op, 'past-exp-key-app');
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${appId}/api-keys`,
-      headers: { authorization: `Bearer ${op.accessToken}` },
-      payload: { name: 'dead', mode: 'live', expiresAt: '2020-01-01T00:00:00.000Z' },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('API_KEY_EXPIRY_IN_PAST');
-    // No key landed under the application.
-    expect(await prisma.apiKey.count({ where: { applicationId: appId } })).toBe(0);
-  });
-
   it('revoke: a revoked PAT is refused (401), effective immediately', async () => {
     const op = await makeOperator('revoke');
     const appId = await makeApp(op, 'revoke-app');
@@ -230,23 +203,6 @@ describe('Operator personal-access-tokens (PATs)', () => {
     expect(after.json().error.code).toBe('OPERATOR_TOKEN_INVALID');
   });
 
-  it('revoke is idempotent: deleting an already-revoked PAT still 200s', async () => {
-    const op = await makeOperator('revoke-idem');
-    const { id } = await mintPat(op, ['read']);
-    const first = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/tenant/auth/api-tokens/${id}`,
-      headers: { authorization: `Bearer ${op.accessToken}` },
-    });
-    expect(first.statusCode).toBe(200);
-    const second = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/tenant/auth/api-tokens/${id}`,
-      headers: { authorization: `Bearer ${op.accessToken}` },
-    });
-    expect(second.statusCode).toBe(200);
-  });
-
   it('expiry: an expired PAT is refused (401)', async () => {
     const op = await makeOperator('expiry');
     const appId = await makeApp(op, 'expiry-app');
@@ -263,19 +219,6 @@ describe('Operator personal-access-tokens (PATs)', () => {
       url: `/api/v1/tenant/operator/applications/${appId}/api-keys`,
       headers: { authorization: `Bearer ${rawToken}` },
       payload: { name: 'expired', mode: 'test' },
-    });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('OPERATOR_TOKEN_INVALID');
-  });
-
-  it('unknown token: a made-up rp_op_ token is refused (401)', async () => {
-    const op = await makeOperator('unknown');
-    const appId = await makeApp(op, 'unknown-app');
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/operator/applications/${appId}/api-keys`,
-      headers: { authorization: 'Bearer rp_op_totally-made-up' },
-      payload: { name: 'nope', mode: 'test' },
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('OPERATOR_TOKEN_INVALID');

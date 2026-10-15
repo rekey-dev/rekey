@@ -31,14 +31,21 @@
  * validation, slug rules, provider registration, and secret generation behave
  * identically to the panel. Every successful write emits a `securityEvent`.
  *
- * Most tools here are reversible. The two that are not, `configure_billing_provider`
- * (the secret travels through the MCP client) and `cancel_subscription`
- * (irreversible), carry `admin: true`, which demands the `mcp:operator:admin`
- * scope on top of the role check rather than plain write capability.
- * `remove_member` is exposed as an ordinary write tool because re-inviting undoes
- * it. Still deliberately absent: delete application, refund, and webhook-secret
- * rotation, no undo, and no confirmation step an agent can be trusted to have
- * surfaced to a human.
+ * Write tier is for configuration that grants nobody authority. A tool carries
+ * `admin: true`, which demands the `mcp:operator:admin` scope on top of the
+ * role check, when it is irreversible, moves a secret through the MCP client,
+ * or could turn a write token into admin power, a credential or a copy of
+ * end-user data: `configure_billing_provider`, `cancel_subscription`,
+ * `mint_api_key`, `update_auth_config` (it decides where sign-in links land),
+ * the two webhook endpoint tools (they pick where every event is posted) and
+ * `change_member_role`. The capped tools stay in write tier for MEMBER-level
+ * work and call `assertAdminTierFor` before anything that touches OWNER or
+ * ADMIN authority. `test/operator-mcp-write-tier-escalation.test.ts` holds a
+ * ruling for every write tool and fails when a new one has none.
+ *
+ * Still deliberately absent: delete application and webhook-secret rotation,
+ * no undo, and no confirmation step an agent can be trusted to have surfaced
+ * to a human.
  */
 
 import type { Application, TenantRole } from '@prisma/client';
@@ -74,6 +81,7 @@ import {
   type OperatorTool,
   type OperatorToolContext,
 } from './operator-tools.js';
+import { assertAdminTierFor } from './admin-tier.js';
 
 /**
  * Resolve a workspace member's membership id from their tenant-user id, scoped
@@ -81,6 +89,10 @@ import {
  * indistinguishable from a non-existent one (no cross-tenant reach).
  */
 async function membershipIdInTenant(tenantId: string, tenantUserId: string): Promise<string> {
+  return (await membershipInTenant(tenantId, tenantUserId)).id;
+}
+
+async function membershipInTenant(tenantId: string, tenantUserId: string): Promise<{ id: string; role: TenantRole }> {
   const membership = await prisma.tenantMembership.findUnique({
     where: { tenantUserId_tenantId: { tenantUserId, tenantId } },
   });
@@ -92,7 +104,7 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
       fix: 'Call list_members to see members and their tenantUserId values.',
     });
   }
-  return membership.id;
+  return { id: membership.id, role: membership.role };
 }
 
 /**
@@ -213,6 +225,24 @@ export function assertOrganizationsEnabled(app: Application): void {
       fix: 'Call update_auth_config with { applicationId, organizationsEnabled: true } first, then retry.',
     });
   }
+}
+
+const PRIVILEGED_ORG_ROLE = 'an OWNER- or ADMIN-tier organization role';
+
+/**
+ * Security: an organization role above MEMBER tier is authority over a
+ * customer's organization, so write tier may only create, edit, reassign onto
+ * or delete MEMBER-tier roles.
+ */
+async function assertWriteTierMayTouchRole(
+  ctx: OperatorToolContext,
+  applicationId: string,
+  roleName: string,
+  action: string,
+): Promise<void> {
+  const tiers = await organizationRolesService.baseRoleMap(applicationId);
+  const tier = tiers.get(roleName);
+  if (tier !== undefined && tier !== 'MEMBER') assertAdminTierFor(ctx, `${action} ${PRIVILEGED_ORG_ROLE}`);
 }
 
 /** Shared by the device and support tools: the end-user must be in an app the operator can read. */
@@ -408,7 +438,8 @@ export const operatorWriteTools: OperatorTool[] = [
       'enforces permissions on that tier, never on the name, so a "content-manager" on tier ' +
       'MEMBER can do exactly what MEMBER can. Requires organizations to be enabled on the ' +
       'application. Names are lowercase (letters, digits, hyphens, underscores); OWNER, ' +
-      'ADMIN and MEMBER are reserved built-ins.',
+      'ADMIN and MEMBER are reserved built-ins. A `baseRole` of OWNER or ADMIN needs admin ' +
+      'access (the mcp:operator:admin scope); write access creates MEMBER-tier roles only.',
     write: true,
     inputSchema: {
       type: 'object',
@@ -428,6 +459,7 @@ export const operatorWriteTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const app = await loadAppInTenant(ctx, String(args.applicationId));
       assertOrganizationsEnabled(app);
+      if (args.baseRole !== 'MEMBER') assertAdminTierFor(ctx, `Creating ${PRIVILEGED_ORG_ROLE}`);
       const created = await organizationRolesService.create({
         applicationId: app.id,
         name: String(args.name),
@@ -449,7 +481,8 @@ export const operatorWriteTools: OperatorTool[] = [
       'immutable because memberships store it by value, so renaming means deleting with ' +
       '`reassignTo` instead. A built-in role (OWNER/ADMIN/MEMBER) cannot be re-tiered. ' +
       'Changing `baseRole` changes what every member already holding this role may do, in ' +
-      'every organization in the application.',
+      'every organization in the application. Editing a role that is OWNER or ADMIN tier, or ' +
+      'raising one to those tiers, needs admin access (the mcp:operator:admin scope).',
     write: true,
     inputSchema: {
       type: 'object',
@@ -466,6 +499,10 @@ export const operatorWriteTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const app = await loadAppInTenant(ctx, String(args.applicationId));
       assertOrganizationsEnabled(app);
+      await assertWriteTierMayTouchRole(ctx, app.id, String(args.name), 'Editing');
+      if (args.baseRole !== undefined && args.baseRole !== 'MEMBER') {
+        assertAdminTierFor(ctx, `Raising a role to ${PRIVILEGED_ORG_ROLE}`);
+      }
       const updated = await organizationRolesService.update({
         applicationId: app.id,
         name: String(args.name),
@@ -491,7 +528,8 @@ export const operatorWriteTools: OperatorTool[] = [
       'If memberships or pending invitations still reference the role, pass `reassignTo` ' +
       'with another role name, and holders are moved and the role dropped in one transaction. ' +
       'Reassigning an OWNER-tier role to a lower tier is refused, because it would leave ' +
-      'organizations without an owner.',
+      'organizations without an owner. Deleting an OWNER- or ADMIN-tier role, or reassigning ' +
+      'holders onto one, needs admin access (the mcp:operator:admin scope).',
     write: true,
     inputSchema: {
       type: 'object',
@@ -506,6 +544,10 @@ export const operatorWriteTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const app = await loadAppInTenant(ctx, String(args.applicationId));
       assertOrganizationsEnabled(app);
+      await assertWriteTierMayTouchRole(ctx, app.id, String(args.name), 'Deleting');
+      if (args.reassignTo !== undefined) {
+        await assertWriteTierMayTouchRole(ctx, app.id, String(args.reassignTo), 'Reassigning members onto');
+      }
       const result = await organizationRolesService.remove({
         applicationId: app.id,
         name: String(args.name),
@@ -748,6 +790,7 @@ export const operatorWriteTools: OperatorTool[] = [
         name: String(args.name),
         scopes,
         revealsEndUserIps: mayReadRawIps(ctx.role, accessContextFromTool(ctx).scopes),
+        createdByTenantUserId: ctx.tenantUserId,
         ...(expiresAt !== undefined && { expiresAt }),
       });
 
@@ -809,8 +852,13 @@ export const operatorWriteTools: OperatorTool[] = [
       "the enabled sign-in methods (e.g. ['password','oauth']), `mfa` for the MFA policy, " +
       'and `signupMode` to control public sign-up. It deliberately cannot turn this ' +
       'application into a public OpenID Provider (`oidcEnabled`) or reopen client ' +
-      'registration (`dynamicClientRegistration`); those stay operator-console decisions.',
+      'registration (`dynamicClientRegistration`); those stay operator-console decisions. ' +
+      'Needs admin access (the mcp:operator:admin scope).',
     write: true,
+    // Security: `appUrl` and `redirectUrls` decide where magic-link and reset
+    // tokens land, and this tool can switch off MFA and verification, so a
+    // write-tier token holding it could take over every end-user account.
+    admin: true,
     inputSchema: {
       type: 'object',
       properties: {
@@ -952,7 +1000,11 @@ export const operatorWriteTools: OperatorTool[] = [
           welcomeEmail: parseWelcomeEmail(args.welcomeEmail),
         }),
       };
-      const updated = await applicationsService.updateAuthConfig({ applicationId: app.id, patch });
+      const updated = await applicationsService.updateAuthConfig({
+        applicationId: app.id,
+        patch,
+        actorTenantUserId: ctx.tenantUserId,
+      });
       audit(ctx, 'app.auth_config_updated', app.id, { fields: Object.keys(patch) });
       return { id: updated.id, slug: updated.slug, authConfig: updated.authConfig };
     },
@@ -961,8 +1013,13 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'create_webhook_endpoint',
     description:
       'Register an outbound webhook endpoint for an application. Returns the endpoint id ' +
-      'and the signing secret, the secret is shown ONCE here and cannot be retrieved later.',
+      'and the signing secret, the secret is shown ONCE here and cannot be retrieved later. ' +
+      'Needs admin access (the mcp:operator:admin scope).',
     write: true,
+    // Security: the URL receives every subscribed event with its end-user
+    // data, and the signing secret is returned, so a write-tier token holding
+    // this could copy the Application's event stream to a host of its choosing.
+    admin: true,
     inputSchema: {
       type: 'object',
       properties: {
@@ -979,6 +1036,7 @@ export const operatorWriteTools: OperatorTool[] = [
         applicationId: app.id,
         url: String(args.url),
         events: (args.events as string[]) ?? [],
+        createdByTenantUserId: ctx.tenantUserId,
       });
       audit(ctx, 'app.webhook_endpoint_created', app.id, {
         endpointId: endpoint.id,
@@ -997,8 +1055,11 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'update_webhook_endpoint',
     description:
       'Update an outbound webhook endpoint, its URL, subscribed events, or enabled flag. ' +
-      'Only the fields you pass change. Does not rotate the signing secret.',
+      'Only the fields you pass change. Does not rotate the signing secret. Needs admin ' +
+      'access (the mcp:operator:admin scope).',
     write: true,
+    // Security: re-pointing the URL redirects the event stream, see create_webhook_endpoint.
+    admin: true,
     inputSchema: {
       type: 'object',
       properties: {
@@ -1016,6 +1077,7 @@ export const operatorWriteTools: OperatorTool[] = [
       const endpoint = await webhookService.updateEndpoint({
         applicationId: app.id,
         endpointId: String(args.endpointId),
+        actorTenantUserId: ctx.tenantUserId,
         ...(args.url !== undefined && { url: String(args.url) }),
         ...(args.events !== undefined && { events: args.events as string[] }),
         ...(args.enabled !== undefined && { enabled: args.enabled === true }),
@@ -1036,8 +1098,9 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'invite_member',
     description:
       'Invite a teammate to the workspace by email with a role (OWNER / ADMIN / MEMBER). ' +
-      'Sends an invitation email with a secure link. An ADMIN can only invite MEMBERs; ' +
-      'inviting an OWNER/ADMIN requires the OWNER role.',
+      'Sends an invitation email with a secure link. Write access invites MEMBERs only: ' +
+      'inviting an OWNER or ADMIN needs the OWNER role and admin access (the ' +
+      'mcp:operator:admin scope).',
     write: true,
     inputSchema: {
       type: 'object',
@@ -1049,6 +1112,8 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
+      // Security: an OWNER or ADMIN invitation to an address the caller picks is a new admin seat.
+      if (args.role !== 'MEMBER') assertAdminTierFor(ctx, 'Inviting an OWNER or ADMIN');
       const result = await tenantWorkspacesService.createInvitation({
         tenantId: ctx.tenantId,
         invitedById: ctx.tenantUserId,
@@ -1104,11 +1169,15 @@ export const operatorWriteTools: OperatorTool[] = [
   },
   {
     name: 'change_member_role',
+    confirmedOperatorOnly: 'change what a member of the workspace can do',
     description:
       "Change a workspace member's role (OWNER / ADMIN / MEMBER). Identify the member by " +
       'tenantUserId (from list_members). Guards against demoting the last OWNER; an ADMIN ' +
-      'can only manage MEMBERs.',
+      'can only manage MEMBERs. Needs admin access (the mcp:operator:admin scope).',
     write: true,
+    // Security: every useful role change grants or removes OWNER or ADMIN
+    // authority, so nothing of this tool is left for write tier.
+    admin: true,
     inputSchema: {
       type: 'object',
       properties: {
@@ -1137,7 +1206,9 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'remove_member',
     description:
       'Remove a member from the workspace by tenantUserId (from list_members). Reversible by ' +
-      're-inviting. Guards against removing the last OWNER; an ADMIN can only remove MEMBERs.',
+      're-inviting. Guards against removing the last OWNER; an ADMIN can only remove MEMBERs. ' +
+      'Write access removes MEMBERs only: removing an OWNER or ADMIN needs admin access (the ' +
+      'mcp:operator:admin scope).',
     write: true,
     inputSchema: {
       type: 'object',
@@ -1147,7 +1218,10 @@ export const operatorWriteTools: OperatorTool[] = [
     },
     handler: async (ctx, args) => {
       const tenantUserId = String(args.tenantUserId);
-      const membershipId = await membershipIdInTenant(ctx.tenantId, tenantUserId);
+      const membership = await membershipInTenant(ctx.tenantId, tenantUserId);
+      // Security: removing the other owners and admins leaves the token's holder in sole control.
+      if (membership.role !== 'MEMBER') assertAdminTierFor(ctx, 'Removing an OWNER or ADMIN');
+      const membershipId = membership.id;
       await tenantWorkspacesService.removeMember({
         tenantId: ctx.tenantId,
         membershipId,
@@ -1160,10 +1234,10 @@ export const operatorWriteTools: OperatorTool[] = [
   },
 
   // ── Admin tools (mcp:operator:admin), financial / secret-handling ──────────
-  // These require the admin scope AND an OWNER/ADMIN role. The connector denies
-  // them by default; the operator opts in per-tool. Still re-scoped by tenant.
+  // These require the admin scope AND an OWNER/ADMIN role. Still re-scoped by tenant.
   {
     name: 'configure_billing_provider',
+    confirmedOperatorOnly: 'store billing provider credentials',
     description:
       "Set an application's billing-provider credentials. Providers: " +
       registryNames.map((n) => `${n} (${getModule(n)!.credentialSchema.map((f) => f.key).join(', ')})`).join('; ') +

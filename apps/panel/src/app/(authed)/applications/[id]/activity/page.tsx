@@ -12,7 +12,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { ActorCell } from '@/components/ActorCell';
 import { Pager, readOffset, readPageSize } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
-import { eventDetails, humanizeEventType, resolveActorEmails } from '@/lib/security-events';
+import { eventDetails, humanizeEventType, actorEmailsOf } from '@/lib/security-events';
 
 /**
  * Per-application Activity log. End-user-scoped events (sign-ups, sign-ins,
@@ -108,7 +108,7 @@ export default async function ActivityPage({
   // The scan hit its ceiling, so "no more results" isn't provable.
   const scanTruncated = filterActorId !== null && fetched.length >= SCAN_LIMIT;
 
-  const actorEmails = await resolveActorEmails(events);
+  const actorEmails = actorEmailsOf(events);
   const extraParams = email ? { email } : undefined;
 
   return (

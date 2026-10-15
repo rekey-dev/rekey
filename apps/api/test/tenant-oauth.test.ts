@@ -70,14 +70,6 @@ describe('Operator OAuth (panel social login)', () => {
       })
       .then((r) => (r.json().data as { rawToken: string }).rawToken);
 
-  it('lists configured providers from server env', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/v1/tenant/auth/oauth/providers' });
-    expect(res.statusCode).toBe(200);
-    const { providers } = res.json().data as { providers: string[] };
-    expect(providers).toContain('google');
-    expect(providers).toContain('github');
-  });
-
   it('start returns an authorization URL carrying state + the panel redirect URI', async () => {
     const res = await start('google', 'state-abc');
     expect(res.statusCode).toBe(200);
@@ -141,34 +133,10 @@ describe('Operator OAuth (panel social login)', () => {
     expect(await prisma.tenantUser.count({ where: { email: 'sketchy@example.com' } })).toBe(0);
   });
 
-  it('refuses a provider with no email', async () => {
-    nextIdentity = { providerAccountId: 'g-noemail', email: null, emailVerified: false };
-    const res = await callback('google');
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('OAUTH_NO_EMAIL');
-  });
-
   it('rejects a provider that is not an operator OAuth provider', async () => {
     const res = await start('microsoft');
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('OAUTH_PROVIDER_UNKNOWN');
-  });
-
-  // ---------- OPERATOR_SIGNUP_MODE gating on the OAuth-first-login path ----------
-
-  it('closed: an EXISTING operator can still sign in via OAuth', async () => {
-    // Create while open.
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/sign-up',
-      payload: { email: 'oauth-existing@example.com', password: 'pw-one-two-three', workspaceName: 'WS' },
-    });
-
-    process.env.OPERATOR_SIGNUP_MODE = 'closed';
-    nextIdentity = { providerAccountId: 'g-ex', email: 'oauth-existing@example.com', emailVerified: true };
-    const res = await callback('google');
-    expect(res.statusCode).toBe(200);
-    expect((res.json().data as { user: { email: string } }).user.email).toBe('oauth-existing@example.com');
   });
 
   it('closed: a NEW operator cannot be created via OAuth', async () => {

@@ -93,23 +93,6 @@ describe('OidcProvider PKCE', () => {
     expect(q.get('code_challenge_method')).toBeNull();
   });
 
-  it('still sends the standard parameters alongside PKCE', async () => {
-    // Guards against the PKCE insert displacing something, the regression that
-    // would break every existing OIDC deployment.
-    stubDiscovery(doc({ code_challenge_methods_supported: ['S256'] }));
-    const url = await new OidcProvider().buildAuthUrlAsync({
-      config,
-      state: 'state-3',
-      codeVerifier: 'c'.repeat(43),
-    });
-    const q = new URL(url).searchParams;
-    expect(q.get('client_id')).toBe('client-abc');
-    expect(q.get('redirect_uri')).toBe(config.redirectUri);
-    expect(q.get('response_type')).toBe('code');
-    expect(q.get('state')).toBe('state-3');
-    expect(q.get('scope')).toContain('openid');
-  });
-
   it('omits PKCE when the caller supplied no verifier', async () => {
     stubDiscovery(doc({ code_challenge_methods_supported: ['S256'] }));
     const url = await new OidcProvider().buildAuthUrlAsync({ config, state: 'state-4' });

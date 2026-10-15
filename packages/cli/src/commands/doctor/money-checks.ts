@@ -37,21 +37,17 @@ function plural(count: number, noun: string): string {
 
 /**
  * A price in a currency that cannot be sold, or at an amount the currency
- * cannot be priced at, and the plans the API itself reports as stored with a
- * malformed currency.
+ * cannot be priced at.
  */
 export function planCurrenciesCheck(applicationId: string, plans: readonly PlanDto[]): Finding {
   const active = selling(plans);
-  const offenders = active.flatMap((plan) => [
-    ...plan.prices.flatMap((price) => {
+  const offenders = active.flatMap((plan) =>
+    plan.prices.flatMap((price) => {
       if (!isSellableCurrency(price.currency)) return [`${plan.slug}: ${price.currency} is not a currency a price can be in`];
       const amount = validatePriceAmount(price.currency, price.amount);
       return amount.ok ? [] : [`${plan.slug}: ${formatMoney(price.amount, price.currency)} (${amount.message})`];
     }),
-    ...(plan.checkout?.blockers ?? [])
-      .filter((blocker) => blocker.code === 'PLAN_CURRENCY_INVALID')
-      .map((blocker) => `${plan.slug}: ${blocker.code}: ${blocker.message}`),
-  ]);
+  );
   if (offenders.length === 0) {
     return { status: 'ok', message: `${plural(active.length, 'active plan')}, every price in a sellable currency` };
   }
@@ -60,7 +56,7 @@ export function planCurrenciesCheck(applicationId: string, plans: readonly PlanD
     message: `Cannot be sold as priced: ${offenders.join('; ')}`,
     fix:
       `Stop selling an additional price with \`rekey plans prices archive <plan> <currency> --app ${applicationId}\` and add one in a sellable currency. ` +
-      `Change a default price with PATCH /api/v1/tenant/applications/${applicationId}/plans/<slug> and a body such as {"amount": 1900, "currency": "USD"}.`,
+      `Change a default price with PATCH /api/v1/tenant/applications/${applicationId}/plans/<slug> and a body such as {"price": {"currency": "USD", "amount": 1900}}.`,
   };
 }
 
@@ -264,6 +260,6 @@ export function billingOutboxCheck(status: BillingOutboxStatus): Finding {
       (status.oldestPendingAt === null ? '' : `. Oldest waiting since ${status.oldestPendingAt}`),
     fix:
       'GET /api/v1/admin/metrics/billing-outbox lists each stuck row with the error of its last attempt (`stuck[].lastError`). ' +
-      'A row the running API build cannot read drains once a build that can is deployed; the API logs name the cause.',
+      'A row whose payload does not match its schema is kept and never written by itself; the API logs name the field at fault.',
   };
 }

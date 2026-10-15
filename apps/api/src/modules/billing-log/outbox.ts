@@ -40,11 +40,11 @@ export function retryDelayMs(attempts: number): number {
  * Move up to `limit` queued events into the log, oldest first, then prune
  * rows processed long ago. Returns how many events were settled.
  *
- * A payload this build's schema refuses is NOT settled. During a rolling
- * deploy an older build drains events a newer one queued, and marking those
- * processed would discard them. The row keeps its payload, records the
- * failure and waits for a build that can read it. Rows behind it are not held
- * up: a failed row is skipped until its next attempt is due.
+ * A payload the event schema refuses is NOT settled: marking it processed
+ * would discard a billing event. The row keeps its payload and records the
+ * failure, and `rekey doctor` reports it once it has failed five times. Rows
+ * behind it are not held up: a failed row is skipped until its next attempt
+ * is due.
  *
  * @example
  * const settled = await drainBillingEventOutbox(100, app.log);
@@ -82,7 +82,7 @@ export async function drainBillingEventOutbox(limit = DEFAULT_BATCH, log?: Billi
         });
         log?.warn(
           { outboxId: row.id, applicationId: row.applicationId, attempts, issue },
-          'billing log: queued event does not match this build\'s schema; kept for retry',
+          'billing log: queued event does not match its schema; kept, not written to the log',
         );
         return 0;
       }

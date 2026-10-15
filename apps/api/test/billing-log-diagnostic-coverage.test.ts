@@ -18,6 +18,9 @@ import { buildApp } from '../src/app.js';
 import { admitDiagnosticEvent } from '../src/modules/billing-log/diagnostic-bound.js';
 import { DIAGNOSTIC_PER_REASON_PER_HOUR, flushDiagnosticAggregates } from '../src/modules/billing-log/index.js';
 import { bearer, operatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const BOUNDS_OWN_RECORD = 'diagnostic.aggregated';
 const DIAGNOSTIC_TYPES = (Object.keys(BILLING_EVENT_TIER) as BillingEventType[]).filter(

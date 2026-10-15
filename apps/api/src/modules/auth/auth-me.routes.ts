@@ -28,7 +28,7 @@ import { applicationDisabled } from '../../middleware/api-key-auth.js';
 import { resolveImpersonation } from '../../middleware/user-session.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
-import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { accessTokenEndedByStamp } from '../../lib/session-stamp.js';
 import {
   ME_INCLUDED_PROPERTIES_SCHEMA,
   ME_INCLUDE_ERRORS,
@@ -153,7 +153,7 @@ async function verifyTokenOnlySession(req: FastifyRequest): Promise<void> {
   // The same kill switches requireUserSession applies: a token that
   // predates the user's last revoke-everything, or whose own session or
   // device was ended, must not read their record here either.
-  if (sessionIssuedBefore(claims, sessionsInvalidBefore) || sessionEnded) throw invalid;
+  if (accessTokenEndedByStamp(claims, sessionsInvalidBefore) || sessionEnded) throw invalid;
 
   req.endUser = endUser;
   if (claims.dev) req.deviceId = claims.dev;

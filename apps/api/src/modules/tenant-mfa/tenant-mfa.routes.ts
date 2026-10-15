@@ -34,6 +34,7 @@ import { authRateLimit } from '../../lib/rate-limit.js';
 import { assertTenantStepUp } from '../../lib/step-up.js';
 import { ok, okFlag, errs } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 
 /**
  * The 401/403 pair `requireTenantSession` (middleware/tenant-session.ts) produces, shared by
@@ -172,6 +173,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const proof = ProofBody.parse(req.body ?? {});
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'turn on two-factor authentication');
       await stepUpIfEnrolled(req.tenantUser!.id, proof, 're-enroll two-factor authentication');
       const result = await tenantMfaService.setup({
         tenantUserId: req.tenantUser!.id,
@@ -218,6 +220,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const body = CodeBody.parse(req.body);
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'turn on two-factor authentication');
       return {
         success: true,
         data: await tenantMfaService.confirm({

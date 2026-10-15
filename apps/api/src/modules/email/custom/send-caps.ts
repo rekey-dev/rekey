@@ -39,17 +39,24 @@ export async function capsForTenant(tenantId: string): Promise<SendCaps> {
   };
 }
 
+const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+
 /**
  * The address a per-recipient allowance is counted under: lowercased, with a
- * `+tag` dropped from the local part, so `a+1@x` and `a+2@x` share one.
+ * `+tag` dropped from the local part, so `a+1@x` and `a+2@x` share one. Gmail
+ * also ignores dots in the local part and serves `googlemail.com` as the same
+ * mailbox, so `a.b@googlemail.com` and `ab@gmail.com` share one too. Dots are
+ * left alone everywhere else, where they can name different mailboxes.
  */
 export function recipientCapKey(address: string): string {
   const lower = address.trim().toLowerCase();
   const at = lower.lastIndexOf('@');
   if (at <= 0) return lower;
-  const local = lower.slice(0, at);
-  const plus = local.indexOf('+');
-  return `${plus > 0 ? local.slice(0, plus) : local}${lower.slice(at)}`;
+  const domain = lower.slice(at + 1);
+  const plus = lower.indexOf('+');
+  const local = plus > 0 && plus < at ? lower.slice(0, plus) : lower.slice(0, at);
+  if (GMAIL_DOMAINS.has(domain)) return `${local.replaceAll('.', '')}@gmail.com`;
+  return `${local}@${domain}`;
 }
 
 interface Counter {

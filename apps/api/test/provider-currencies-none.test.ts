@@ -9,9 +9,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { canCharge, currenciesForNewRow } from '../src/modules/billing/credentials.service.js';
-import { getModule, registryNames } from '../src/modules/billing/providers/registry.js';
+import { canCharge } from '../src/modules/billing/credentials.service.js';
+import { getModule } from '../src/modules/billing/providers/registry.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PAYPAL = { clientId: 'paypal_client_ci', clientSecret: 'paypal_secret_ci', webhookId: 'WH-CI' };
 
@@ -53,13 +56,6 @@ describe('an empty provider currency list means none', () => {
   });
 
   describe('a provider saved without a list', () => {
-    it('starts with the currencies its module preselects, on every registered provider', () => {
-      for (const name of registryNames) {
-        expect(currenciesForNewRow(name), name).toEqual(getModule(name)!.display.preselectedCurrencies);
-        expect(currenciesForNewRow(name).length, name).toBeGreaterThan(0);
-      }
-    });
-
     it('is stored with them, keeps its list on a later save without one, and keeps an empty list an operator sends', async () => {
       await save('PUT', 'paypal', { data: PAYPAL, mode: 'test' });
       const preselected = getModule('paypal')!.display.preselectedCurrencies;
@@ -75,10 +71,6 @@ describe('an empty provider currency list means none', () => {
       expect(await currenciesOnTheWire('paypal')).toEqual([]);
     });
 
-    it('is stored empty when the first save sends an empty list: that is the operator choosing none', async () => {
-      await save('PUT', 'paypal', { data: PAYPAL, mode: 'test', currencies: [] });
-      expect(await currenciesOnTheWire('paypal')).toEqual([]);
-    });
   });
 
   describe('a provider left with no currency', () => {

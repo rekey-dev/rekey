@@ -57,7 +57,76 @@ Creates a new EndUser in the calling Application.
 }
 ```
 
-Errors: `EMAIL_ALREADY_EXISTS` (409), `PASSWORD_TOO_SHORT` (400), `AUTH_METHOD_DISABLED` (400), and the sign-up policy refusals `SIGNUP_DISABLED`, `SIGNUP_REQUIRES_SECRET_KEY` and `SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED` (403, see [Sign-up email rules](#sign-up-email-rules)).
+Errors: `EMAIL_ALREADY_EXISTS` (409, see below for when), `EMAIL_NOT_VERIFIED` (403, when the Application requires a verified address), `EMAIL_VERIFIED_REQUIRES_SECRET_KEY` (403), `PASSWORD_TOO_SHORT` (400), `AUTH_METHOD_DISABLED` (400), and the sign-up policy refusals `SIGNUP_DISABLED`, `SIGNUP_REQUIRES_SECRET_KEY` and `SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED` (403, see [Sign-up email rules](#sign-up-email-rules)).
+
+`emailVerified: true` in the body (secret key only) creates the account already verified and sends no verification email. Send it when your server has confirmed the person owns the address. A publishable key that sends it is refused with `EMAIL_VERIFIED_REQUIRES_SECRET_KEY`.
+
+#### An unverified account belongs to whoever proves the mailbox
+
+Sign-up asks for no proof of the address, so anyone can register a password for an address they cannot read. Until the address is confirmed the account is unverified (`emailVerified: false`), and two rules apply to it whoever created it, a browser, your server or an import:
+
+1. **It cannot gain another way to sign in.** Passkey registration, MFA enrolment and linking a provider (`/auth/oauth/:provider/link/*`) answer 403 `EMAIL_NOT_VERIFIED`. Offer those after verification, not straight after sign-up.
+2. **The first proof of the mailbox takes the account.** A magic-link sign-in, a social sign-in whose provider verified the same address, or a completed password reset marks the address verified and, in the same step, removes everything set before it: the password (a reset replaces it with the new one), every session, passkeys, a second factor, other linked providers, pending reset, verification and sign-in links, device bindings, organization invitations the account sent that nobody accepted, and the keys of its personal licences (see below). The user id, role, metadata, profile, subscriptions, credits, licences and organization memberships stay. The person who proved the mailbox gets a fresh session.
+
+When that happens Rekey records the security event `auth.unverified_account_claimed` and sends a `user.updated` webhook with `changed: ["emailVerified", "credentials"]`. When a password, passkey, linked provider or licence key was removed, it also mails the address the `account_claimed` notice ("your earlier sign-in details were removed, set a new password"). A reset always sends `password_changed`, and the notice as well when it removed more than the password.
+
+**Licence keys.** A licence key is shown once, to whoever was signed in when it was issued, and it activates devices by itself. On a claim, each personal licence of the account gets a new key that nobody is shown and its activations are removed, so a key the first registrant saw stops working. The licence, its plan and its seats stay with the account, and `user.updated` lists `licenseKeys` in `changed`: issue the user a fresh key when you see it. Licences pooled to an organization keep their keys, because other members use them.
+
+**In-flight sign-ins.** The claim holds the account while it revokes. A password sign-in, refresh or other sign-in that verified just before it gets no session: 401 `INVALID_CREDENTIALS`, `REFRESH_TOKEN_REVOKED` or `CREDENTIAL_SUPERSEDED`. The same holds across a password change, a reset and sign-out everywhere. If what the account holds should be reviewed when its sign-in details change hands, that webhook is the moment.
+
+The verification link is different. It confirms the sign-up it belongs to, password included, so the ordinary "sign up, click confirm, sign in" flow is unchanged.
+
+**What that leaves open, exactly.** `POST /auth/verify-email` takes the token alone, with no session. If someone registers another person's address with a password, the verification email goes to that person, and if they confirm with it, the account becomes verified with the registrant's password still on it: the registrant can sign in, and no claim will ever run for that account, because it is no longer unverified. Operators are protected against this by requiring a session of the account to confirm ([tenant-auth.md](tenant-auth.md#confirming-an-operators-email-address)). End users are not, because with `requireEmailVerification: true` a fresh sign-up has no session to present: the verification link is the only way such an account ever gets one. What stands in the way is the email's own text (the default says to confirm only if you signed up yourself, and that confirming keeps the password chosen at sign-up) and, afterwards, nothing automatic. If your Application gives accounts something worth squatting for, keep that sentence in a customised `email_verification` template, and consider confirming addresses with a magic link instead of a verification link: a magic-link sign-in is a claim, and removes the earlier password.
+
+One exception: an unverified account that already has MFA enrolled (possible only for accounts enrolled before this rule) is neither wiped nor marked verified by a mailbox proof. The sign-in asks for the code first. A correct code shows the person at the mailbox is the person who enrolled, so the account is marked verified and keeps everything. Without the code nothing changes. A social sign-in held this way does not link the provider until the code is given.
+
+Signing up again with an address that already has an unverified account never replaces its password. The owner's way in is a reset or a magic link.
+
+#### Accounts verified before 2.2.0
+
+Before 2.2.0 a magic-link sign-in marked an account verified and left its password in place (so did a Google or GitHub sign-in for operators). If someone had registered a person's address with a password first, and the person later signed in by link, the account is verified today and the first registrant's password still signs in to it. The upgrade does not change those accounts, for a reason worth stating exactly:
+
+- **What would identify one:** a consumed sign-in link (or a linked provider identity) and no consumed verification or reset link.
+- **Why the database cannot say:** sign-in links are deleted as soon as they expire (15 minutes), and reset and verification links are deleted when they expire too (`lib/token-prune.ts`). After that, an account that was verified by a sign-in link, one verified by its verification link, and one whose owner reset the password all look the same: `emailVerified: true` with a password. A linked provider identity survives, but it does not say whether a verification link was also used, and most accounts with both a password and a provider belong to one person.
+- **What was therefore not done:** no password was removed and no session ended on upgrade. Wiping every verified account that has a password and has ever used a link or a provider would sign out and lock out mostly honest users.
+
+The accounts worth a look are verified, have a password, were created by password sign-up, and last signed in another way. This lists them for one Application (it misses one whose first registrant has signed in by password since, and includes honest users who use both):
+
+```sql
+SELECT u.id, u.email, u.created_at, u.last_sign_in_via
+FROM end_users u
+WHERE u.application_id = '<application id>'
+  AND u.email_verified = true
+  AND u.password_hash IS NOT NULL
+  AND u.created_via = 'password'
+  AND u.last_sign_in_via IN ('magic_link', 'oauth');
+```
+
+For any you are unsure of, end the sessions (`POST /api/v1/tenant/applications/:id/end-users/:euid/sessions/revoke-all`) and send a password reset (`…/send-password-reset`): the reset replaces the password, and the first registrant's stops working. Operators are a narrower case. The old operator magic link never marked an address verified; only a Google or GitHub sign-in did, and it left the password. Operator reset links are kept, so an operator who is verified, has a password and has never completed a reset is one whose password predates that provider sign-in:
+
+```sql
+SELECT u.id, u.email, u.created_at
+FROM tenant_users u
+WHERE u.email_verified = true
+  AND u.password_hash IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM tenant_password_reset_tokens t
+    WHERE t.tenant_user_id = u.id AND t.consumed_at IS NOT NULL
+  );
+```
+
+That is still mostly people who signed up with a password and later used the Google button themselves (and every Rekey Cloud buyer, whose placeholder password nobody knows), and nothing records which provider sign-in it was, so these are not wiped either. An operator on that list ends it for their own account by changing or resetting the password, which signs out every session.
+
+#### What sign-up says about an address that is taken
+
+| Application | Publishable key | Secret key |
+|---|---|---|
+| `requireEmailVerification` on | **403 `EMAIL_NOT_VERIFIED`**, the same status, body and headers a new address gets | 409 `EMAIL_ALREADY_EXISTS` |
+| `requireEmailVerification` off (default) | 409 `EMAIL_ALREADY_EXISTS` | 409 `EMAIL_ALREADY_EXISTS` |
+
+With verification required, a new sign-up gets no session anyway, so a taken address is answered identically and a browser cannot use sign-up to learn which addresses have accounts. Show "check your inbox" for `EMAIL_NOT_VERIFIED` on sign-up; a form that waited for `EMAIL_ALREADY_EXISTS` to say "sign in instead" will not see it. The owner of the address is told by email instead: `signup_existing_account` (you already have an account, sign in or reset) for a verified account, `signup_finish_setup` (a link to choose a password) for an unverified one. Both count against the [per-recipient email limit](#how-much-auth-email-one-address-can-be-sent).
+
+With verification off, sign-up hands out a live session, which no refusal can imitate, so the 409 stays and an address can be tested this way. Two things bound it: 10 sign-ups a minute and 30 an hour per (Application, client address) from a publishable key, whatever emails they name. **Turning on `requireEmailVerification` is how you close it.**
 
 Email is normalised to lowercase before storage. Email is unique per Application — the same address can exist in multiple Applications as separate users.
 
@@ -240,9 +309,6 @@ a 404. The fastest check is to open the registered URL directly: a 404 means
 the string is registered against a route that does not exist, which is the
 failure above.
 
-For rekey.dev's own social sign-in, see
-[rekey-cloud-social-sign-in.md](rekey-cloud-social-sign-in.md), which names the
-exact values for that deployment.
 ## Roles: two axes, and which one you want
 
 Rekey has **two independent role systems**. They are easy to confuse and the
@@ -575,6 +641,8 @@ POST /api/v1/auth/forgot-password   { email }
 - **Always returns 200** with the same shape, regardless of whether the email exists. The `delivered` flag tells the calling server which case it was. *Never* enumerate users via this endpoint.
 - **Rekey sends the email when it can.** With an email transport configured (per-Application BYO Resend/SMTP, or a deployment-wide `RESEND_DEFAULT_API_KEY`), Rekey delivers it and `resetToken` is `null` — the raw token never leaves the server. With no transport, `emailSent: false` and a **secret-key** caller receives the raw token to ship via its own provider; that fallback is why the field exists at all, and it keeps self-hosters and customers who want their own from-address branding working. A publishable-key caller never receives a token, because that key ships in browser code.
 - Token lifetime: 1 hour. Single-use. Stored as SHA-256 hash in `password_reset_tokens`.
+- A publishable key is answered before the mail is built, with the same body whether or not the address has an account.
+- Counted against the [per-recipient email limit](#how-much-auth-email-one-address-can-be-sent). Over it, a publishable key still gets the usual body and nothing is sent; a secret key gets 429 `AUTH_EMAIL_RECIPIENT_CAPPED`.
 
 ### Reset password
 
@@ -585,6 +653,7 @@ POST /api/v1/auth/reset-password   { token, newPassword }
 
 - Single-use token; consumed atomically (race-safe). Replays return `PASSWORD_RESET_TOKEN_USED`.
 - On success, **every refresh token for the user is revoked** — anyone holding a session via the compromised credential is signed out.
+- The reset link went to the mailbox, so completing it also marks the address verified. On an account that was still unverified this is a claim: passkeys, a second factor, linked providers and device bindings set before it are removed with the old password. See [An unverified account belongs to whoever proves the mailbox](#an-unverified-account-belongs-to-whoever-proves-the-mailbox).
 - Cross-application guard: a token issued under app A is rejected if presented through app B's secret key (`PASSWORD_RESET_TOKEN_WRONG_APPLICATION`).
 - Honours `passwordMinLength` from `Application.authConfig`.
 
@@ -598,6 +667,23 @@ Headers: Authorization: Bearer rp_live_…  +  X-Rekey-User-Token: <jwt>
 
 - Verifies `currentPassword` first — wrong returns `INVALID_CREDENTIALS`.
 - On success, every refresh token for the user is revoked. Access tokens minted before the call, the caller's own included, are refused on their next use.
+
+### How much auth email one address can be sent
+
+Reset, magic-link and verification requests take an address from anyone holding the publishable key. The request limits count by caller, so on their own they would let a caller on many addresses fill one inbox. Auth email is therefore also counted by **recipient**: 5 an hour and 15 a UTC day to one mailbox per Application, from any caller and any IP (`AUTH_EMAIL_RECIPIENT_HOURLY_CAP`, `AUTH_EMAIL_RECIPIENT_DAILY_CAP`).
+
+- `a+1@example.com` and `a+2@example.com` are one mailbox. For Gmail, dots in the local part and `googlemail.com` are ignored too.
+- **Counted:** password reset, magic link, verification (including the resend routes and the signed-in `POST /auth/send-verification`), welcome, the two sign-up notices, and operator-triggered resets and resends from the panel. Operator mail has its own count per mailbox: reset, sign-in link, invitation and the confirmation email, including the one sent at sign-up.
+- **Not counted:** security notices (`password_changed`, `mfa_enabled`, `account_claimed`, `operator_account_claimed`, `operator_email_confirmed`).
+- **Also counted:** a built-in template test send from the panel, to the address it is sent to.
+- **Over the limit, from a publishable key:** `/auth/forgot-password`, `/auth/magic-link/request` and `/auth/resend-verification` answer 200 with their usual constant body and send nothing. The allowance is spent before the address is looked up, so a known and an unknown address behave the same and the limit says nothing about whether an account exists.
+- **Over the limit, from a secret key, or on the signed-in resend:** 429 `AUTH_EMAIL_RECIPIENT_CAPPED` with `Retry-After`.
+- **A request that mails nobody gives its reservation back.** Asking for a reset for an address with no account, or a verification mail for an address that is already verified, sends nothing, so it does not use up the allowance of mail to that address: five such requests cannot stop a person's own sign-in mail. Those requests are counted on their own, to the same limits, and a secret key is answered 429 once that count is spent. A known and an unknown address are therefore refused after the same number of requests, and the 429 does not say which is which. The per-IP request limits on those routes still apply.
+- **Mail a request did not ask for by address** (the welcome and verification mails at sign-up) is skipped over the limit. The account is still created: sign-up answers 201.
+- **If Redis is unreachable** the three routes answer 503 `DEPENDENCY_UNAVAILABLE` rather than sending uncounted.
+- The first refusal for a mailbox in an hour records the security event `auth.email_recipient_capped`. It carries a hash of the address, never the address.
+
+Someone who spends another person's allowance leaves that person with five working links in their inbox: a newer link does not cancel an older one, and a link is not tied to the browser that asked for it.
 
 ### What's still deliberately not here
 
@@ -637,6 +723,14 @@ one is upgraded to argon2id on the user's first successful sign-in, the one
 moment the plaintext is in hand. Existing addresses are skipped, never
 updated — an import is not a way to overwrite a live account's password — and
 the whole batch is validated before any row is written.
+
+**Send `emailVerified: true` for every address your old system had confirmed.**
+A row imported without it is unverified, and an unverified account loses its
+imported password and linked identities the first time someone proves the
+mailbox by magic link, social sign-in or password reset (see
+[An unverified account belongs to whoever proves the mailbox](#an-unverified-account-belongs-to-whoever-proves-the-mailbox)).
+That is the right outcome for an address nobody confirmed and the wrong one for
+a user you already verified.
 
 ## Operator end-user management
 
@@ -730,11 +824,13 @@ The auth module enforces:
 - **`sendVerificationEmailOnSignUp`** (default **on**): password sign-up mints a verification token and sends the `email_verification` mail alongside `welcome`. Both are fire-and-forget: a broken or absent transport is logged and dropped, never rolled back into the account creation. Magic-link sign-up doesn't send it, because it creates the user with `emailVerified: true` (consuming the link is the proof). OAuth-first sign-up records the provider's own `email_verified` claim and sends it only when the provider did not vouch for the address. **Ignored while `requireEmailVerification` is on**: the link is then the only way into a new account, so it goes out regardless.
 - **`requireEmailVerification`** (default **off**) — a user whose `emailVerified` is false gets **no session at all**, refused with **403 `EMAIL_NOT_VERIFIED`** rather than `INVALID_CREDENTIALS`: the credential was right and the user needs to be told to check their inbox. Enforced at the single point every session is minted, so it covers sign-up (the account is created, but the response is the 403 — no access or refresh token), sign-in, MFA verification, organization switching, **and refresh**. Re-checking on refresh is what bounds the switch: flip it on and unconfirmed accounts that already hold a refresh token stop renewing within one access-token lifetime, rather than continuing for the 30-day chain. The check always runs after a credential verified, so it neither answers "does this address exist here" nor counts toward the brute-force lockout.
 
-  Magic-link and OAuth sign-in **satisfy** the gate rather than skip it: each proves the address and records `emailVerified: true` (magic link does this for existing accounts too, not only at creation).
+  Magic-link and OAuth sign-in **satisfy** the gate rather than skip it: each proves the address and records `emailVerified: true` (for existing accounts too, not only at creation; an OAuth sign-in does so when the provider verified the same address). On an account that was still unverified, that proof also removes the password and every other credential set before it: see [An unverified account belongs to whoever proves the mailbox](#an-unverified-account-belongs-to-whoever-proves-the-mailbox).
+
+  With the gate on, a publishable-key sign-up for an address that already has an account is answered exactly like a new one (403 `EMAIL_NOT_VERIFIED`), and the owner is told by email. See [What sign-up says about an address that is taken](#what-sign-up-says-about-an-address-that-is-taken).
 
   It is also the prerequisite for the OpenID Connect `email` scope — see [oidc-provider.md](oidc-provider.md#why-email-needs-requireemailverification).
 
-  Turning it on takes effect immediately for accounts that already exist, so send the verification email (above) before enforcing it. A blocked user can ask for a fresh link themselves with **`POST /api/v1/auth/resend-verification`** (`{ email }`, no session — that is the point, since this gate is what denies them one). It answers 200 with a constant body whatever happened, so it discloses nothing about which addresses have accounts, and it is rate-limited per (Application, address, IP) exactly like `/auth/forgot-password`. `POST /auth/send-verification` remains the authenticated version, for a user who *has* a session and is changing their address. Other routes back in: the original email, a magic link if that method is enabled, or an operator flipping the flag from Panel → Application → End-users.
+  Turning it on takes effect immediately for accounts that already exist, so send the verification email (above) before enforcing it. A blocked user can ask for a fresh link themselves with **`POST /api/v1/auth/resend-verification`** (`{ email }`, no session — that is the point, since this gate is what denies them one). It answers 200 with a constant body whatever happened, so it discloses nothing about which addresses have accounts, and it is rate-limited per (Application, address, IP) and per recipient exactly like `/auth/forgot-password`. `POST /auth/send-verification` remains the authenticated version, for a user who *has* a session and is changing their address. Other routes back in: the original email, a magic link if that method is enabled, or an operator flipping the flag from Panel → Application → End-users.
 
   One prerequisite for both: a verification link has to be *buildable*. If the Application has no `appUrl`, no usable `redirectUrls` origin and the deployment has no `DEFAULT_APP_URL`, the automatic sign-up send and `resend-verification` are **skipped entirely** rather than mailing a confirmation with no button in it, and an `auth.email_delivery_failed` event is recorded naming the setting to fix. Set the Application URL (Panel → Application → Auth) before enabling the gate, or pass `verifyUrl` per call.
 - **`welcomeEmail`** (default **`on_signup`**) decides when the `welcome` mail goes out. It is sent once, fire-and-forget, to accounts created by password sign-up, magic-link sign-up or OAuth-first sign-up; operator-created and imported users never get one, an OAuth user who comes back or links a provider to an existing account does not get it again, and the per-event switch (Panel → Application → Email) still applies on top.
@@ -791,7 +887,7 @@ const me = await rekey.auth.getCurrentUser(req.cookies.session, {
 });
 ```
 
-See the type definitions in `@rekey.dev/node` for the full method surface.
+See [`packages/sdk-node/AGENTS.md`](../packages/sdk-node/AGENTS.md) for the full method surface.
 
 ### Routing new users to onboarding
 

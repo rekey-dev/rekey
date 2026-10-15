@@ -17,7 +17,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
-import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { unanchoredTokenEnded } from '../../lib/session-stamp.js';
+import { fromEndedGeneration } from '../../lib/refresh-tokens.js';
+import {
+  assertBasisHolds,
+  lockOperatorCredentials,
+  sessionBasis,
+  type SessionBasis,
+} from '../../lib/session-basis.js';
 import {
   issueOperatorMcpAccessToken,
   verifyOperatorMcpAccessToken,
@@ -294,19 +301,31 @@ export const operatorMcpOAuthService = {
     redirectUri: string;
     codeChallenge: string;
     scope: string;
+    /**
+     * `sessionsInvalidBefore` as the session middleware read it when it
+     * admitted the consenting request. The code is written holding the
+     * operator's row and only while the row still carries that stamp.
+     */
+    basis: SessionBasis;
   }): Promise<string> {
     const raw = randomBytes(32).toString('base64url');
-    await prisma.tenantOAuthAuthCode.create({
-      data: {
-        codeHash: sha256Hex(raw),
-        clientId: args.clientId,
-        tenantUserId: args.tenantUserId,
-        tenantId: args.tenantId,
-        redirectUri: args.redirectUri,
-        codeChallenge: args.codeChallenge,
-        scope: args.scope,
-        expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
-      },
+    await prisma.$transaction(async (tx) => {
+      assertBasisHolds(args.basis, await lockOperatorCredentials(tx, args.tenantUserId));
+      await tx.tenantOAuthAuthCode.create({
+        data: {
+          codeHash: sha256Hex(raw),
+          clientId: args.clientId,
+          tenantUserId: args.tenantUserId,
+          tenantId: args.tenantId,
+          redirectUri: args.redirectUri,
+          codeChallenge: args.codeChallenge,
+          scope: args.scope,
+          expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
+          // This process's clock, the one the stamp is written with, so the
+          // exchange can compare the two.
+          createdAt: new Date(),
+        },
+      });
     });
     return raw;
   },
@@ -334,6 +353,19 @@ export const operatorMcpOAuthService = {
     ) {
       invalid();
     }
+    // Read before the code is spent. A claim deletes unspent codes and moves
+    // the stamp under the operator's row lock, so either the spend below
+    // finds nothing, or the tokens are refused when they are written because
+    // the stamp is no longer this one.
+    const seen = await prisma.tenantUser.findUnique({
+      where: { id: row!.tenantUserId },
+      select: { sessionsInvalidBefore: true },
+    });
+    if (!seen) invalid();
+    // The backstop to the check `createAuthCode` makes when it writes the
+    // code: one from before the last time every session was ended stands for
+    // a consent that no longer counts.
+    if (seen!.sessionsInvalidBefore && row!.createdAt <= seen!.sessionsInvalidBefore) invalid();
     // Atomic single-use claim, a replayed code loses the race.
     const claimed = await prisma.tenantOAuthAuthCode.updateMany({
       where: { id: row!.id, consumedAt: null },
@@ -356,14 +388,21 @@ export const operatorMcpOAuthService = {
         'Operator is no longer a member of the workspace this code was minted for.',
       );
     }
-    return this.issueTokens({
+    const issued = await this.issueTokens({
       tenantUserId: row!.tenantUserId,
       tenantId: row!.tenantId,
       clientId: args.clientId,
       scope: row!.scope,
       userAgent: args.userAgent,
       ip: args.ip,
+      grant: {
+        basis: sessionBasis(
+          seen!,
+          () => new OAuthError('invalid_grant', 'Authorization code is invalid, expired, or already used.'),
+        ),
+      },
     });
+    return issued!;
   },
 
   /**
@@ -430,6 +469,14 @@ export const operatorMcpOAuthService = {
     // backwards. The replay is the legitimate client arriving second, and
     // the token the ATTACKER rotated into stayed live.
     if (row!.revokedAt !== null) {
+      // A token from before the last time every session and grant of this
+      // operator was ended. Replaying it says nothing about the grants they
+      // have now, and must not end the one they made since.
+      const owner = await prisma.tenantUser.findUnique({
+        where: { id: row!.tenantUserId },
+        select: { sessionsInvalidBefore: true },
+      });
+      if (fromEndedGeneration(row!, owner?.sessionsInvalidBefore)) invalid();
       if (row!.replacedById !== null) {
         await this.revokeRefreshFamily(row!);
         throw new OAuthError(
@@ -440,21 +487,6 @@ export const operatorMcpOAuthService = {
       invalid();
     }
     if (row!.expiresAt <= new Date()) invalid();
-    // Atomic revoke, losing the race means a concurrent request redeemed the
-    // same token between the read above and here. Indistinguishable from a
-    // replay from this side, so it gets the same treatment.
-    const revoked = await prisma.tenantMcpRefreshToken.updateMany({
-      where: { id: row!.id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    if (revoked.count !== 1) {
-      await this.revokeRefreshFamily(row!);
-      throw new OAuthError(
-        'invalid_grant',
-        'Refresh token rotation lost a race with another request. Every operator MCP token for this client and workspace has been revoked as a precaution.',
-      );
-    }
-    // Re-confirm membership.
     const membership = await prisma.tenantMembership.findUnique({
       where: {
         tenantUserId_tenantId: { tenantUserId: row!.tenantUserId, tenantId: row!.tenantId },
@@ -470,25 +502,37 @@ export const operatorMcpOAuthService = {
       tenantUserId: row!.tenantUserId,
       tenantId: row!.tenantId,
       clientId: args.clientId,
-      // Carry the grant forward verbatim, a refresh never widens or drops scope.
       scope: row!.scope,
       userAgent: args.userAgent,
       ip: args.ip,
+      grant: { rotates: row!.id },
     });
-    // Record the rotation chain on the old row.
-    const newHash = sha256Hex(String((issued as { refresh_token: string }).refresh_token));
-    const newRow = await prisma.tenantMcpRefreshToken.findUnique({
-      where: { tokenHash: newHash },
-    });
-    if (newRow) {
-      await prisma.tenantMcpRefreshToken
-        .update({ where: { id: row!.id }, data: { replacedById: newRow.id } })
-        .catch(() => undefined);
-    }
-    return issued;
+    if (issued) return issued;
+    // The presented token was spent between the read above and the rotation.
+    // Rotated by another request: reuse, and the family goes. Revoked with no
+    // successor: the grant was ended (a claim, a reset, sign-out everywhere),
+    // which is not a replay.
+    const spent = await prisma.tenantMcpRefreshToken.findUnique({ where: { id: row!.id } });
+    if (spent?.replacedById == null) invalid();
+    await this.revokeRefreshFamily(row!);
+    throw new OAuthError(
+      'invalid_grant',
+      'Refresh token rotation lost a race with another request. Every operator MCP token for this client and workspace has been revoked as a precaution.',
+    );
   },
 
-  /** Shared token-response builder (auth-code + refresh paths). */
+  /**
+   * Mint an access token and write the refresh token it pairs with, holding
+   * the operator's row (lib/session-basis.ts). A code exchange passes the
+   * `basis` it read before spending the code and is refused when the row has
+   * moved on. A refresh passes the token it `rotates`: that token is revoked
+   * and linked to its replacement in the same transaction, and null comes
+   * back when it had already been spent.
+   *
+   * The access token is minted first. It names no session, so all that can
+   * end it early is its `iat` falling at or before a later stamp; minted
+   * after the transaction commits, a claim could stamp in between.
+   */
   async issueTokens(args: {
     tenantUserId: string;
     tenantId: string;
@@ -496,7 +540,8 @@ export const operatorMcpOAuthService = {
     scope: string;
     userAgent?: string | undefined;
     ip?: string | undefined;
-  }): Promise<Record<string, unknown>> {
+    grant: { basis: SessionBasis } | { rotates: string };
+  }): Promise<Record<string, unknown> | null> {
     const access = issueOperatorMcpAccessToken({
       tenantUserId: args.tenantUserId,
       tenantId: args.tenantId,
@@ -505,18 +550,41 @@ export const operatorMcpOAuthService = {
       scope: args.scope,
     });
     const rawRefresh = randomBytes(32).toString('base64url');
-    await prisma.tenantMcpRefreshToken.create({
-      data: {
-        tokenHash: sha256Hex(rawRefresh),
-        tenantUserId: args.tenantUserId,
-        tenantId: args.tenantId,
-        clientId: args.clientId,
-        scope: args.scope,
-        expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
-        userAgent: args.userAgent ?? null,
-        ip: args.ip ?? null,
-      },
+    const { grant } = args;
+    const written = await prisma.$transaction(async (tx) => {
+      const account = await lockOperatorCredentials(tx, args.tenantUserId);
+      if ('basis' in grant) {
+        assertBasisHolds(grant.basis, account);
+      } else {
+        const revoked = await tx.tenantMcpRefreshToken.updateMany({
+          where: { id: grant.rotates, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        if (revoked.count !== 1) return false;
+      }
+      const replacement = await tx.tenantMcpRefreshToken.create({
+        data: {
+          tokenHash: sha256Hex(rawRefresh),
+          tenantUserId: args.tenantUserId,
+          tenantId: args.tenantId,
+          clientId: args.clientId,
+          scope: args.scope,
+          expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
+          // This process's clock, the one the stamp is written with.
+          createdAt: new Date(),
+          userAgent: args.userAgent ?? null,
+          ip: args.ip ?? null,
+        },
+      });
+      if ('rotates' in grant) {
+        await tx.tenantMcpRefreshToken.update({
+          where: { id: grant.rotates },
+          data: { replacedById: replacement.id },
+        });
+      }
+      return true;
     });
+    if (!written) return null;
     return {
       access_token: access.token,
       token_type: 'Bearer',
@@ -541,7 +609,7 @@ export const operatorMcpOAuthService = {
       where: { id: claims.sub },
       select: { sessionsInvalidBefore: true },
     });
-    if (!user || sessionIssuedBefore(claims, user.sessionsInvalidBefore)) return { active: false };
+    if (!user || unanchoredTokenEnded(claims, user.sessionsInvalidBefore)) return { active: false };
     return {
       active: true,
       sub: claims.sub,

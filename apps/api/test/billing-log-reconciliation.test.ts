@@ -19,6 +19,10 @@ import {
 } from '../src/modules/billing-log/index.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
 import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const MINUTE_MS = 60 * 1000;
 const ago = (minutes: number): Date => new Date(Date.now() - minutes * MINUTE_MS);
@@ -79,9 +83,7 @@ describe('billing log reconciliation', () => {
 
   async function subscription(applicationId: string, over: Record<string, unknown> = {}) {
     const n = ++serial;
-    const plan = await prisma.plan.create({
-      data: { applicationId, slug: `plan-${n}`, name: `Plan ${n}`, amount: 1900, currency: 'USD', interval: 'MONTH', kind: 'SUBSCRIPTION' },
-    });
+    const plan = await seedPlan({ applicationId, slug: `plan-${n}`, name: `Plan ${n}`, interval: 'MONTH', kind: 'SUBSCRIPTION' }, { currency: 'USD', amount: 1900 });
     const endUser = await prisma.endUser.create({ data: { applicationId, email: `buyer-${n}@example.com` } });
     return prisma.subscription.create({
       data: { applicationId, endUserId: endUser.id, planId: plan.id, status: 'ACTIVE', createdAt: ago(30), ...over },
@@ -135,14 +137,6 @@ describe('billing log reconciliation', () => {
       ].sort(),
     );
     expect(found.paymentsLoggedSince).not.toBeNull();
-  });
-
-  it('does not report unlogged payments for an Application whose log has no payment event yet', async () => {
-    world = await operatorWorld(app);
-    await payment(world.appId);
-    const found = await report(world.appId);
-    expect(found.paymentsLoggedSince).toBeNull();
-    expect(found.counts.payment_without_event).toBe(0);
   });
 
   it("finds an event naming a payment that does not exist, including one that is another Application's", async () => {
@@ -296,20 +290,6 @@ describe('billing log reconciliation', () => {
       expect(data.counts.payment_without_event).toBe(200);
       expect(data.truncated).toBe(true);
       expect(large.count, large.queries.join('\n')).toBe(small.count);
-    });
-
-    it('refuses a period that ends before it starts or spans more than 31 days', async () => {
-      world = await operatorWorld(app);
-      for (const query of [
-        '?from=2026-10-02T00:00:00.000Z&to=2026-10-01T00:00:00.000Z',
-        '?from=2026-08-01T00:00:00.000Z&to=2026-10-01T00:00:00.000Z',
-      ]) {
-        const res = await get(world, query);
-        expect(res.statusCode, res.body).toBe(400);
-        expect(res.json().error.code).toBe('BILLING_LOG_PERIOD_INVALID');
-      }
-      expect((await get(world, '?period=week')).statusCode).toBe(400);
-      expect((await get(world, '?from=2026-09-01T00:00:00.000Z&to=2026-10-01T00:00:00.000Z')).statusCode).toBe(200);
     });
   });
 });

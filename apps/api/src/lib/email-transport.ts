@@ -263,6 +263,17 @@ function emailConfig(application: Application): EmailConfig {
 }
 
 /**
+ * Where an Application's end-users write for help, or null when unset.
+ *
+ * @example
+ * supportEmailOf(application); // 'help@acme.test'
+ */
+export function supportEmailOf(application: { emailConfig: unknown }): string | null {
+  const cfg = (application.emailConfig ?? {}) as EmailConfig;
+  return cfg.supportEmail ?? null;
+}
+
+/**
  * The Application's sender identity, for anything that renders mail about it.
  *
  * @example

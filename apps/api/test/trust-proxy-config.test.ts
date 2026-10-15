@@ -13,14 +13,12 @@ import { describe, expect, it } from 'vitest';
 import { trustProxyConfig } from '../src/app.js';
 
 describe('trustProxyConfig', () => {
-  it('defaults to false when unset, empty, or whitespace', () => {
-    expect(trustProxyConfig(undefined)).toBe(false);
-    expect(trustProxyConfig('')).toBe(false);
-    expect(trustProxyConfig('   ')).toBe(false);
-    expect(trustProxyConfig('false')).toBe(false);
-  });
 
-  it('accepts a positive hop count', () => {
+  it('reads unset as no proxy, a positive hop count, and IP or CIDR allowlists', () => {
+    expect(trustProxyConfig(undefined)).toBe(false);
+    expect(trustProxyConfig('   ')).toBe(false);
+    expect(trustProxyConfig('10.0.0.0/8, 172.16.0.1')).toEqual(['10.0.0.0/8', '172.16.0.1']);
+    expect(trustProxyConfig('::1')).toEqual(['::1']);
     expect(trustProxyConfig('1')).toBe(1);
     expect(trustProxyConfig(' 2 ')).toBe(2);
   });
@@ -35,13 +33,6 @@ describe('trustProxyConfig', () => {
     expect(() => trustProxyConfig('0')).toThrow(/not a valid hop count/);
     expect(() => trustProxyConfig('-1')).toThrow(/not a valid hop count/);
     expect(() => trustProxyConfig('1.5')).toThrow(/not a valid hop count/);
-  });
-
-  it('accepts IP and CIDR allowlists', () => {
-    expect(trustProxyConfig('10.0.0.1')).toEqual(['10.0.0.1']);
-    expect(trustProxyConfig('10.0.0.0/8, 172.16.0.1')).toEqual(['10.0.0.0/8', '172.16.0.1']);
-    expect(trustProxyConfig('::1')).toEqual(['::1']);
-    expect(trustProxyConfig('loopback,uniquelocal')).toEqual(['loopback', 'uniquelocal']);
   });
 
   it('throws on malformed entries rather than handing them to proxy-addr', () => {

@@ -46,7 +46,6 @@ import {
 } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { mrrByCurrency } from './mrr.js';
-import { bringPlansInStep } from '../plans/default-price.js';
 import { reportingCurrency } from './reporting-currency.js';
 import { billingStatsCacheKey } from './stats-cache-key.js';
 import { RekeyError } from '../../lib/error.js';
@@ -181,10 +180,6 @@ export const billingStatsService = {
   ): Promise<BillingStats> {
     const since30d = new Date(Date.now() - 30 * DAY_MS);
     const seriesStart = utcMonthStart(REVENUE_MONTHS - 1);
-    // The unpriced count asks whether a plan has a default price, so a plan
-    // written straight to the database gets its price row first.
-    await bringPlansInStep([applicationId], db);
-
     const [
       activeSubscriptions,
       pastDueSubscriptions,

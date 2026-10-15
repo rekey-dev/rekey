@@ -66,8 +66,6 @@ export type UsersAnalytics = Omit<AnalyticsUsersResponse, 'sections'> & {
 
 export type UsersAnalyticsResult =
   | { kind: 'ok'; data: UsersAnalytics }
-  /** The API predates the route. The page says so and points at End-users. */
-  | { kind: 'not_served' }
   /** The request as a whole was refused (a range too long, a filter it does not support). */
   | { kind: 'refused'; code: string; message: string; fix: string | undefined };
 
@@ -92,7 +90,7 @@ export function analyticsPath(appId: string, filters: UsersFilters, sections: re
 }
 
 /**
- * One call for a set of sections. Anything but a refusal or a missing route
+ * One call for a set of sections. Anything but a refusal
  * is rethrown, so a busy API (429/503) reaches the busy notice.
  */
 export async function getUsersAnalytics(
@@ -110,7 +108,6 @@ export async function getUsersAnalytics(
     return { kind: 'ok', data };
   } catch (err) {
     if (err instanceof PanelApiError) {
-      if (err.statusCode === 404 && err.code === 'ROUTE_NOT_FOUND') return { kind: 'not_served' };
       if (err.statusCode === 400 || err.statusCode === 403) {
         return { kind: 'refused', code: err.code, message: err.message, fix: err.fix };
       }

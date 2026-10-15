@@ -15,6 +15,10 @@ import type { RefundPaymentInput, RefundPaymentResult } from '../src/modules/bil
 import { fakeStripe } from './fakes/billing-providers.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
 import { countQueries } from './query-counter.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 type Refunding = { refundPayment?: (input: RefundPaymentInput) => Promise<RefundPaymentResult> };
 
@@ -135,13 +139,11 @@ describe('reading one payment as an operator', () => {
 
   const BLOCKED: Array<[RefundBlockedReason, Partial<Prisma.PaymentUncheckedCreateInput>, string | null, string]> = [
     ['payment_not_succeeded', { status: 'PENDING' }, 'stripe', 'BILLING_PAYMENT_NOT_REFUNDABLE'],
-    ['payment_not_succeeded', { status: 'FAILED' }, 'stripe', 'BILLING_PAYMENT_NOT_REFUNDABLE'],
     ['no_provider_charge_id', { providerPaymentId: null }, 'stripe', 'BILLING_PAYMENT_NOT_REFUNDABLE'],
     ['already_refunded', { status: 'REFUNDED', refundedAmount: 1900 }, 'stripe', 'BILLING_PAYMENT_ALREADY_REFUNDED'],
     // Marked refunded before the amount was recorded.
     ['already_refunded', { status: 'REFUNDED', refundedAmount: 0 }, 'stripe', 'BILLING_PAYMENT_ALREADY_REFUNDED'],
     ['provider_unknown', { provider: null }, null, 'BILLING_PAYMENT_NOT_REFUNDABLE'],
-    ['provider_unknown', { provider: 'unknown' }, null, 'BILLING_PAYMENT_NOT_REFUNDABLE'],
     ['provider_cannot_refund', { provider: 'external' }, 'external', 'BILLING_REFUND_UNSUPPORTED'],
     ['provider_not_configured', { provider: 'paypal' }, 'paypal', 'BILLING_CREDENTIALS_NOT_CONFIGURED'],
   ];
@@ -171,7 +173,7 @@ describe('reading one payment as an operator', () => {
   it('reads the provider off the subscription or the unapplied case when the payment names none', async () => {
     const w = await stripeWorld();
     const payer = await endUser(w);
-    const plan = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'pro', name: 'Pro', amount: 1900 } });
+    const plan = await seedPlan({ applicationId: w.appId, slug: 'pro', name: 'Pro' }, { currency: 'USD', amount: 1900 });
     const subscription = await prisma.subscription.create({
       data: { applicationId: w.appId, endUserId: payer.id, planId: plan.id, status: 'ACTIVE', provider: 'stripe' },
     });

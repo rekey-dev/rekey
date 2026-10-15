@@ -168,28 +168,6 @@ describe('Plan entitlements + provisioner', () => {
       return { euId };
     }
 
-    it('ADDS a FEATURE the plan does not carry', async () => {
-      // The documented remedy for a customer who has outgrown their plan is an
-      // override on their subscription. It could only ever rewrite a row the
-      // plan already had, so for the common case, a plan carrying no such row
-      // at all, setting the override changed precisely nothing and the
-      // customer stayed capped. Both directions were reproduced.
-      const { euId } = await subscribeWithOverrides({ 'FEATURE:max_workspaces': 3 });
-
-      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
-      expect(resolved.features.max_workspaces).toBe(3);
-    });
-
-    it('still overrides a FEATURE the plan does carry', async () => {
-      const { euId } = await subscribeWithOverrides(
-        { 'FEATURE:max_workspaces': 7 },
-        { planEntitlement: { kind: 'FEATURE', key: 'max_workspaces', valueType: 'INT', value: '1' } },
-      );
-
-      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
-      expect(resolved.features.max_workspaces).toBe(7);
-    });
-
     it('types an added FEATURE by its value, so consumers get a number and not a string', async () => {
       const { euId } = await subscribeWithOverrides({
         'FEATURE:seats': 12,

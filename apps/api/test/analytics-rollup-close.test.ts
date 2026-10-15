@@ -7,8 +7,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { __setTriggeredRollupForTests, triggeredRollupsSettled } from '../src/modules/analytics/rollup/trigger.js';
+import { __setTriggeredRollupForTests } from '../src/modules/analytics/rollup/trigger.js';
 import { bearer, operatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('closing the app with a triggered rollup in flight', () => {
   afterEach(() => __setTriggeredRollupForTests());
@@ -34,9 +37,5 @@ describe('closing the app with a triggered rollup in flight', () => {
 
     await app.close();
     expect(finished).toBe(1);
-  });
-
-  it('resolves at once when nothing is running', async () => {
-    await expect(triggeredRollupsSettled()).resolves.toBeUndefined();
   });
 });

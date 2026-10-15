@@ -33,8 +33,8 @@ export const INT4_MAX = 2_147_483_647;
 /**
  * Ceiling for monetary amounts in minor units (cents).
  *
- * This is `INT4_MAX`, because that is what the column holds: `Plan.amount` and
- * `Coupon.amountOff` are Prisma `Int`, i.e. Postgres `integer`.
+ * This is `INT4_MAX`, because that is what the column holds: `PlanPrice.amount` and
+ * `CouponAmount.amountOff` are Prisma `Int`, i.e. Postgres `integer`.
  *
  * The first version of this bound was 10^11, picked as "a sane ceiling for
  * money" without checking the column, which is 46× smaller. The result was a

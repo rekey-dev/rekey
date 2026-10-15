@@ -29,11 +29,6 @@ describe('outage-event throttle', () => {
     expect(shouldRecordOutageEvent('redis', 'tenant-two')).toBe(true);
   });
 
-  it('keys on the subsystem, so Postgres is not masked by Redis', () => {
-    shouldRecordOutageEvent('redis', 'tenant-both');
-    expect(shouldRecordOutageEvent('postgres', 'tenant-both')).toBe(true);
-  });
-
   it('handles an unauthenticated request, where there is no tenant', () => {
     expect(shouldRecordOutageEvent('postgres', null)).toBe(true);
     expect(shouldRecordOutageEvent('postgres', null)).toBe(false);

@@ -9,7 +9,7 @@ import type { ActorEmails } from '@/lib/security-events';
  * The audit log and Activity used to print `actorId` verbatim: a 25-character
  * CUID, truncated to 12rem, with the person's identity available nowhere on
  * the page. "Who is cmsa91v4c000nv5h5txnjvvry?" had no answer inside the
- * product. Emails are resolved a page at a time by `resolveActorEmails`; an
+ * product. Emails are resolved a page at a time by `actorEmailsOf`; an
  * unresolved id falls back to the CUID rather than to nothing.
  */
 export function ActorCell({

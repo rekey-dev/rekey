@@ -8,9 +8,8 @@
  * are thin re-exports so the pages calling them did not have to change; new
  * code should import from `@rekey.dev/shared-types` directly.
  *
- * What stays here is the part that genuinely is panel-specific:
- * `resolveActorEmails`, which turns the API's bare `actorId` CUIDs into
- * addresses using panel-side API calls.
+ * What stays here is the part that genuinely is panel-specific: the words
+ * the panel puts around an event and its actor.
  */
 
 export {
@@ -20,8 +19,6 @@ export {
   type SecurityEventType,
 } from '@rekey.dev/shared-types';
 
-import { apiGet, type EndUserRow, type MemberRow } from '@/lib/api';
-import type { Page } from '@/lib/paginate';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Metadata presentation
@@ -102,12 +99,8 @@ export function eventDetails(metadata: unknown): EventDetail[] {
  * The API resolves it now (`actorEmail` on every event, looked up when the log
  * is read), including operators who have since left the workspace, which the
  * panel's own lookup against the current member list could never name. This
- * takes that field as the answer.
- *
- * The lookups below are only for an event WITHOUT the field, which is an API
- * older than this panel during a rolling deploy: operators from one
- * workspace-members read, end-users fetched by id, deduped, in parallel and
- * capped at `MAX_END_USER_LOOKUPS`. Anything unresolved falls back to the CUID.
+ * takes that field as the answer. Null is the API saying there is no one to
+ * name, and such an actor is shown by id.
  */
 export type ActorEmails = Map<string, string>;
 
@@ -124,7 +117,7 @@ export type ActorEmails = Map<string, string>;
  *   - anything else (a type added later): the type, and the id if any
  */
 export function actorLabel(
-  e: { actorType: string; actorId: string | null; actorEmail?: string | null; metadata?: unknown },
+  e: { actorType: string; actorId: string | null; actorEmail: string | null; metadata?: unknown },
   subjectEndUserId: string,
 ): string {
   if (e.actorType === 'end_user') {
@@ -175,63 +168,14 @@ export function eventSummary(metadata: Record<string, unknown> | null | undefine
   return keys.length === 0 ? null : keys.slice(0, 3).join(', ');
 }
 
-const MAX_END_USER_LOOKUPS = 40;
-
-export async function resolveActorEmails(
-  allEvents: Array<{
-    actorType: string;
-    actorId: string | null;
-    actorEmail?: string | null;
-    applicationId: string | null;
-  }>,
-): Promise<ActorEmails> {
+/**
+ * @example
+ * const emails = actorEmailsOf(events); // Map { 'op_1' => 'ops@example.com' }
+ */
+export function actorEmailsOf(events: ReadonlyArray<{ actorId: string | null; actorEmail: string | null }>): ActorEmails {
   const out: ActorEmails = new Map();
-  for (const e of allEvents) {
-    if (e.actorId && typeof e.actorEmail === 'string') out.set(e.actorId, e.actorEmail);
-  }
-  // Only what the API did not answer: `actorEmail` missing entirely, not null
-  // (null is the API saying there is no one to name).
-  const events = allEvents.filter((e) => e.actorEmail === undefined);
-
-  const operatorIds = new Set(
-    events.filter((e) => e.actorType === 'operator' && e.actorId).map((e) => e.actorId!),
-  );
-  // (applicationId, endUserId) pairs, an end-user id is only meaningful
-  // within its application.
-  const endUserKeys = new Map<string, { appId: string; euid: string }>();
   for (const e of events) {
-    if (e.actorType !== 'end_user' || !e.actorId || !e.applicationId) continue;
-    endUserKeys.set(e.actorId, { appId: e.applicationId, euid: e.actorId });
+    if (e.actorId !== null && e.actorEmail !== null) out.set(e.actorId, e.actorEmail);
   }
-
-  const lookups = [...endUserKeys.values()].slice(0, MAX_END_USER_LOOKUPS);
-
-  // ONE wave, not two. The members read used to sit in its own `Promise.all`
-  // over a single element, which buys nothing but does cost a whole serial
-  // round-trip: the end-user fan-out could not start until it resolved.
-  // Neither depends on the other, so they go together and the audit log no
-  // longer loses a full API latency on every render.
-  const [memberPage, resolved] = await Promise.all([
-    operatorIds.size > 0
-      ? apiGet<Page<MemberRow>>('/api/v1/tenant/workspace/members').catch(() => null)
-      : Promise.resolve(null),
-    Promise.all(
-      lookups.map(async ({ appId, euid }) => {
-        const detail = await apiGet<{ endUser: EndUserRow }>(
-          `/api/v1/tenant/applications/${encodeURIComponent(appId)}/end-users/${encodeURIComponent(euid)}`,
-          // A deleted end-user still has events; a 404 here must not 404 the
-          // whole audit-log page.
-          { interruptOnAccessError: false },
-        ).catch(() => null);
-        return detail === null ? null : ([euid, detail.endUser.email] as const);
-      }),
-    ),
-  ]);
-
-  for (const m of memberPage?.items ?? []) {
-    if (operatorIds.has(m.tenantUserId)) out.set(m.tenantUserId, m.email);
-  }
-  for (const r of resolved) if (r !== null) out.set(r[0], r[1]);
-
   return out;
 }

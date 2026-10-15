@@ -229,7 +229,7 @@ export default async function EndUsersPage({
   // Filters other pages link here with (Users > Overview's "At risk"), passed
   // straight to the API, which validates them.
   const app = await getApplication(id);
-  const scopes = app.access?.scopes ?? null;
+  const scopes = app.access.scopes;
   const dropped: string[] = [];
   const linked = LINKED_FILTERS.flatMap((k) => {
     const v = sp[k];
@@ -311,8 +311,8 @@ export default async function EndUsersPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations`,
     }),
-    // Profile fields marked `showInList` become columns. An older API has no
-    // such route, and the list is still the list without them.
+    // Profile fields marked `showInList` become columns. The list is still
+    // the list when the schema cannot be read.
     api<{ fields: ProfileField[] }>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/profile-schema`,

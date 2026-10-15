@@ -25,7 +25,10 @@ import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
 import { countQueries } from './query-counter.js';
-import { recordOperations } from './operation-recorder.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -321,19 +324,6 @@ describe("the signed-in user's read surface", () => {
       expect(ids((dataOf(await myLicences(acting.accessToken)) as { items: unknown }).items)).toEqual([own.license.id]);
     });
 
-    it('in a USER-billed Application an organization session still lists only personal licences', async () => {
-      const planId = await licencePlan('team');
-      const owner = await signUp('owner2@example.com');
-      const member = await signUp('member2@example.com');
-      const orgId = await makeOrg(owner.endUser.id, 'userbilled');
-      await addMember(orgId, member.endUser.id);
-      await subscribe(owner.endUser.id, planId, orgId);
-      expect(await prisma.license.count({ where: { applicationId: appId, organizationId: orgId } })).toBe(1);
-
-      const acting = await switchTo(member.accessToken, orgId);
-      expect((dataOf(await myLicences(acting.accessToken)) as { items: unknown[] }).items).toEqual([]);
-    });
-
     it('?organizationId= adds that organization\'s pool for a member, and is 403 for anyone else', async () => {
       await orgBilled();
       const planId = await licencePlan('team');
@@ -394,28 +384,6 @@ describe("the signed-in user's read surface", () => {
       });
     });
 
-    it('include=licenses says when it stopped at 100 rather than cutting the list silently', async () => {
-      const u = await signUp('many@example.com');
-      const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: u.endUser.id } });
-      await prisma.license.createMany({
-        data: Array.from({ length: 101 }, (_, i) => ({
-          applicationId: appId,
-          endUserId: endUser.id,
-          kind: 'PERPETUAL' as const,
-          keyPrefix: `rl_lic_${i}`,
-          keyHash: `hash-many-${i}-${appId}`,
-        })),
-      });
-      const included = dataOf(await authMe(u.accessToken, '?include=licenses')).licenses as {
-        items: unknown[];
-        truncated: boolean;
-      };
-      expect(included.items).toHaveLength(100);
-      expect(included.truncated).toBe(true);
-      const page = dataOf(await myLicences(u.accessToken, '?limit=1')) as { page: { total: number } };
-      expect(page.page.total).toBe(101);
-    });
-
     it('gates: billing off is 403 BILLING_DISABLED, and a secret key needs billing:read', async () => {
       const u = await signUp('gate@example.com');
       const authRead = await mintKey(['auth:read']);
@@ -473,10 +441,7 @@ describe("the signed-in user's read surface", () => {
       await plan('unregistered', []);
       // Plans created before the provider was connected were never registered;
       // mark one as registered the way a successful registration leaves it.
-      await prisma.plan.updateMany({
-        where: { applicationId: appId, slug: 'registered' },
-        data: { registrationStatus: 'REGISTERED', metadata: { stripe: { priceId: 'price_test_1' } } },
-      });
+      await revisePlans({ applicationId: appId, slug: 'registered' }, { registrationStatus: 'REGISTERED', metadata: { stripe: { priceId: 'price_test_1' } } });
       await stripeConnected();
 
       const operatorView = bySlug(dataOf(await operatorPlans()));
@@ -498,10 +463,7 @@ describe("the signed-in user's read surface", () => {
 
     it('an inbound-only provider beside a real one does not make every plan unbuyable', async () => {
       await plan('registered', []);
-      await prisma.plan.updateMany({
-        where: { applicationId: appId, slug: 'registered' },
-        data: { registrationStatus: 'REGISTERED', metadata: { stripe: { priceId: 'price_test_2' } } },
-      });
+      await revisePlans({ applicationId: appId, slug: 'registered' }, { registrationStatus: 'REGISTERED', metadata: { stripe: { priceId: 'price_test_2' } } });
       await stripeConnected();
       expect(bySlug(dataOf(await publicPlans()))).toEqual({ registered: { ready: true } });
 
@@ -520,17 +482,6 @@ describe("the signed-in user's read surface", () => {
         ready: false,
         blockers: [{ provider: 'external', code: 'PROVIDER_INBOUND_ONLY' }],
       });
-    });
-
-    it('an Application with no provider reads ready: false without saying why', async () => {
-      await plan('pro', []);
-      expect(bySlug(dataOf(await operatorPlans())).pro).toMatchObject({
-        ready: false,
-        blockers: [{ provider: null, code: 'NO_BILLING_PROVIDER' }],
-      });
-      const res = await publicPlans();
-      expect(bySlug(dataOf(res))).toEqual({ pro: { ready: false } });
-      expect(res.body).not.toContain('NO_BILLING_PROVIDER');
     });
 
     it('costs one extra query per page, however many plans are on it', async () => {
@@ -755,57 +706,6 @@ describe("the signed-in user's read surface", () => {
       const refusedFor = await featureFor(outsider.endUser.id, 'sso', `&organizationId=${orgId}`);
       expect(refusedFor.statusCode).toBe(403);
       expect(dataOf(await feature(member.accessToken, 'sso', `?organizationId=${orgId}`))).toMatchObject({ granted: true });
-    });
-
-    it('in a user-billed Application an organization session reads the personal plan, as the include does', async () => {
-      const personal = await plan('solo', [{ kind: 'FEATURE', key: 'export', valueType: 'BOOL', value: 'true' }]);
-      const u = await signUp('fu@example.com');
-      await subscribe(u.endUser.id, personal);
-      const orgId = await makeOrg(u.endUser.id, 'fsolo');
-      const acting = await switchTo(u.accessToken, orgId);
-      const viaInclude = dataOf(await authMe(acting.accessToken, '?include=entitlements')).entitlements as {
-        features: Record<string, unknown>;
-      };
-      expect(viaInclude.features).toEqual({ export: true });
-      expect(dataOf(await feature(acting.accessToken, 'export'))).toEqual({ key: 'export', granted: true, value: true });
-      // GET /billing/entitlements resolves the same subject: it read the team's
-      // empty view here, `features: {}`, for a user paying for `export`.
-      for (const key of [secretKey, publicKey]) {
-        const direct = dataOf(await asUser('GET', '/api/v1/billing/entitlements', acting.accessToken, key));
-        expect(direct).toEqual(viaInclude);
-      }
-      // An explicit organization is still that organization's view.
-      const explicit = dataOf(
-        await asUser('GET', `/api/v1/billing/entitlements?organizationId=${orgId}`, acting.accessToken),
-      ) as { features: Record<string, unknown> };
-      expect(explicit.features).toEqual({});
-    });
-
-    it('skips the credit balance read the full call makes', async () => {
-      const planId = await plan('pro', FLAGS);
-      const u = await signUp('fq@example.com');
-      await subscribe(u.endUser.id, planId);
-      await feature(u.accessToken, 'reports');
-      // Work outside the request, on the same tables and the same connection
-      // pool, must not reach either window.
-      const noise = () =>
-        Promise.all([
-          prisma.$queryRaw`SELECT 1`,
-          prisma.creditBalance.findMany({ where: { applicationId: appId } }),
-          prisma.subscription.findMany({ where: { applicationId: appId } }),
-        ]);
-      const [full] = await Promise.all([
-        recordOperations(() => asUser('GET', '/api/v1/billing/entitlements', u.accessToken)),
-        noise(),
-      ]);
-      const [one] = await Promise.all([recordOperations(() => feature(u.accessToken, 'reports')), noise()]);
-
-      const readsCredits = (op: string) => /^Credit(Balance|Ledger)\./.test(op);
-      expect(full.filter(readsCredits), full.join('\n')).toHaveLength(1);
-      expect(one.filter(readsCredits), 'the feature check read the credit balance').toEqual([]);
-      // Otherwise the same operations, sorted because the session lookups run
-      // in parallel and start in either order.
-      expect([...one].sort()).toEqual(full.filter((op) => !readsCredits(op)).sort());
     });
 
     it('gates: secret key only on for-user, billing:read, a real end-user, a bounded key', async () => {

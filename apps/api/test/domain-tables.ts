@@ -69,6 +69,7 @@ export const DOMAIN_TABLES = [
   'tenant_invitations',
   'tenant_password_reset_tokens',
   'tenant_magic_link_tokens',
+  'tenant_email_verification_tokens',
   'tenant_refresh_tokens',
   'application_grants',
   'operator_invites',
@@ -116,6 +117,7 @@ const RESET_MODULES = [
   '../src/lib/operator-auth-cache.js',
   '../src/modules/webhooks/endpoint-gate.js',
   '../src/modules/email/custom/send-caps.js',
+  '../src/modules/email/auth-email-caps.js',
   '../src/modules/contacts/capture-limits.js',
   '../src/modules/billing/checkout/creation-limit.js',
   '../src/modules/billing/checkout/portal-probe.js',
@@ -154,6 +156,99 @@ export async function resetProcessGlobalState(): Promise<void> {
   await webhooks.stopScheduledDeliveries();
 }
 
+// Quoted identifiers, single statement, so the truncate is atomic.
+const TRUNCATE = `TRUNCATE TABLE ${DOMAIN_TABLES.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`;
+
+const REACHED_TABLES = `
+      WITH RECURSIVE reach(oid) AS (
+        SELECT c.oid FROM pg_class c
+        WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'r'
+          AND c.relname = ANY (ARRAY[${DOMAIN_TABLES.map((t) => `'${t}'`).join(', ')}])
+        UNION
+        SELECT con.conrelid FROM pg_constraint con JOIN reach ON con.confrelid = reach.oid
+        WHERE con.contype = 'f'
+      )
+      SELECT oid::regclass FROM reach ORDER BY (oid = 'tenants'::regclass) DESC`;
+
+/**
+ * The truncate, skipped when there is nothing to remove.
+ *
+ * A TRUNCATE over this many tables costs about 50ms whether or not any of them
+ * holds a row, and roughly a fifth of the suite never writes to the database.
+ * So look first: the domain tables and everything a CASCADE from them reaches,
+ * `tenants` before the rest because nearly every test that writes anything
+ * writes one. Finding all of them empty takes about 3ms.
+ *
+ * A write still in flight from the previous test is invisible to that look, so
+ * any other backend that is not idle means truncate as before. The TRUNCATE
+ * then waits on that write's lock and removes its row.
+ */
+const TRUNCATE_UNLESS_EMPTY = `
+DO $truncate$
+DECLARE
+  reached regclass;
+  dirty boolean;
+BEGIN
+  dirty := EXISTS (
+    SELECT 1 FROM pg_stat_activity
+    WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+  );
+  IF NOT dirty THEN
+    FOR reached IN ${REACHED_TABLES}
+    LOOP
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', reached) INTO dirty;
+      EXIT WHEN dirty;
+    END LOOP;
+  END IF;
+  IF dirty THEN
+    ${TRUNCATE};
+  END IF;
+END $truncate$`;
+
+/**
+ * The same tables emptied with DELETE, for the tests after the first in a file.
+ *
+ * A test leaves a few dozen rows behind, and deleting them takes a few
+ * milliseconds where the TRUNCATE takes about 50 however little there is. The
+ * rows go from exactly the tables the TRUNCATE would empty, and each sequence
+ * those tables own restarts, so a test starts from the same state either way.
+ *
+ * Foreign keys and the billing log's append-only trigger are switched off for
+ * the one transaction: every table on both ends of every key is emptied, so
+ * there is nothing for them to protect. That needs a superuser, which the
+ * disposable test database's role is; any other role, and any other backend
+ * still at work, gets the TRUNCATE instead.
+ *
+ * DELETE leaves dead rows where TRUNCATE leaves none, which is why the first
+ * test of every file still truncates.
+ */
+const DELETE_ROWS = `
+DO $delete$
+DECLARE
+  reached regclass;
+  owned regclass;
+BEGIN
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) OR EXISTS (
+    SELECT 1 FROM pg_stat_activity
+    WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+  ) THEN
+    ${TRUNCATE};
+    RETURN;
+  END IF;
+  PERFORM set_config('session_replication_role', 'replica', true);
+  FOR reached IN ${REACHED_TABLES}
+  LOOP
+    EXECUTE format('DELETE FROM %s', reached);
+    FOR owned IN
+      SELECT seq.oid::regclass FROM pg_class seq
+        JOIN pg_depend dep ON dep.objid = seq.oid AND dep.deptype IN ('a', 'i')
+       WHERE seq.relkind = 'S' AND dep.refobjid = reached
+    LOOP
+      PERFORM setval(owned, 1, false);
+    END LOOP;
+  END LOOP;
+END $delete$`;
+
 /**
  * `TRUNCATE ... RESTART IDENTITY CASCADE` over every domain table, retrying on
  * deadlock.
@@ -166,9 +261,9 @@ export async function resetProcessGlobalState(): Promise<void> {
  */
 export async function truncateDomainTables(
   execute: (sql: string) => Promise<unknown>,
+  how: 'truncate' | 'delete' = 'truncate',
 ): Promise<void> {
-  // Quoted identifiers, single statement, so the truncate is atomic.
-  const stmt = `TRUNCATE TABLE ${DOMAIN_TABLES.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`;
+  const stmt = how === 'delete' ? DELETE_ROWS : TRUNCATE_UNLESS_EMPTY;
   for (let attempt = 1; ; attempt++) {
     try {
       await execute(stmt);

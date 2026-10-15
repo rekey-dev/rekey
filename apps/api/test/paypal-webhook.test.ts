@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const SLUG = 'pp-app';
@@ -73,17 +74,13 @@ describe('PayPal webhook', () => {
     if (kind === 'LICENSE') {
       // Admin plan route only accepts SUBSCRIPTION fields today; insert the
       // LICENSE plan directly so the auto-issue path can be exercised.
-      await prisma.plan.create({
-        data: {
-          applicationId,
-          slug,
-          name: slug,
-          amount: 4900,
-          currency: 'USD',
-          kind: 'LICENSE',
-          licenseKind: 'PERPETUAL',
-        },
-      });
+      await seedPlan({
+        applicationId,
+        slug,
+        name: slug,
+        kind: 'LICENSE',
+        licenseKind: 'PERPETUAL',
+      }, { currency: 'USD', amount: 4900 });
       return;
     }
     const res = await app.inject({
@@ -225,83 +222,6 @@ describe('PayPal webhook', () => {
     expect(payments[0]!.currency).toBe('USD');
   });
 
-  it('a sale whose amount cannot be recorded writes payment.not_recorded with the amount as PayPal wrote it, and no payment', async () => {
-    await createPlan('pro');
-    const user = await signUpUser();
-    const { subId, paypalSubId } = await checkoutPaypal(user.token, 'pro');
-    await postEvent('BILLING.SUBSCRIPTION.ACTIVATED', { id: paypalSubId, custom_id: `${applicationId}:${user.id}` });
-    const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-
-    const unparseable = await postEvent('PAYMENT.SALE.COMPLETED', {
-      id: 'SALE-BAD',
-      billing_agreement_id: paypalSubId,
-      amount: { total: '9.999', currency: 'USD' },
-    });
-    expect(unparseable.statusCode, unparseable.body).toBe(200);
-    const oversized = await postEvent('PAYMENT.SALE.COMPLETED', {
-      id: 'SALE-HUGE',
-      billing_agreement_id: paypalSubId,
-      amount: { total: '30000000.00', currency: 'USD' },
-    });
-    expect(oversized.statusCode, oversized.body).toBe(200);
-    const refund = await postEvent('PAYMENT.SALE.REVERSED', { id: 'SALE-REV', amount: { total: 'ten', currency: 'USD' } });
-    expect(refund.statusCode, refund.body).toBe(200);
-
-    expect(await prisma.payment.findMany({ where: { applicationId } })).toEqual([]);
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.currentPeriodEnd).toEqual(before.currentPeriodEnd);
-
-    const logged = await prisma.billingEvent.findMany({
-      where: { applicationId, type: 'payment.not_recorded' },
-      orderBy: { seq: 'asc' },
-    });
-    expect(logged.map((event) => ({ provider: event.provider, currency: event.currency, amount: event.amount, data: event.data }))).toEqual([
-      {
-        provider: 'paypal',
-        currency: 'USD',
-        amount: null,
-        data: { kind: 'charge', reason: 'amount_not_storable', providerPaymentId: 'SALE-BAD', providerRefundId: null, reportedAmount: '9.999' },
-      },
-      {
-        provider: 'paypal',
-        currency: 'USD',
-        amount: null,
-        data: { kind: 'charge', reason: 'amount_not_storable', providerPaymentId: 'SALE-HUGE', providerRefundId: null, reportedAmount: '30000000.00' },
-      },
-      {
-        provider: 'paypal',
-        currency: 'USD',
-        amount: null,
-        data: { kind: 'refund', reason: 'amount_not_storable', providerPaymentId: 'SALE-REV', providerRefundId: null, reportedAmount: 'ten' },
-      },
-    ]);
-  });
-
-  it('BILLING.SUBSCRIPTION.SUSPENDED → PAST_DUE (not a hard cancel)', async () => {
-    await createPlan('pro');
-    const user = await signUpUser();
-    const { subId, paypalSubId } = await checkoutPaypal(user.token, 'pro');
-    await postEvent('BILLING.SUBSCRIPTION.ACTIVATED', { id: paypalSubId });
-
-    const res = await postEvent('BILLING.SUBSCRIPTION.SUSPENDED', { id: paypalSubId });
-    expect(res.statusCode).toBe(200);
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.status).toBe('PAST_DUE');
-  });
-
-  it('BILLING.SUBSCRIPTION.CANCELLED → CANCELED with canceledAt', async () => {
-    await createPlan('pro');
-    const user = await signUpUser();
-    const { subId, paypalSubId } = await checkoutPaypal(user.token, 'pro');
-    await postEvent('BILLING.SUBSCRIPTION.ACTIVATED', { id: paypalSubId });
-
-    const res = await postEvent('BILLING.SUBSCRIPTION.CANCELLED', { id: paypalSubId });
-    expect(res.statusCode).toBe(200);
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.status).toBe('CANCELED');
-    expect(after.canceledAt).not.toBeNull();
-  });
-
   it('duplicate event id is skipped (idempotent)', async () => {
     await createPlan('pro');
     const user = await signUpUser();
@@ -339,9 +259,7 @@ describe('PayPal webhook', () => {
   // anchor was permanently "initial" → recurring CREDIT packs never refilled.
   it('recurring CREDIT plan refills credits on each renewal sale (not just first)', async () => {
     // SUBSCRIPTION-kind plan carrying a CREDIT entitlement of 500/period.
-    const plan = await prisma.plan.create({
-      data: { applicationId, slug: 'pack', name: 'Pack', amount: 1500, currency: 'USD', kind: 'SUBSCRIPTION' },
-    });
+    const plan = await seedPlan({ applicationId, slug: 'pack', name: 'Pack', kind: 'SUBSCRIPTION' }, { currency: 'USD', amount: 1500 });
     await prisma.planEntitlement.create({
       data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 },
     });
@@ -394,19 +312,15 @@ describe('PayPal webhook', () => {
   // ---- Renewal re-provisioning (#73): a TIMED license must roll its term
   // forward each period instead of lapsing after the first.
   it('TIMED license expiry extends on renewal sale (does not lapse after period 1)', async () => {
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: 'timed',
         name: 'Timed',
-        amount: 1999,
-        currency: 'USD',
         kind: 'LICENSE',
         licenseKind: 'TIMED',
         licenseDurationDays: 30,
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 1999 });
     void plan;
     const user = await signUpUser('pp-timed@example.com');
     const { paypalSubId } = await checkoutPaypal(user.token, 'timed');

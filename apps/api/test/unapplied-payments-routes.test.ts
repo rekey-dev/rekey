@@ -13,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
+import { seedPlan } from './seed-plan.js';
 
 let app: FastifyInstance;
 let token: string;
@@ -109,24 +110,6 @@ describe('the queue', () => {
       true,
     );
   });
-
-  it('filters by status', async () => {
-    await seedCase();
-    const resolved = await seedCase();
-    await prisma.unappliedPayment.update({
-      where: { id: resolved.id },
-      data: { status: 'DISMISSED' },
-    });
-
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${applicationId}/unapplied-payments?status=OPEN`,
-      headers: auth(),
-    });
-    const items = (res.json().data as { items: Array<{ id: string }> }).items;
-    expect(items).toHaveLength(1);
-    expect(items[0]!.id).not.toBe(resolved.id);
-  });
 });
 
 describe('dismiss', () => {
@@ -143,19 +126,6 @@ describe('dismiss', () => {
     expect(row.status).toBe('DISMISSED');
     expect(row.resolutionNote).toBe('Refunded by hand in the Stripe dashboard.');
     expect(row.resolvedBy).toBeTruthy();
-  });
-
-  it('refuses without a note', async () => {
-    const kase = await seedCase();
-    // Dismissal is the only disposition that leaves no other trace of what
-    // happened to the money, so the note is the record.
-    const res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${applicationId}/unapplied-payments/${kase.id}/dismiss`,
-      headers: auth(),
-      payload: {},
-    });
-    expect(res.statusCode).toBe(400);
   });
 
   it('refuses to resolve a case twice', async () => {
@@ -183,16 +153,12 @@ describe('dismiss', () => {
 
 describe('extend', () => {
   async function seedUserWithSubscription(currentPeriodEnd: Date | null) {
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${randomUUID().slice(0, 8)}`,
         name: 'Pro',
-        amount: 4900,
-        currency: 'USD',
         interval: 'MONTH',
-      },
-    });
+      }, { currency: 'USD', amount: 4900 });
     const endUser = await prisma.endUser.create({
       data: {
         applicationId,

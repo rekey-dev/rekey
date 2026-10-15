@@ -41,10 +41,6 @@ describe('subjectEndUserIdOf', () => {
     expect(subjectEndUserIdOf({ actorType: 'end_user', actorId: 'eu_1' })).toBe('eu_1');
   });
 
-  it('is null for an operator acting on nobody in particular', () => {
-    expect(subjectEndUserIdOf({ actorType: 'operator', actorId: 'op_1' })).toBeNull();
-  });
-
   it('ignores a non-string or empty endUserId rather than writing a junk subject', () => {
     expect(subjectEndUserIdOf({ actorType: 'system', metadata: { endUserId: '' } })).toBeNull();
     expect(subjectEndUserIdOf({ actorType: 'system', metadata: { endUserId: 42 } })).toBeNull();

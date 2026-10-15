@@ -37,6 +37,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('cancel at period end without a payment provider', () => {
   let app: FastifyInstance;
@@ -99,17 +103,13 @@ describe('cancel at period end without a payment provider', () => {
       })
       .then((r) => r.json().data as { endUser: { id: string }; accessToken: string });
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${slug}`,
         name: 'Paid',
-        amount: 9900,
-        currency: 'usd',
         interval: 'MONTH',
         active: true,
-      },
-    });
+      }, { currency: 'usd', amount: 9900 });
 
     const subscription = await prisma.subscription.create({
       data: {

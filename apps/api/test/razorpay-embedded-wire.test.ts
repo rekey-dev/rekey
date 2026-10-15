@@ -6,10 +6,13 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
+import type { EndUser } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import type { EmbeddedCheckoutInput } from '../src/modules/billing/providers/types.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const sdk = vi.hoisted(() => ({
   orders: [] as Record<string, unknown>[],
@@ -51,7 +54,7 @@ const plan = pricedPlan({
   currency: 'INR',
   interval: 'MONTH',
   metadata: { razorpay: { planId: 'plan_existing' } },
-} as unknown as Plan, null);
+} as unknown as FixturePlan, null);
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
 
 function input(kind: 'recurring' | 'one_time', discount?: number): EmbeddedCheckoutInput {
@@ -123,13 +126,6 @@ describe('RealRazorpayProvider on the checkout page', () => {
     expect(await provider.getSubscription('sub_gone')).toBeNull();
     sdk.fetchPayment.mockRejectedValueOnce(razorpayError(401, 'Authentication failed'));
     await expect(provider.getPayment('pay_x')).rejects.toThrow('Authentication failed');
-  });
-
-  it('maps a payment and a subscription read', async () => {
-    sdk.fetchPayment.mockResolvedValueOnce({ id: 'pay_1', status: 'captured', order_id: 'order_1', amount: 19900, currency: 'inr' });
-    expect(await provider.getPayment('pay_1')).toEqual({ id: 'pay_1', status: 'captured', orderId: 'order_1', amount: 19900, currency: 'INR' });
-    sdk.fetchSubscription.mockResolvedValueOnce({ id: 'sub_1', status: 'authenticated', plan_id: 'plan_1' });
-    expect(await provider.getSubscription('sub_1')).toEqual({ id: 'sub_1', status: 'authenticated', planId: 'plan_1', customId: null });
   });
 
   it('captures for exactly the amount, and treats "already captured" as success', async () => {

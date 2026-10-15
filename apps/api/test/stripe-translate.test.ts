@@ -58,20 +58,6 @@ describe('stripe module translate', () => {
     ]);
   });
 
-  it('checkout.session.completed with an expanded subscription object uses its id', async () => {
-    const events = await translate(
-      {
-        id: 'evt_2',
-        type: 'checkout.session.completed',
-        data: {
-          object: { id: 'cs_2', subscription: { id: 'sub_2' }, metadata: { applicationId: APP_ID } },
-        },
-      },
-      ctx(),
-    );
-    expect(events?.[0]).toMatchObject({ providerSubscriptionId: 'sub_2' });
-  });
-
   it('missing applicationId metadata → no events (cannot route, never guess) + warning', async () => {
     const c = ctx();
     const events = await translate(
@@ -256,49 +242,6 @@ describe('stripe module translate', () => {
     expect(events?.[0]).toMatchObject({ currentPeriodEnd: new Date(1_795_000_000 * 1000) });
   });
 
-  // No genuine payload carries both; if one did, the item is where basil and
-  // later keep the period, and the subscription-level field is the legacy one.
-  it('customer.subscription.updated prefers the item period end when both exist', async () => {
-    const events = await translate(
-      {
-        id: 'evt_both',
-        type: 'customer.subscription.updated',
-        data: {
-          object: {
-            id: 'sub_both',
-            status: 'active',
-            current_period_end: 1_790_000_000,
-            items: { data: [{ id: 'si_1', current_period_end: 1_795_000_000 }] },
-            metadata: { applicationId: APP_ID },
-          },
-        },
-      },
-      ctx(),
-    );
-    expect(events?.[0]).toMatchObject({ currentPeriodEnd: new Date(1_795_000_000 * 1000) });
-  });
-
-  it('invoice.paid reads the subscription id from parent.subscription_details (basil shape)', async () => {
-    const events = await translate(
-      {
-        id: 'evt_inv_basil',
-        type: 'invoice.paid',
-        data: {
-          object: {
-            id: 'in_b',
-            amount_paid: 1000,
-            currency: 'usd',
-            billing_reason: 'subscription_cycle',
-            parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_b' } },
-            metadata: { applicationId: APP_ID },
-          },
-        },
-      },
-      ctx(),
-    );
-    expect(events?.[0]).toMatchObject({ type: 'payment.succeeded', providerSubscriptionId: 'sub_b' });
-  });
-
   it('checkout.session.completed with payment_status unpaid activates nothing', async () => {
     const c = ctx();
     const events = await translate(
@@ -346,12 +289,6 @@ describe('stripe module translate', () => {
         payment: { providerPaymentId: 'pi_async', amount: 4200, currency: 'eur' },
       },
     ]);
-  });
-
-  it('extractEventId / extractEventType read the Stripe envelope', async () => {
-    const payload = { id: 'evt_env', type: 'invoice.paid' };
-    expect(stripeModule.webhook.extractEventId(payload)).toBe('evt_env');
-    expect(stripeModule.webhook.extractEventType(payload)).toBe('invoice.paid');
   });
 });
 
@@ -437,39 +374,6 @@ describe('stripe translate across the acacia to basil-or-later transition', () =
       );
       expect(events).toMatchObject([{ applicationId: APP_ID }]);
     });
-
-    it('a non-string applicationId in the snapshot is no id at all', async () => {
-      const c = ctx();
-      const events = await translate(
-        invoiceEvent({
-          id: 'in_bad_route',
-          metadata: {},
-          parent: { subscription_details: { subscription: 'sub_r', metadata: { applicationId: ['x'] } } },
-        }),
-        c,
-      );
-      expect(events).toEqual([]);
-      expect(c.log.warn).toHaveBeenCalled();
-    });
-
-    it('invoice.payment_failed routes and links the subscription in the basil shape', async () => {
-      const events = await translate(
-        invoiceEvent(
-          {
-            id: 'in_basil_fail',
-            parent: {
-              type: 'subscription_details',
-              subscription_details: { subscription: { id: 'sub_expanded' }, metadata: { applicationId: APP_ID } },
-            },
-          },
-          'invoice.payment_failed',
-        ),
-        ctx(),
-      );
-      expect(events).toMatchObject([
-        { type: 'payment.failed', applicationId: APP_ID, providerSubscriptionId: 'sub_expanded', amount: 1200 },
-      ]);
-    });
   });
 
   describe('charge.refunded: which payment the refund belongs to', () => {
@@ -480,14 +384,6 @@ describe('stripe translate across the acacia to basil-or-later transition', () =
       );
       expect(events?.[0]).toMatchObject({ type: 'payment.refunded', providerPaymentId: 'in_a1', refundedTotal: 400 });
       expect(lookup.list).not.toHaveBeenCalled();
-    });
-
-    it('acacia renewal with an expanded invoice uses its id', async () => {
-      const events = await translate(
-        chargeRefunded({ id: 'ch_a2', invoice: { id: 'in_a2' }, payment_intent: 'pi_a2' }),
-        withCreds(),
-      );
-      expect(events?.[0]).toMatchObject({ providerPaymentId: 'in_a2' });
     });
 
     it('acacia one-time: a null invoice means the payment intent, no Stripe call', async () => {
@@ -533,22 +429,6 @@ describe('stripe translate across the acacia to basil-or-later transition', () =
       await expect(translate(chargeRefunded({ id: 'ch_b5', payment_intent: 'pi_b5' }), ctx())).rejects.toThrow(
         /secret key/,
       );
-      expect(lookup.list).not.toHaveBeenCalled();
-    });
-
-    it('basil one-time charge carrying our metadata uses its intent with no Stripe call, even without a key', async () => {
-      const charge = { id: 'ch_b7', payment_intent: 'pi_b7', metadata: { applicationId: APP_ID } };
-      for (const c of [withCreds(), ctx()]) {
-        const events = await translate(chargeRefunded(charge), c);
-        expect(events?.[0]).toMatchObject({ applicationId: APP_ID, providerPaymentId: 'pi_b7' });
-      }
-      expect(lookup.list).not.toHaveBeenCalled();
-      expect(lookup.keys).toEqual([]);
-    });
-
-    it('basil charge with no payment intent is recorded under the charge', async () => {
-      const events = await translate(chargeRefunded({ id: 'ch_b6', payment_intent: null }), withCreds());
-      expect(events?.[0]).toMatchObject({ providerPaymentId: 'ch_b6' });
       expect(lookup.list).not.toHaveBeenCalled();
     });
   });

@@ -128,7 +128,7 @@ export default async function ListSettingsPage({
   const [list, application] = await Promise.all([getList(id, listId), getApplication(id)]);
   const origins = application.corsOrigins ?? [];
   const capture = captureState(list.publicCapture, origins);
-  const canWrite = hasScope(application.access?.scopes ?? null, 'audience:write');
+  const canWrite = hasScope(application.access.scopes, 'audience:write');
   const accessHref = `/applications/${id}/access`;
 
   return (

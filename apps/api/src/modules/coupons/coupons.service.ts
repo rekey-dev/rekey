@@ -68,7 +68,6 @@ import {
   computeDiscount,
   couponTermsAfter,
   couponTermsFor,
-  previousBuildColumns,
   type CouponRecord,
   type CouponTerms,
   type CouponTermsInput,
@@ -174,9 +173,8 @@ function currencyNotCovered(coupon: CouponRecord, displayCode: string, charged: 
   });
 }
 
-/** Row values for a coupon's discount fields, with the two columns the previous build reads. */
-function termsData(discountType: CouponDiscountType, terms: CouponTerms) {
-  return { basisPoints: terms.basisPoints, currencies: terms.currencies, ...previousBuildColumns(discountType, terms) };
+function termsData(terms: CouponTerms) {
+  return { basisPoints: terms.basisPoints, currencies: terms.currencies };
 }
 
 async function replaceAmounts(tx: Prisma.TransactionClient, coupon: { id: string; applicationId: string }, terms: CouponTerms) {
@@ -272,7 +270,7 @@ export const couponsService = {
             applicationId: input.applicationId,
             code: normaliseCode(input.code),
             discountType: input.discountType,
-            ...termsData(input.discountType, terms),
+            ...termsData(terms),
             planSlugs: normalisedSlugs,
             startsAt: input.startsAt ?? null,
             endsAt: input.endsAt ?? null,
@@ -330,7 +328,7 @@ export const couponsService = {
       await tx.coupon.update({
         where: { id: before.id },
         data: {
-          ...(terms !== null && termsData(before.discountType, terms)),
+          ...(terms !== null && termsData(terms)),
           ...(input.active !== undefined && { active: input.active }),
           ...(input.planSlugs !== undefined && { planSlugs: input.planSlugs.map((s) => s.toLowerCase()) }),
           ...(input.endsAt !== undefined && { endsAt: input.endsAt }),

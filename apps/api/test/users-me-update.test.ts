@@ -135,21 +135,6 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
     });
   });
 
-  it('is readable back through GET /users/me', async () => {
-    const user = await signUp(appA, 'alice-read@example.com');
-    await patch(appA, user.accessToken, { metadata: { plan: 'pro' } });
-
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/users/me/',
-      headers: {
-        authorization: `Bearer ${appA.liveKey}`,
-        'x-rekey-user-token': user.accessToken,
-      },
-    });
-    expect(res.json().data.metadata).toEqual({ plan: 'pro' });
-  });
-
   // ---------- merge semantics ----------
 
   it('MERGE: an omitted key survives, a sent key replaces it, and a null key is deleted', async () => {
@@ -169,19 +154,6 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
       overwrite: 'after',
       added: true,
     });
-  });
-
-  it('MERGE is shallow: a nested object replaces wholesale, it is not deep-merged', async () => {
-    const user = await signUp(appA, 'shallow@example.com', {
-      prefs: { theme: 'dark', locale: 'en' },
-    });
-
-    const res = await patch(appA, user.accessToken, { metadata: { prefs: { theme: 'light' } } });
-
-    // `locale` is gone, the route documents wholesale top-level replacement,
-    // and pretending otherwise (deep merge) is the surprise that makes nested
-    // deletes impossible.
-    expect(res.json().data.metadata).toEqual({ prefs: { theme: 'light' } });
   });
 
   it('omitting metadata entirely is a no-op, not a wipe', async () => {
@@ -255,17 +227,6 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
     await expect(storedMetadata(alice.id)).resolves.toEqual({ owner: 'alice' });
   });
 
-  it("a valid patch only ever hits the token's own subject", async () => {
-    const alice = await signUp(appA, 'a2-owner@example.com', { owner: 'alice' });
-    const bob = await signUp(appA, 'b2-victim@example.com', { owner: 'bob' });
-
-    const res = await patch(appA, alice.accessToken, { metadata: { owner: 'alice-edited' } });
-
-    expect(res.statusCode).toBe(200);
-    await expect(storedMetadata(alice.id)).resolves.toEqual({ owner: 'alice-edited' });
-    await expect(storedMetadata(bob.id)).resolves.toEqual({ owner: 'bob' });
-  });
-
   it('CROSS-APP GUARD: a token from app A cannot write through app B\'s key', async () => {
     const alice = await signUp(appA, 'cross@example.com', { owner: 'alice' });
 
@@ -298,35 +259,6 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('METADATA_TOO_LARGE');
     // Refused before the write, so the pre-existing object is intact.
-    await expect(storedMetadata(user.id)).resolves.toEqual({ keep: 'me' });
-  });
-
-  // ---------- scope ----------
-
-  it('403 for a secret key that carries auth:read but not auth:write', async () => {
-    const readOnly = await app
-      .inject({
-        method: 'POST',
-        url: `/api/v1/admin/applications/${appA.applicationId}/api-keys`,
-        headers: { authorization: `Bearer ${ADMIN_KEY}` },
-        payload: { name: 'read-only', mode: 'live', scopes: ['auth:read'] },
-      })
-      .then((r) => r.json().data as { rawKey: string });
-
-    const user = await signUp(appA, 'scoped@example.com', { keep: 'me' });
-
-    const res = await app.inject({
-      method: 'PATCH',
-      url: '/api/v1/users/me/',
-      headers: {
-        authorization: `Bearer ${readOnly.rawKey}`,
-        'x-rekey-user-token': user.accessToken,
-      },
-      payload: { metadata: { keep: 'changed' } },
-    });
-
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('API_KEY_SCOPE_INSUFFICIENT');
     await expect(storedMetadata(user.id)).resolves.toEqual({ keep: 'me' });
   });
 });

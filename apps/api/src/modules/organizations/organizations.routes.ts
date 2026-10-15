@@ -720,6 +720,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         endUserId: req.endUser!.id,
         activeOrganizationId: id,
         impersonation: req.impersonation,
+        sessionStamp: req.sessionStamp ?? null,
         // Re-mint on the device the current session is bound to (the `dev`
         // claim), never a new one, switching teams is not a sign-in.
         device: {
@@ -754,6 +755,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         endUserId: req.endUser!.id,
         activeOrganizationId: null,
         impersonation: req.impersonation,
+        sessionStamp: req.sessionStamp ?? null,
         device: {
           userAgent: requestClient(req).userAgent,
           ip: req.ip,

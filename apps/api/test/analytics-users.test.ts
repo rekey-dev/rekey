@@ -12,6 +12,10 @@ import { dashboardSlots } from '../src/lib/compute-semaphore.js';
 import { __setSectionDelayForTests } from '../src/modules/analytics/envelope.js';
 import { activeOn, activeWithin, seedUsers, shiftDay, utcToday, type SeedUser } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 type Json = Record<string, any>;
 
@@ -116,9 +120,7 @@ describe('users analytics: kpis and activity (live)', () => {
     });
 
     it('paying users count distinct owners of live subscriptions', async () => {
-      const plan = await prisma.plan.create({
-        data: { applicationId: w.appId, slug: 'pro', name: 'Pro', amount: 1000, currency: 'usd', interval: 'MONTH' },
-      });
+      const plan = await seedPlan({ applicationId: w.appId, slug: 'pro', name: 'Pro', interval: 'MONTH' }, { currency: 'usd', amount: 1000 });
       const owners = users.slice(0, 3);
       for (const [i, u] of owners.entries()) {
         await prisma.subscription.create({
@@ -281,9 +283,7 @@ describe('users analytics: kpis and activity (live)', () => {
     it('refuses another Application\'s plan and organization with 404', async () => {
       const w = await operatorWorld(app);
       const other = await operatorWorld(app);
-      const plan = await prisma.plan.create({
-        data: { applicationId: other.appId, slug: 'x', name: 'X', amount: 100, currency: 'usd', interval: 'MONTH' },
-      });
+      const plan = await seedPlan({ applicationId: other.appId, slug: 'x', name: 'X', interval: 'MONTH' }, { currency: 'usd', amount: 100 });
       const org = await prisma.organization.create({ data: { applicationId: other.appId, name: 'Other', slug: 'other' } });
       const p = await get(w, `?plan=${plan.id}`);
       expect(p.statusCode).toBe(404);
@@ -332,7 +332,9 @@ describe('users analytics: kpis and activity (live)', () => {
       const releases: Array<() => void> = [];
       const holders = [0, 1].map(() => dashboardSlots.run(() => new Promise<void>((r) => releases.push(r))));
       try {
-        const res = await get(w, '?range=7d');
+        // Each busy section waits out the 3s slot timeout in turn, so name two
+        // rather than paying for all of them.
+        const res = await get(w, '?range=7d&sections=kpis,activity');
         expect(res.statusCode, res.body).toBe(503);
         expect(res.json().error.code).toBe('ANALYTICS_BUSY');
         expect(res.headers['retry-after']).toBe('5');

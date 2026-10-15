@@ -198,16 +198,20 @@ export default async function McpConsentReviewPage({
         >
           {wantsAdmin ? (
             <>
-              <strong>Admin</strong> access: in addition to read &amp; write, the client can perform
-              destructive / financial actions in the selected workspace: configure billing-provider
-              credentials and cancel subscriptions. Only grant this to a client you fully trust;
-              secrets you give it travel through that client.
+              <strong>Admin</strong> access: in addition to read &amp; write, the client can act
+              as you in the selected workspace. It can invite, promote and remove owners and
+              admins, change sign-in settings and where sign-in links point, add webhook endpoints
+              that receive your users&apos; data, mint API keys, configure billing-provider
+              credentials, cancel subscriptions and issue refunds. Only grant this to a client you
+              fully trust; secrets you give it travel through that client.
             </>
           ) : wantsWrite ? (
             <>
-              <strong>Read &amp; write</strong> access: the client can create and modify
-              applications, plans, auth settings, and webhook endpoints in the selected workspace.
-              It cannot configure billing credentials or cancel subscriptions.
+              <strong>Read &amp; write</strong> access: the client can create applications, edit
+              plans, prices and coupons, invite and remove members, and manage member-level
+              organization roles in the selected workspace. It cannot create or change an owner or
+              admin, change sign-in settings, add webhook endpoints, mint API keys, configure
+              billing credentials, cancel subscriptions or issue refunds.
             </>
           ) : (
             <>

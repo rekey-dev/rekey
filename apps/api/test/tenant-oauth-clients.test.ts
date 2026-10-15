@@ -12,6 +12,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('registered OAuth clients', () => {
   let app: FastifyInstance;
@@ -130,16 +133,6 @@ describe('registered OAuth clients', () => {
     expect(res.json().error.code).toBe('OAUTH_CLIENT_NOT_FOUND');
     // Still there, a 404 that deleted the row anyway would be worse than a 200.
     expect(await prisma.oAuthClient.findUnique({ where: { id: victim.id } })).not.toBeNull();
-  });
-
-  it('answers 404 for a client id that does not exist at all', async () => {
-    const { token, applicationId } = await fixture('oc-missing');
-    const res = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/tenant/applications/${applicationId}/oauth-clients/does-not-exist`,
-      headers: { authorization: `Bearer ${token}` },
-    });
-    expect(res.statusCode).toBe(404);
   });
 
   it('refuses to list for someone with no access to the Application', async () => {

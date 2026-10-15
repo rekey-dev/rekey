@@ -15,6 +15,9 @@ import { configureSandboxPaypal } from './fakes/billing-credentials.js';
 import { fakePaypal } from './fakes/billing-providers.js';
 import { MAX_REFUSED_CONFIRMATIONS } from '../src/modules/billing/checkout/confirm-approval.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const REGISTERED = 'https://app.example';

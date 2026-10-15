@@ -81,10 +81,19 @@ The endpoint lands on the same `findOrCreateOAuthOperator` that the Google and
 GitHub operator login buttons use. Two consequences follow, and both are
 deliberate:
 
-1. **An operator who already exists keeps everything.** Their workspaces, MFA
-   enrolment and passkeys are untouched — the assertion signs them in, it does
-   not create a parallel account. This is the migration path for anyone who
-   already has two separate accounts.
+1. **An operator whose address is verified keeps everything.** Their
+   workspaces, MFA enrolment and passkeys are untouched: the assertion signs
+   them in, it does not create a parallel account. This is the migration path
+   for anyone who already has two separate accounts.
+
+   An operator whose address was never verified is a different case. The
+   assertion carries a verified email, so it is the first proof of that
+   mailbox, and like any other proof it removes what was set before it: the
+   password, sessions, passkeys, access tokens and MCP grants (see
+   [tenant-auth.md](tenant-auth.md#confirming-an-operators-email-address)).
+   Workspace memberships stay. For an account that was provisioned for this
+   handoff that removes only the placeholder password, and no notice is
+   mailed.
 2. **A first-time assertion is a new-operator creation** and is gated by
    `OPERATOR_SIGNUP_MODE` exactly like any other. Federation is **not** a way
    around invite-only.

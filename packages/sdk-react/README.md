@@ -1,7 +1,5 @@
 # `@rekey.dev/react`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 The browser SDK for **[Rekey](https://rekey.dev)** — React hooks **and drop-in UI components** for end-user auth, organizations, and billing.
 
 > **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This package is its React/browser SDK; the server SDK is [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).

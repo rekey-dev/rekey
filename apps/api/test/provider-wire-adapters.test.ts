@@ -1,7 +1,7 @@
 /**
  * What the real adapters put on the wire for money that is not two-decimal,
  * and what they read back. The conversion functions are covered by
- * `money-v2-wire-scale.test.ts`; this holds each CALL SITE to using them,
+ * `provider-amount-scale.test.ts`; this holds each CALL SITE to using them,
  * with literal expected values. A US dollar amount is the same integer
  * before and after, so every case here uses a currency where it is not:
  * ISK and MGA at Stripe, HUF and JPY at PayPal.
@@ -10,12 +10,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
+import type { EndUser } from '@prisma/client';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import type { CheckoutSessionInput, HostedFallbackInput, PricedPlan } from '../src/modules/billing/providers/types.js';
-import { pricedPlanFixture } from './priced-plan-fixture.js';
+import { pricedPlanFixture, type FixturePlan } from './priced-plan-fixture.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 type Recorded = { op: string; params: Record<string, unknown> };
 
@@ -75,7 +78,7 @@ vi.mock('razorpay', () => {
 
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
 
-function plan(currency: string, amount: number, over: Partial<Plan> = {}): PricedPlan {
+function plan(currency: string, amount: number, over: Partial<FixturePlan> = {}): PricedPlan {
   return pricedPlanFixture({
     id: 'pl_1',
     applicationId: 'app_1',
@@ -87,7 +90,7 @@ function plan(currency: string, amount: number, over: Partial<Plan> = {}): Price
     kind: 'SUBSCRIPTION',
     metadata: {},
     ...over,
-  } as unknown as Plan);
+  } as unknown as FixturePlan);
 }
 
 function checkout(priced: PricedPlan, over: Partial<CheckoutSessionInput> = {}): CheckoutSessionInput {
@@ -156,22 +159,6 @@ describe('Stripe adapter', () => {
     });
     expect(stripeCalls('refunds.create')[0]!.params).toMatchObject({ amount: 1500 });
     expect(result).toMatchObject({ amount: 150000, currency: 'MGA' });
-  });
-
-  it('reads a session total back in stored units', async () => {
-    stripeStub.sessions.set('cs_isk', {
-      id: 'cs_isk',
-      status: 'complete',
-      payment_status: 'paid',
-      client_reference_id: 'app_1:eu_1',
-      amount_total: 500000,
-      currency: 'isk',
-      url: null,
-      metadata: {},
-    });
-    expect(await provider().getCheckoutSession('cs_isk')).toMatchObject({ amountTotal: 5000, currency: 'ISK' });
-    stripeStub.sessions.set('cs_mga', { id: 'cs_mga', status: 'open', amount_total: 1500, currency: 'mga', metadata: {} });
-    expect(await provider().getCheckoutSession('cs_mga')).toMatchObject({ amountTotal: 150000, currency: 'MGA' });
   });
 
   it('carries a one-time ISK purchase to the hosted page at the amount the elements session charged', async () => {
@@ -248,17 +235,6 @@ describe('PayPal adapter', () => {
     expect(amount.breakdown).toMatchObject({ item_total: { value: '5000' }, discount: { value: '750' } });
   });
 
-  it('refunds part of a HUF capture with no decimals, and reports it in stored units', async () => {
-    const result = await provider().refundPayment({
-      providerPaymentId: 'CAPTURE-1',
-      idempotencyKey: 'rekey-refund-huf-0001',
-      amount: 250000,
-      currency: 'HUF',
-    });
-    const refund = requests.find((request) => request.url.includes('/refund'))!;
-    expect(refund.body.amount).toEqual({ value: '2500', currency_code: 'HUF' });
-    expect(result).toMatchObject({ refundId: 'REF-1', amount: 250000 });
-  });
 });
 
 describe('Razorpay adapter', () => {

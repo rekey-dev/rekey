@@ -48,7 +48,7 @@ export default async function ApplicationOverviewPage({
   const basePath = `/api/v1/tenant/applications/${encodeURIComponent(id)}`;
 
   const app = await getApplication(id);
-  const scopes = app.access?.scopes ?? null;
+  const scopes = app.access.scopes;
   const can = (scope: Scope): boolean => hasScope(scopes, scope);
   const billingOn = app.billingConfig.enabled;
 

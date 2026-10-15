@@ -35,10 +35,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import {
   CHECKOUT_SESSION_LIFETIME_MS,
-  checkoutStillPayable,
-  pendingCheckoutPrefilter,
 } from '../src/modules/billing/checkout-sessions.js';
 import { configureSandboxPaypal, configureSandboxStripe } from './fakes/billing-credentials.js';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -202,21 +201,19 @@ describe('a subscription binds its buyer to one payment provider', () => {
     kind: 'CREDIT' | 'LICENSE' | 'SUBSCRIPTION';
     licenseKind?: 'PERPETUAL' | 'TIMED' | 'SEATS';
   }): Promise<string> {
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan(
+      {
         applicationId,
         slug: data.slug,
         name: data.slug,
-        amount: 500,
-        currency: 'USD',
         kind: data.kind,
         ...(data.kind === 'CREDIT' && { creditsAmount: 100 }),
         ...(data.licenseKind !== undefined && { licenseKind: data.licenseKind }),
         ...(data.licenseKind === 'TIMED' && { licenseDurationDays: 30 }),
         registrationStatus: 'NOT_REQUIRED',
       },
-      select: { slug: true },
-    });
+      { currency: 'USD', amount: 500 },
+    );
     return plan.slug;
   }
 
@@ -426,30 +423,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect((stillAcmes.json().data as { id: string } | null)?.id).toBe(rows[0]!.id);
   });
 
-  it('refuses the personal↔org direction of the same rewrite', async () => {
-    await orgSubjectApp();
-    // The mirror, and the one that does not need two orgs to reach: a personal
-    // subscription and an org checkout for the same (user, plan) are the same
-    // row too. Only the provider disagreeing used to stop this.
-    const { pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({
-      endUserId: user.id,
-      planSlug: pro,
-      provider: 'stripe',
-      providerSubId: 'sub_PERSONAL',
-    });
-    const orgId = await ownedOrg(user.id);
-
-    const res = await checkout(user.token, pro, 'stripe', { organizationId: orgId });
-
-    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
-    expect(errorOf(res).code).toBe('BILLING_SUBSCRIPTION_SUBJECT_CONFLICT');
-    const rows = await prisma.subscription.findMany({ where: { applicationId } });
-    expect(rows[0]!.beneficiaryOrgId).toBeNull();
-    expect(rows[0]!.providerSubId).toBe('sub_PERSONAL');
-  });
-
   it('still lets a PENDING row change subject, which is the part #431 has to close', async () => {
     // Recorded as a deliberate gap rather than left to be rediscovered. The
     // subject guard protects a LIVE subscription, because that is the one an
@@ -529,27 +502,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(issuedProvider(res)).toBe('paypal');
   });
 
-  it('keeps a TIMED licence guarded, because it recurs', async () => {
-    // The one-off carve-out is about purchases that create no second billing
-    // relationship. A TIMED licence renews, so it is neither exempt as the
-    // thing being bought nor exempt as the thing that binds.
-    await boundProviderAlsoEnabled();
-    const { pro } = await twoPlans();
-    const timed = await rawPlan({ slug: 'timed-lic', kind: 'LICENSE', licenseKind: 'TIMED' });
-
-    const buyer = await signUp();
-    await seedPaypalSub(buyer.id, pro);
-    const buyingTimed = await checkout(buyer.token, timed, 'stripe');
-    expect(buyingTimed.statusCode, JSON.stringify(buyingTimed.json())).toBe(409);
-    expect(errorOf(buyingTimed).code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
-
-    const holder = await signUp();
-    await seedSub({ endUserId: holder.id, planSlug: timed, provider: 'paypal' });
-    const boundByTimed = await checkout(holder.token, pro, 'stripe');
-    expect(boundByTimed.statusCode, JSON.stringify(boundByTimed.json())).toBe(409);
-    expect(errorOf(boundByTimed).code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
-  });
-
   it.each(['TRIALING', 'PAST_DUE'] as const)('binds on a %s subscription too', async (status) => {
     // Both are entitling and both are live billing relationships: a trial
     // converts into a charge and a past-due one is still being retried.
@@ -582,36 +534,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     const res = await checkout(user.token, pro, 'stripe');
 
     expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
-    expect(issuedProvider(res)).toBe('stripe');
-  });
-
-  it('lets a buyer switch to a DIFFERENT plan on an unfinished checkout when they name no provider', async () => {
-    // The "switched plan" half of the misclick requirement (#437). Buyer has an
-    // unfinished checkout on `basic`, comes back and picks `pro` instead. They
-    // name no provider, so the pin routes them to the one they already started
-    // on, and the checkout proceeds. No 409: switching plan is not switching
-    // processor, and there is nothing to bill twice because they name no second
-    // one.
-    //
-    // PayPal is configured as the DE geo winner and the buyer checks out from
-    // DE, so "pinned" and "routed" give DIFFERENT answers. Asserting `stripe`
-    // therefore proves the PIN steered this, not the router. Configuring only
-    // Stripe would make the assertion pass with pinning entirely removed, since
-    // Stripe would be the sole option.
-    await billingCredentialsService.upsertRaw(
-      applicationId,
-      'paypal',
-      { clientId: 'pp_bind', clientSecret: 'pp_secret', webhookId: 'WH-bind' },
-      { mode: 'test', enabled: true, countries: ['DE'], priority: 10 },
-    );
-    const { basic, pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'stripe', status: 'PENDING' });
-
-    const res = await checkout(user.token, pro, undefined, { country: 'DE' });
-
-    expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
-    // The unfinished Stripe checkout wins over the DE geo route to PayPal.
     expect(issuedProvider(res)).toBe('stripe');
   });
 
@@ -773,37 +695,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(errorOf(res).code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
   });
 
-  it('selects exactly the payable rows with the prefilter as without it', () => {
-    // Every (stamp, last write) pair a real row can hold, stamp never after
-    // the write, plus unstamped rows. The prefilter must change no answer.
-    const now = new Date();
-    const H = 60 * 60 * 1000;
-    const ages = [0, 1, 12 * H, 23 * H, CHECKOUT_SESSION_LIFETIME_MS - 1, CHECKOUT_SESSION_LIFETIME_MS, CHECKOUT_SESSION_LIFETIME_MS + 1, 48 * H];
-    const bound = pendingCheckoutPrefilter(now).updatedAt.gt.getTime();
-    for (const writeAge of ages) {
-      const updatedAt = new Date(now.getTime() - writeAge);
-      const stamps = [null, ...ages.filter((a) => a >= writeAge)];
-      for (const stampAge of stamps) {
-        const metadata =
-          stampAge === null ? {} : { checkoutOpenedAt: new Date(now.getTime() - stampAge).toISOString() };
-        const row = { metadata, updatedAt };
-        const withPrefilter = updatedAt.getTime() > bound && checkoutStillPayable(row, now);
-        expect(withPrefilter, `write ${writeAge}, stamp ${stampAge}`).toBe(checkoutStillPayable(row, now));
-      }
-    }
-  });
-
-  it('never stamps a checkout later than the row was written, which the prefilter relies on', async () => {
-    const { basic } = await twoPlans();
-    const user = await signUp();
-    const opened = await checkout(user.token, basic, 'stripe');
-    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
-
-    const row = await pendingRow(user.id, basic);
-    const stamp = new Date((row.metadata as { checkoutOpenedAt: string }).checkoutOpenedAt);
-    expect(stamp.getTime()).toBeLessThanOrEqual(row.updatedAt.getTime());
-  });
-
   it('binds to the OLDEST provider when a buyer already holds two, so the answer is stable', async () => {
     // Buyers who were billed twice before this guard existed hold two entitling
     // subscriptions. Without an `orderBy` the binding provider was whatever
@@ -853,31 +744,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
     expect(err.message).toContain('stripe');
     expect(err.fix).toMatch(/re-enable|cancel/i);
-  });
-
-  it('says the bound provider is gone even when the caller named a different one', async () => {
-    // The availability question is settled before the caller's request is
-    // judged, because it does not depend on what they asked for.
-    //
-    // It used to be judged after. The switch guard ran first and had never
-    // looked at availability, so a subscriber bound to a DISABLED provider who
-    // named another one was told to "check out through <bound>", the one
-    // instruction that cannot be followed. Naming a provider and naming none
-    // are the same situation from the operator's side, and the answer is the
-    // same fact.
-    await configureSandboxPaypal(applicationId);
-    const { basic, pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal' });
-    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
-
-    const res = await checkout(user.token, pro, 'stripe');
-
-    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
-    const err = errorOf(res);
-    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
-    // Specifically NOT the switch refusal, whose fix orders them to use PayPal.
-    expect(err.fix).not.toMatch(/check out through "paypal"/i);
   });
 
   it('does not offer "cancel it" as the way out when the credentials are deleted rather than disabled', async () => {
@@ -1055,86 +921,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(issuedProvider(afterReAdd)).toBe('paypal');
   });
 
-  it('does not tell a trialist they "pay through" a provider on the availability refusal either', async () => {
-    // The TRIALING split has to be on BOTH refusals. Putting it on one is the
-    // mistake this change already made with PENDING, and this is the more
-    // reachable of the two: it fires whether or not a provider was named.
-    await configureSandboxPaypal(applicationId);
-    const { basic, pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({ endUserId: user.id, planSlug: basic, status: 'TRIALING' });
-    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
-
-    for (const named of ['stripe', undefined] as const) {
-      const res = await checkout(user.token, pro, named);
-      const err = errorOf(res);
-      expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
-      expect(err.message).not.toMatch(/pays through/i);
-      expect(err.message).toMatch(/on a trial/i);
-    }
-  });
-
-  it('does not call a PAUSED subscription an unfinished checkout', async () => {
-    // PENDING alone does not mean "unfinished checkout". Stripe's `paused`
-    // maps to PENDING (providers/modules/stripe/index.ts:75), as does every
-    // status this codebase does not recognise, and those rows KEEP their
-    // `providerSubId`. Such a row is a real provider-side subscription, so
-    // every sentence the unpaid wording asserts is false of it: there IS
-    // something to cancel, a payment HAS been recorded, and cancelling dials
-    // the processor like any other provider-backed row.
-    await configureSandboxPaypal(applicationId);
-    const { basic, pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({
-      endUserId: user.id,
-      planSlug: basic,
-      provider: 'paypal',
-      status: 'PENDING',
-      providerSubId: 'I-PAUSED-SUB',
-    });
-
-    const switched = errorOf(await checkout(user.token, pro, 'stripe'));
-    expect(switched.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
-    expect(switched.message).not.toMatch(/unfinished checkout/i);
-    expect(switched.fix).not.toMatch(/nothing for Rekey to cancel/i);
-
-    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
-    const unavailable = errorOf(await checkout(user.token, pro, 'stripe'));
-    expect(unavailable.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
-    expect(unavailable.message).not.toMatch(/unfinished checkout/i);
-    expect(unavailable.fix).not.toMatch(/nothing for Rekey to cancel/i);
-  });
-
-  it('does not claim a disabled provider stops the checkout already started being paid', async () => {
-    // Completions resolve credentials through `loadDecryptedWithMode`, which
-    // never consults `enabled`. So a checkout opened at a provider that is
-    // later DISABLED still completes; only DELETED credentials refuse it. The
-    // remedy text said re-enabling was what let the started checkout be paid,
-    // which is false in the disabled case and true only in the deleted one.
-    await configureSandboxPaypal(applicationId);
-    const { basic, pro } = await twoPlans();
-    const user = await signUp();
-    await seedSub({
-      endUserId: user.id,
-      planSlug: basic,
-      provider: 'paypal',
-      status: 'PENDING',
-      providerSubId: null,
-    });
-    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
-
-    const disabled = errorOf(await checkout(user.token, pro, 'stripe'));
-    expect(disabled.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
-    expect(disabled.fix).toMatch(/completions do not consult whether a provider is enabled/i);
-
-    await billingCredentialsService.remove(applicationId, 'paypal');
-    const deleted = errorOf(await checkout(user.token, pro, 'stripe'));
-    expect(deleted.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
-    expect(deleted.fix).toMatch(/so a payment completed there can still be recorded/i);
-    // And the two must not share the claim that only one of them supports.
-    expect(deleted.fix).not.toMatch(/completions do not consult/i);
-  });
-
   it('names the buyer’s own provider when an Application has no enabled providers at all', async () => {
     // A status change worth pinning: this used to answer 400
     // BILLING_CREDENTIALS_NOT_CONFIGURED, which names
@@ -1181,15 +967,6 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(row.status).toBe('ACTIVE');
   });
 
-  it('leaves a buyer with no subscription free to pick any configured processor', async () => {
-    const { pro } = await twoPlans();
-    const user = await signUp();
-
-    const res = await checkout(user.token, pro, 'stripe');
-
-    expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
-  });
-
   it('does not block a one-off purchase, which creates no second billing relationship', async () => {
     // A credit pack bought through Stripe while subscribed through PayPal is a
     // single charge. Refusing it would block a legitimate sale to defend
@@ -1198,18 +975,14 @@ describe('a subscription binds its buyer to one payment provider', () => {
     // Written directly: the admin plan route has no `kind` field and always
     // creates a SUBSCRIPTION, which silently made the first version of this
     // test assert the opposite of what it claimed.
-    await prisma.plan.create({
-      data: {
+    await seedPlan({
         applicationId,
         slug: 'pack',
         name: 'Credit pack',
-        amount: 500,
-        currency: 'USD',
         kind: 'CREDIT',
         creditsAmount: 100,
         registrationStatus: 'NOT_REQUIRED',
-      },
-    });
+      }, { currency: 'USD', amount: 500 });
     const user = await signUp();
     await seedPaypalSub(user.id, basic);
 

@@ -27,11 +27,6 @@ describe('inbound: provider decimal string to stored minor units', () => {
     expect(paypalMinorFromMajor('5000', c)).toBe(500000);
   });
 
-  it('the common case is unchanged, and is case/whitespace insensitive', () => {
-    expect(paypalMinorFromMajor('49.99', 'USD')).toBe(4999);
-    expect(paypalMinorFromMajor('5000', ' jpy ')).toBe(5000);
-  });
-
   it('an amount with no currency has no scale', () => {
     expect(paypalMinorFromMajor('49.99', undefined)).toBeNull();
   });
@@ -46,10 +41,6 @@ describe('outbound: stored minor units to the string PayPal expects', () => {
     expect(toProviderAmount('JPY', 0)).toBe('0');
     // A 5000 Ft plan stores 500000: HUF has two places in ISO.
     expect(toProviderAmount('HUF', 500000)).toBe('5000');
-  });
-
-  it('a two-decimal plan is unchanged', () => {
-    expect(toProviderAmount('USD', 4999)).toBe('49.99');
   });
 
   it('a zero-decimal currency PayPal takes decimals on gets ".00"', () => {

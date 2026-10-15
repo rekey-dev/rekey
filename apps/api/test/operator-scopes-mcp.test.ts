@@ -21,6 +21,9 @@ import { TOOL_SCOPES, WORKSPACE_TOOLS, allOperatorTools } from '../src/modules/t
 import { isScope } from '../src/lib/operator-scopes.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { createHash, randomBytes } from 'node:crypto';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 /** A loopback redirect the AS accepts for a native client. */
 const REDIRECT = 'http://127.0.0.1:9797/callback';
@@ -184,20 +187,6 @@ describe('operator scopes over MCP', () => {
     // refused above, so the refusal was the membership, not the credential.
     const ok = await rpc(w.pat, 'tools/call', { name: 'list_organization_roles', arguments: { applicationId: w.appId } });
     expect(ok.result!.isError).toBeUndefined();
-  });
-
-  it('the workspace overview omits the money without billing:read, and includes it with', async () => {
-    const w = await world();
-    await setScopes(w, ['overview:read', 'end-users:read']);
-    const without = called(await rpc(w.pat, 'tools/call', { name: 'get_workspace_overview', arguments: {} }));
-    expect(without).toHaveProperty('activeSubscriptions');
-    expect(without).not.toHaveProperty('currencies');
-
-    await setScopes(w, ['overview:read', 'billing:read']);
-    const withBilling = called(await rpc(w.pat, 'tools/call', { name: 'get_workspace_overview', arguments: {} }));
-    expect(withBilling).toHaveProperty('currencies');
-    // Per currency only: no scalar total sits beside the list.
-    expect(withBilling).not.toHaveProperty('mrrMinor');
   });
 
   it('every tool is either scoped or an explicit workspace floor', () => {

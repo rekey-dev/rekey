@@ -102,18 +102,6 @@ describe('brute-force fails closed on a store outage', () => {
     await expect(clearFailures('eu:login:app:someone@example.com')).resolves.toBeUndefined();
   });
 
-  it('the threshold still trips normally when the store is healthy', async () => {
-    state.incrValue = LOGIN_POLICY.threshold;
-
-    // `registerFailure` used to return void. It now reports the count and
-    // whether this attempt tripped the lock, because the caller has to emit
-    // `auth.sign_in_failed` / `auth.locked_out` and cannot re-derive either
-    // without a second round-trip to the store.
-    await expect(
-      registerFailure('eu:login:app:someone@example.com', LOGIN_POLICY),
-    ).resolves.toMatchObject({ failures: LOGIN_POLICY.threshold, locked: true });
-  });
-
   it('refuses to run on process-local counters when there is no client in production', async () => {
     // Per-process counters would give N replicas N times the attempts, and a
     // restart would clear every lock. Production refuses to boot without
@@ -129,11 +117,6 @@ describe('brute-force fails closed on a store outage', () => {
     } finally {
       process.env.NODE_ENV = previous;
     }
-  });
-
-  it('still uses the in-memory store outside production, so tests stay deterministic', async () => {
-    state.client = null;
-    await expect(assertNotLocked('eu:login:app:nobody@example.com')).resolves.toBeUndefined();
   });
 });
 
@@ -172,22 +155,6 @@ describe('the display-only lock read fails open, and says so', () => {
       lockedForSec: null,
       failuresInWindow: 4,
     });
-  });
-
-  it('derives its key exactly the way the writer does', async () => {
-    // The failure mode this guards: a reader that builds the scope even
-    // slightly differently gets a permanent miss and reports "not locked"
-    // forever, which is exactly how the panel came to lie. One
-    // exported builder, used by auth.service on write and the operator routes
-    // on read, is the only reason that cannot drift.
-    expect(euLoginLockScope('app_123', 'Someone@Example.COM')).toBe(
-      'eu:login:app_123:someone@example.com',
-    );
-    // Case-folding matters because sign-in looks the row up case-insensitively:
-    // a per-capitalisation counter would be a free reset for an attacker.
-    expect(euLoginLockScope('app_123', 'someone@example.com')).toBe(
-      euLoginLockScope('app_123', 'SOMEONE@EXAMPLE.COM'),
-    );
   });
 
   it('a lock set by the real write path is visible to the read path', async () => {

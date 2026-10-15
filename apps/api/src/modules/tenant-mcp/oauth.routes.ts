@@ -29,6 +29,7 @@ import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-claim.js';
 import { resolveOperatorToken } from '../../middleware/operator-token-auth.js';
 import {
   OAuthError,
@@ -41,6 +42,7 @@ import {
 import { ok, errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
 import { assertOperatorMcpEnabled } from './workspace-mcp-switch.js';
 import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
+import { operatorSessionEndedMeanwhile } from '../../lib/session-refusals.js';
 
 // This plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts), so
 // there is no per-request feature-toggle 404 here. Most of these are OAuth
@@ -430,6 +432,12 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           fix: 'Sign in to the panel first.',
         });
       }
+      // An unconfirmed operator account may have been registered by someone
+      // else for this address, and a grant is a credential that would outlive
+      // their session.
+      if (body.data.approve) {
+        await assertOperatorVerifiedForCredential(operator.id, 'connect an MCP client');
+      }
       const data = body.data;
       const client = await operatorMcpOAuthService.getClient(data.client_id);
       if (!client || !client.redirectUris.includes(data.redirect_uri)) {
@@ -485,6 +493,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         redirectUri: data.redirect_uri,
         codeChallenge: data.code_challenge,
         scope: grantScopes(data.scope),
+        basis: { sessionsInvalidBefore: req.tenantSessionStamp ?? null, refusal: operatorSessionEndedMeanwhile },
       });
       return reply.send({
         success: true,

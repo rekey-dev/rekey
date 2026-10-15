@@ -33,6 +33,10 @@ before you had a catalog resolving to the authority they always had.
 | Assign a role as the operator | operator, tenant session | Panel → Application → Organizations, `POST` / `PATCH /tenant/applications/:id/organizations/:orgId/members`, or the `add_organization_member` / `set_organization_member_role` MCP tools |
 | Read the catalog | any signed-in end-user | `GET /users/me/organizations/roles` |
 
+Over the operator MCP, write access defines and assigns MEMBER-tier roles only. A role
+with an OWNER or ADMIN `baseRole`, and assigning one, needs admin access
+(see [mcp.md](mcp.md#what-write-access-cannot-do)).
+
 End-users can read the catalog but never write it, so no organization member can
 invent a name that outranks their own. Assignment needs no operator.
 

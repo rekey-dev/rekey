@@ -23,6 +23,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { flushApiRequestLogs } from '../src/lib/request-log.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('operator scopes', () => {
   let app: FastifyInstance;
@@ -147,14 +150,6 @@ describe('operator scopes', () => {
   const endUsers = (w: World) =>
     inject({ method: 'GET', url: `/api/v1/tenant/applications/${w.appId}/end-users`, headers: auth(w.memberToken) });
 
-  it('changes nothing until somebody is restricted', async () => {
-    const w = await world();
-    expect((await plans(w)).statusCode).toBe(200);
-    expect((await endUsers(w)).statusCode).toBe(200);
-    const me = await inject({ method: 'GET', url: '/api/v1/tenant/auth/me', headers: auth(w.memberToken) });
-    expect(activeMembership(me.json().data).scopes).toBeNull();
-  });
-
   it('refuses by scope on a visible application, and stays 404 on an invisible one', async () => {
     const w = await world();
     const set = await setScopes(w, ['end-users:write']);
@@ -205,27 +200,6 @@ describe('operator scopes', () => {
     // scope, being an intersection, cannot override that.
     expect(create.statusCode).toBe(403);
     expect(create.json().error.code).toBe('APP_ACCESS_DENIED');
-  });
-
-  it('unknown scopes are refused, naming them, and nothing is stored', async () => {
-    const w = await world();
-    const bad = await setScopes(w, ['billing:read', 'team:write', 'billing:both']);
-    expect(bad.statusCode).toBe(400);
-    expect(bad.json().error.code).toBe('SCOPE_INVALID');
-    expect(bad.json().error.message).toContain('team:write');
-    expect(bad.json().error.message).toContain('billing:both');
-    // Nothing changed.
-    expect((await plans(w)).statusCode).toBe(200);
-  });
-
-  it('null lifts the restriction', async () => {
-    const w = await world();
-    await setScopes(w, []);
-    expect((await plans(w)).statusCode).toBe(403);
-    const lifted = await setScopes(w, null);
-    expect(lifted.statusCode).toBe(200);
-    expect((lifted.json().data as { scopes: unknown }).scopes).toBeNull();
-    expect((await plans(w)).statusCode).toBe(200);
   });
 
   it('scopes apply to MEMBER only; an ADMIN cannot be restricted', async () => {

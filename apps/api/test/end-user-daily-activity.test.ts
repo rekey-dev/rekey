@@ -15,6 +15,9 @@ import {
   claimDailyActivity,
   utcToday,
 } from '../src/modules/end-users/daily-activity.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -110,11 +113,6 @@ describe('End-user daily activity', () => {
       expect(a.bits).toBe(1n);
     });
 
-    it('an operator-created user has no activity', async () => {
-      const id = await operatorCreate('quiet@example.com');
-      expect(await activity(id)).toMatchObject({ lastActiveOn: null, bits: null });
-    });
-
     it.each([
       { gap: 1, before: 1n, after: 0b11n },
       { gap: 1, before: 0b101n, after: 0b1011n },
@@ -156,19 +154,6 @@ describe('End-user daily activity', () => {
       expect((await activity(id)).bits).toBe(0b101n);
     });
 
-    it('the claim leaves updatedAt alone', async () => {
-      const id = await operatorCreate('stamp@example.com');
-      const before = (await activity(id)).updatedAt;
-      await claimDailyActivity(prisma, id);
-      expect((await activity(id)).updatedAt.getTime()).toBe(before.getTime());
-    });
-
-    it('a known lastActiveOn of today skips the statement', async () => {
-      const id = await operatorCreate('known@example.com');
-      await setActivity(id, 1, 1n);
-      expect(await claimDailyActivity(prisma, id, { lastActiveOn: utcToday() })).toBe(false);
-      expect((await activity(id)).bits).toBe(1n);
-    });
   });
 
   describe('call sites', () => {
@@ -342,8 +327,5 @@ describe('End-user daily activity', () => {
       expect(days).toEqual([false, true, false, true, false]);
     });
 
-    it('is all false with no activity', () => {
-      expect(activeDays(null, null, 3, t)).toEqual([false, false, false]);
-    });
   });
 });

@@ -43,7 +43,6 @@ const CHECKOUT_ERR: Record<string, string> = {
   PLAN_INACTIVE: 'That plan isn’t available any more.',
   // Portal-side code: the catalogue says a checkout for this plan would be refused.
   PLAN_UNAVAILABLE: 'That plan can’t be bought here right now.',
-  PLAN_CURRENCY_INVALID: 'That plan can’t be bought here right now. Nothing was charged.',
   // A subscriber is never moved to another currency, and theirs can no longer
   // be charged. Only the business can repair it.
   BILLING_CURRENCY_CONFLICT:

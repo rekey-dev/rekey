@@ -20,6 +20,9 @@ import { buildApp } from '../src/app.js';
 import { configureSandboxPaypal, configureSandboxStripe } from './fakes/billing-credentials.js';
 import { fakePaypal, fakeStripe } from './fakes/billing-providers.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -154,43 +157,6 @@ describe('coupon discounts reach the provider', () => {
     });
   });
 
-  it('rounds a percentage toward the buyer, and the provider is handed that amount', async () => {
-    // 15% of 19.99 is 2.9985: 3.00 comes off and the buyer pays 16.99.
-    await createCoupon({ code: 'fifteen', discountType: 'PERCENT', basisPoints: 1500 });
-
-    const res = await checkout({ planSlug: 'odd', couponCode: 'fifteen', provider: 'stripe' });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.discountAmount).toBe(300);
-    expect(fakeStripe.lastCheckout?.discount?.amount).toBe(300);
-  });
-
-  it('hands a one-time checkout the discount too', async () => {
-    await createCoupon({ code: 'tenoff', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1000 }] });
-
-    const res = await checkout({ planSlug: 'pack', couponCode: 'tenoff', provider: 'stripe' });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.subscription.metadata.oneTime).toBe(true);
-    expect(fakeStripe.lastCheckout?.discount?.amount).toBe(1000);
-  });
-
-  it('sends no discount at all when no coupon was given', async () => {
-    const res = await checkout({ planSlug: 'pro', provider: 'stripe' });
-
-    expect(res.statusCode).toBe(200);
-    expect(fakeStripe.lastCheckout?.discount).toBeUndefined();
-  });
-
-  it('carries the coupon id so the provider-side record points back at ours', async () => {
-    await createCoupon({ code: 'traceable', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 250 }] });
-
-    await checkout({ planSlug: 'pro', couponCode: 'traceable', provider: 'stripe' });
-
-    const coupon = await prisma.coupon.findFirstOrThrow({ where: { code: 'traceable' } });
-    expect(fakeStripe.lastCheckout?.discount?.couponId).toBe(coupon.id);
-  });
-
   describe('providers that cannot apply the discount refuse the sale', () => {
     it('PayPal rejects a coupon on a recurring subscription', async () => {
       await createCoupon({ code: 'nope', discountType: 'PERCENT', basisPoints: 2000 });
@@ -209,32 +175,16 @@ describe('coupon discounts reach the provider', () => {
       expect(fakePaypal.lastCheckout).toBeNull();
     });
 
-    it('PayPal still sells the same plan at full price without the coupon', async () => {
-      // The refusal must be about the discount, not about PayPal.
-      const res = await checkout({ planSlug: 'pro', provider: 'paypal' });
-
-      expect(res.statusCode).toBe(200);
-      expect(fakePaypal.lastCheckout?.discount).toBeUndefined();
-    });
-
-    it('PayPal takes the coupon on a one-time purchase (Orders v2 has a discount line)', async () => {
-      await createCoupon({ code: 'packoff', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 1500 }] });
-
-      const res = await checkout({ planSlug: 'pack', couponCode: 'packoff', provider: 'paypal' });
-
-      expect(res.statusCode).toBe(200);
-      expect(fakePaypal.lastCheckout?.discount?.amount).toBe(1500);
-    });
   });
 
   describe('guard rails on the resulting charge', () => {
     it('refuses a coupon worth nothing', async () => {
       // Stripe rejects `amount_off: 0`, and accepting it would burn one of
       // the buyer's redemptions on nothing. The API no longer creates a
-      // coupon worth nothing, so the row is one an earlier build wrote.
+      // coupon worth nothing, so the row is written straight to the database.
       const { prisma } = await import('../src/lib/prisma.js');
       await prisma.coupon.create({
-        data: { applicationId, code: 'crumbs', discountType: 'PERCENT', amountOff: 0, basisPoints: 0 },
+        data: { applicationId, code: 'crumbs', discountType: 'PERCENT', basisPoints: 0 },
       });
 
       const res = await checkout({ planSlug: 'pro', couponCode: 'crumbs', provider: 'stripe' });

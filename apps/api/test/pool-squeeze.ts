@@ -31,6 +31,9 @@ export async function withPoolOf<T>(free: number, body: () => Promise<T>): Promi
       timeout: (SLEEP_SECONDS + 5) * 1000,
     }),
   );
+  // A cancelled sleep rejects the moment the cancel lands, which can be before
+  // the wait below attaches: observe each one from the start so none is unhandled.
+  const settled = sleepers.map((sleeper) => sleeper.then(() => undefined, () => undefined));
   for (let i = 0; ; i++) {
     const rows = await prisma.$queryRaw<Array<{ n: bigint }>>`
       SELECT count(*) AS n FROM pg_stat_activity
@@ -43,6 +46,12 @@ export async function withPoolOf<T>(free: number, body: () => Promise<T>): Promi
   try {
     return await body();
   } finally {
-    await Promise.all(sleepers);
+    // The body has its answer, so the parked connections have done their job.
+    // Cancel the sleeps instead of waiting them out; each rejects as cancelled.
+    await prisma.$queryRaw`
+      SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND state = 'active' AND query LIKE 'SELECT pg_sleep%'`;
+    await Promise.all(settled);
   }
 }

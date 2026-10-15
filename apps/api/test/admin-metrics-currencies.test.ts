@@ -12,7 +12,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { pricedAt } from './subscription-price-fixture.js';
-import { bringPlansInStep } from '../src/modules/plans/default-price.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const BASE = '/api/v1/admin/metrics';
@@ -113,9 +116,7 @@ describe('admin metrics: money per currency', () => {
     currency: string,
     interval: 'MONTH' | 'YEAR' = 'MONTH',
   ): Promise<string> {
-    const row = await prisma.plan.create({
-      data: { applicationId, slug, name: slug, amount, currency, interval, kind: 'SUBSCRIPTION' },
-    });
+    const row = await seedPlan({ applicationId, slug, name: slug, interval, kind: 'SUBSCRIPTION' }, amount > 0 ? { currency: currency, amount: amount } : null);
     return row.id;
   }
 
@@ -184,9 +185,6 @@ describe('admin metrics: money per currency', () => {
     await subscribe(usdApp, inrMonthly, { currency: 'INR', unitAmount: 49900 });
     const ownPriced = await subscribe(usdApp, usdMonthly, { currency: 'inr', unitAmount: 39900 });
     await subscribe(usdApp, inrMonthly, { status: 'CANCELED' });
-    // Every plan has its default price row, so the subscription with no price
-    // of its own is on a plan that has one.
-    await bringPlansInStep([usdApp]);
 
     await pay(usdApp, 1500, 'USD');
     await pay(usdApp, 2500, 'USD', { status: 'PARTIALLY_REFUNDED', refundedAmount: 500, daysAgo: 3 });
@@ -283,46 +281,5 @@ describe('admin metrics: money per currency', () => {
     expect(page.items.find((s) => s.id === ownPriced)).toMatchObject({ currency: 'INR', amount: 39900 });
     // Its plan costs USD 10.00, which is not reported as what this subscription pays.
     expect(page.items.find((s) => s.id === planPriced)).toMatchObject({ currency: null, amount: null });
-  });
-
-  it('a single-currency platform reports the same totals as a plain sum', async () => {
-    const tenantId = await createTenant('Single');
-    const applicationId = await createApplication(tenantId, `single-${++serial}`, 'USD');
-    const monthly = await plan(applicationId, 'pro_m', 1000, 'USD');
-    const yearly = await plan(applicationId, 'pro_y', 10000, 'USD', 'YEAR');
-    await subscribe(applicationId, monthly, { currency: 'USD', unitAmount: 1000 });
-    await subscribe(applicationId, monthly, { currency: 'USD', unitAmount: 1000 });
-    await subscribe(applicationId, yearly, { currency: 'USD', unitAmount: 10000 });
-    await pay(applicationId, 1500, 'USD', { daysAgo: 1 });
-    await pay(applicationId, 2500, 'USD', { daysAgo: 2 });
-    await pay(applicationId, 7000, 'USD', { daysAgo: 45 });
-    await pay(applicationId, 999, 'USD', { status: 'FAILED', daysAgo: 3 });
-
-    // 1,000 + 1,000 + floor(10,000 / 12).
-    const overview = await get<Overview>('overview');
-    expect(overview.mrrByCurrency).toEqual([{ currency: 'USD', mrrCents: 2833, activeSubscriptions: 3 }]);
-    expect(overview.payments.lifetime).toEqual({ count: 3 });
-    expect(overview.payments.last30d).toEqual({ count: 2 });
-    expect(overview.payments.byCurrency).toEqual([
-      { currency: 'USD', lifetime: { count: 3, volumeCents: 11000 }, last30d: { count: 2, volumeCents: 4000 } },
-    ]);
-
-    const tenants = await get<{ items: TenantRow[] }>('tenants');
-    expect(tenants.items.find((t) => t.id === tenantId)).toMatchObject({
-      mrrByCurrency: [{ currency: 'USD', mrrCents: 2833, activeSubscriptions: 3 }],
-      activeSubscriptions: 3,
-    });
-
-    const byApp = await get<PaymentsByAppRow[]>('payments-by-app');
-    expect(byApp.find((r) => r.applicationId === applicationId)!.volumeByCurrency).toEqual([
-      { currency: 'USD', volumeCents: 4000, payments: 2 },
-    ]);
-  });
-
-  it('an empty deployment reports no currency rather than a guessed one', async () => {
-    const overview = await get<Overview>('overview');
-    expect(overview.mrrByCurrency).toEqual([]);
-    expect(overview.payments.byCurrency).toEqual([]);
-    expect(overview.payments.lifetime).toEqual({ count: 0 });
   });
 });

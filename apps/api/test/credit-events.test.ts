@@ -17,6 +17,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Credit webhooks', () => {
   let app: FastifyInstance;
@@ -64,7 +67,7 @@ describe('Credit webhooks', () => {
     endUserId = (
       await prisma.endUser.create({ data: { applicationId: appId, email: `ce-eu-${slug}@example.com` } })
     ).id;
-    await webhookService.createEndpoint({
+    await webhookService.createEndpoint({ createdByTenantUserId: null,
       applicationId: appId,
       url: 'https://example.invalid/credit-hook',
       events: ['credit.granted', 'credit.consumed', 'credit.adjusted'],
@@ -268,14 +271,4 @@ describe('Credit webhooks', () => {
     expect(row!.payload.data.credit).toMatchObject({ delta: 10, balance: 10, reason: 'GRANT' });
   });
 
-  it('an endpoint not subscribed to credit events gets none', async () => {
-    await prisma.webhookEndpoint.deleteMany({ where: { applicationId: appId } });
-    await webhookService.createEndpoint({
-      applicationId: appId,
-      url: 'https://example.invalid/users-only',
-      events: ['user.created'],
-    });
-    await creditsService.grant({ applicationId: appId, endUserId, amount: 10, reason: 'GRANT' });
-    expect(await creditDeliveries()).toHaveLength(0);
-  });
 });

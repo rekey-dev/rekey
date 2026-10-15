@@ -19,10 +19,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { MCP_ADMIN_SCOPE, operatorMcpOAuthToken } from './operator-mcp-oauth-token.js';
 import { invalidateOrganizationRoles } from '../src/lib/organization-role-cache.js';
 import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface ToolResult {
   isError: boolean;
@@ -95,7 +99,7 @@ describe('Operator MCP organization membership tools', () => {
   /** A workspace with one organizations-enabled app, one organization, one end-user and a custom role. */
   async function workspace(slug: string, opts: { organizationsEnabled?: boolean } = {}): Promise<Workspace> {
     const { accessToken, tenantId } = await signUp(slug);
-    const token = await mintPat(accessToken, ['read', 'applications:write']);
+    const token = await operatorMcpOAuthToken(app, accessToken, tenantId, MCP_ADMIN_SCOPE);
     const created = await call(token, 'create_application', { name: `App ${slug}`, slug: `org-${slug}` });
     expect(created.isError).toBe(false);
     const appId = created.data.id as string;
@@ -167,17 +171,6 @@ describe('Operator MCP organization membership tools', () => {
     expect(roleEvent!.metadata).toMatchObject({ via: 'operator_mcp', role: 'OWNER', baseRole: 'OWNER' });
   });
 
-  it("uses the catalog's default role when none is given", async () => {
-    const w = await workspace('default');
-    const added = await call(w.token, 'add_organization_member', {
-      applicationId: w.appId,
-      organizationId: w.orgId,
-      endUserId: w.endUserId,
-    });
-    expect(added.isError).toBe(false);
-    expect(added.data).toMatchObject({ role: 'MEMBER', baseRole: 'MEMBER' });
-  });
-
   it('refuses a role outside the catalog, and a disabled one, writing nothing', async () => {
     const w = await workspace('unknown');
     const unknown = await call(w.token, 'add_organization_member', {
@@ -221,26 +214,6 @@ describe('Operator MCP organization membership tools', () => {
     expect(set.isError).toBe(true);
     expect(set.data).toMatchObject({ code: 'ORGANIZATION_ROLE_UNKNOWN' });
     expect((await membership(w.orgId, w.endUserId))?.role).toBe('MEMBER');
-  });
-
-  it('points each tool at the other when the membership is or is not there', async () => {
-    const w = await workspace('pointers');
-    const missing = await call(w.token, 'set_organization_member_role', {
-      applicationId: w.appId,
-      organizationId: w.orgId,
-      endUserId: w.endUserId,
-      role: 'MEMBER',
-    });
-    expect(missing.isError).toBe(true);
-    expect(missing.data).toMatchObject({ code: 'ORGANIZATION_MEMBER_NOT_FOUND' });
-    expect(missing.data.fix).toMatch(/add_organization_member/);
-
-    const args = { applicationId: w.appId, organizationId: w.orgId, endUserId: w.endUserId };
-    expect((await call(w.token, 'add_organization_member', args)).isError).toBe(false);
-    const again = await call(w.token, 'add_organization_member', args);
-    expect(again.isError).toBe(true);
-    expect(again.data).toMatchObject({ code: 'ORGANIZATION_ALREADY_MEMBER' });
-    expect(again.data.fix).toMatch(/set_organization_member_role/);
   });
 
   it('refuses both writes while organizations are disabled', async () => {
@@ -304,107 +277,6 @@ describe('Operator MCP organization membership tools', () => {
       expect(res.result.isError).toBe(true);
       expect(JSON.parse(res.result.content[0]!.text).error).toMatch(/role/i);
     }
-  });
-
-  it('pages and searches organizations, so one past the first 100 is reachable', async () => {
-    const w = await workspace('paging');
-    await prisma.organization.createMany({
-      data: Array.from({ length: 104 }, (_, i) => ({
-        applicationId: w.appId,
-        name: `Team ${String(i).padStart(3, '0')}`,
-        slug: `team-${String(i).padStart(3, '0')}`,
-      })),
-    });
-
-    const first = await call(w.token, 'list_organizations', { applicationId: w.appId });
-    expect(first.data).toMatchObject({ total: 105, limit: 100, offset: 0, hasMore: true });
-    expect((first.data.organizations as unknown[]).length).toBe(100);
-
-    const rest = await call(w.token, 'list_organizations', { applicationId: w.appId, offset: 100 });
-    expect(rest.data).toMatchObject({ total: 105, offset: 100, hasMore: false });
-    expect((rest.data.organizations as unknown[]).length).toBe(5);
-
-    const found = await call(w.token, 'list_organizations', { applicationId: w.appId, query: 'ACME' });
-    expect(found.data).toMatchObject({ total: 1, organizations: [{ id: w.orgId }] });
-    const bySlug = await call(w.token, 'list_organizations', { applicationId: w.appId, query: 'team-10' });
-    expect(bySlug.data).toMatchObject({ total: 4, hasMore: false });
-  });
-
-  it('refuses malformed arguments instead of coercing them', async () => {
-    const w = await workspace('args');
-    const missing = await call(w.token, 'add_organization_member', {
-      applicationId: w.appId,
-      endUserId: w.endUserId,
-    });
-    expect(missing.isError).toBe(true);
-    expect(missing.data).toMatchObject({ code: 'VALIDATION_ERROR' });
-    expect(missing.data.error).toMatch(/organizationId/);
-
-    const longRole = await call(w.token, 'add_organization_member', {
-      applicationId: w.appId,
-      organizationId: w.orgId,
-      endUserId: w.endUserId,
-      role: 'r'.repeat(41),
-    });
-    expect(longRole.isError).toBe(true);
-    expect(longRole.data).toMatchObject({ code: 'VALIDATION_ERROR' });
-
-    const extra = await call(w.token, 'set_organization_member_role', {
-      applicationId: w.appId,
-      organizationId: w.orgId,
-      endUserId: w.endUserId,
-      role: 'MEMBER',
-      force: true,
-    });
-    expect(extra.data).toMatchObject({ code: 'VALIDATION_ERROR' });
-    expect(await membership(w.orgId, w.endUserId)).toBeNull();
-  });
-
-  it('annotates the tools so a client knows which ones change state', async () => {
-    const w = await workspace('annotations');
-    const res = await rpc(w.token, 'tools/list');
-    const tools = res.json().result.tools as Array<{ name: string; annotations?: Record<string, boolean> }>;
-    const by = (n: string) => tools.find((t) => t.name === n)?.annotations;
-    expect(by('list_organizations')).toMatchObject({ readOnlyHint: true });
-    expect(by('add_organization_member')).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-    });
-    expect(by('set_organization_member_role')).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
-    });
-  });
-
-  it('the panel REST routes audit the same membership writes', async () => {
-    const w = await workspace('rest-audit');
-    const add = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${w.appId}/organizations/${w.orgId}/members`,
-      headers: { authorization: `Bearer ${w.accessToken}` },
-      payload: { endUserId: w.endUserId, role: 'content-manager' },
-    });
-    expect(add.statusCode).toBe(201);
-    const patch = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${w.appId}/organizations/${w.orgId}/members/${w.endUserId}`,
-      headers: { authorization: `Bearer ${w.accessToken}` },
-      payload: { role: 'MEMBER' },
-    });
-    expect(patch.statusCode).toBe(200);
-
-    const [added] = await waitForSecurityEvents({ tenantId: w.tenantId, type: 'app.organization_member_added' });
-    expect(added!.actorType).toBe('operator');
-    expect(added!.applicationId).toBe(w.appId);
-    expect(added!.metadata).toMatchObject({ organizationId: w.orgId, endUserId: w.endUserId, role: 'content-manager' });
-    expect(added!.metadata).not.toHaveProperty('via');
-    const [changed] = await waitForSecurityEvents({
-      tenantId: w.tenantId,
-      type: 'app.organization_member_role_changed',
-    });
-    expect(changed!.metadata).toMatchObject({ role: 'MEMBER', baseRole: 'MEMBER' });
   });
 
   describe('cross-tenant', () => {

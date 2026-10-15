@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { assertSafeUrl, assertSafeUrlResolved, isPrivateIp } from '../src/lib/ssrf-guard.js';
+import { isWebhookUrlSafe } from '../src/lib/webhook-signing.js';
 
 describe('isPrivateIp', () => {
   it('flags private / loopback / link-local / metadata ranges', () => {
@@ -149,5 +150,27 @@ describe('assertSafeUrlResolved returns the addresses it approved', () => {
     // pinning to nothing.
     const addresses = await assertSafeUrlResolved('http://127.0.0.1/hook', { allowPrivate: true });
     expect(addresses).toEqual([]);
+  });
+});
+
+describe('isWebhookUrlSafe', () => {
+  it('rejects loopback / private / non-http(s)', () => {
+    expect(isWebhookUrlSafe('http://localhost:3000/hook').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://127.0.0.1:3000/hook').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://10.0.0.5/hook').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://172.20.1.1/hook').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://192.168.1.1/hook').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://169.254.169.254/').ok).toBe(false); // EC2 IMDS
+    expect(isWebhookUrlSafe('http://100.64.0.1/').ok).toBe(false); // CGNAT
+    expect(isWebhookUrlSafe('http://[::1]/').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://[fc00::1]/').ok).toBe(false);
+    expect(isWebhookUrlSafe('http://[fe80::1]/').ok).toBe(false);
+    expect(isWebhookUrlSafe('file:///etc/passwd').ok).toBe(false);
+    expect(isWebhookUrlSafe('gopher://example.com/').ok).toBe(false);
+    // Public hosts pass.
+    expect(isWebhookUrlSafe('https://example.com/hook').ok).toBe(true);
+    expect(isWebhookUrlSafe('https://api.acme.io/rekey').ok).toBe(true);
+    // Escape hatch.
+    expect(isWebhookUrlSafe('http://127.0.0.1/hook', { allowPrivate: true }).ok).toBe(true);
   });
 });

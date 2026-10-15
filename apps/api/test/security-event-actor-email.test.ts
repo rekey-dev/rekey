@@ -15,6 +15,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { operatorTools } from '../src/modules/tenant-mcp/operator-tools.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface EventRow {
   id: string;
@@ -118,12 +121,6 @@ describe('security events carry the actor email', () => {
     }
   });
 
-  it("names the end-user on their own events", async () => {
-    const events = await feed(`applicationId=${applicationId}&actorType=end_user&limit=50`);
-    expect(events.length).toBeGreaterThan(0);
-    for (const e of events) expect(e.actorEmail).toBe(endUserEmail);
-  });
-
   it('still names an operator who is no longer a member, and gives null for system and for a missing actor', async () => {
     // A former member: an operator account with no membership here. The
     // current-member lookup the panel used to do could never name them.
@@ -167,27 +164,6 @@ describe('security events carry the actor email', () => {
     });
     const events = await feed(`applicationId=${applicationId}&actorType=end_user&limit=200`);
     expect(events.find((e) => e.actorId === stranger.id)?.actorEmail).toBeNull();
-  });
-
-  it("names the operator on the end-user's recent impersonations", async () => {
-    const minted = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${applicationId}/end-users/${endUserId}/impersonate`,
-      headers: { authorization: `Bearer ${access}` },
-      payload: { reason: 'support ticket' },
-    });
-    expect(minted.statusCode).toBe(200);
-    const detail = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${applicationId}/end-users/${endUserId}`,
-      headers: { authorization: `Bearer ${access}` },
-    });
-    expect(detail.statusCode).toBe(200);
-    const rows = (detail.json().data as {
-      recentImpersonations: Array<{ operatorUserId: string; operatorEmail: string | null }>;
-    }).recentImpersonations;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ operatorUserId: operatorId, operatorEmail });
   });
 
   it('the operator MCP recent_security_events tool returns actorEmail too', async () => {

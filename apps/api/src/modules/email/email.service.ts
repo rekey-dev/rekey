@@ -68,6 +68,9 @@ export interface ResolvedTemplate {
 const SYSTEM_SCOPED_EVENTS: ReadonlySet<string> = new Set([
   'workspace_invitation',
   'billing_unapplied_payment',
+  'operator_account_claimed',
+  'operator_email_verification',
+  'operator_email_confirmed',
 ]);
 
 type BrandSource = Pick<Application, 'name' | 'portalBranding' | 'tenantId' | 'emailConfig'>;

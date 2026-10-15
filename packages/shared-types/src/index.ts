@@ -875,31 +875,17 @@ export const ApplicationDtoSchema = z.object({
   tenantId: z.string(),
   name: z.string(),
   slug: z.string(),
-  /**
-   * OPTIONAL, `GET /api/v1/me` (the endpoint `applications.me()` calls, and
-   * the documented SDK smoke test) does not return this field. It was declared
-   * required here, so `rekey.applications.me().environment` typed as a
-   * guaranteed enum and was `undefined` at runtime for every caller.
-   *
-   * Typed optional rather than "fixed" in the API: adding a field to a
-   * response is a server change, and until every deployment ships it a client
-   * that assumes its presence is wrong. Narrow before use.
-   */
-  environment: AppEnvironmentSchema.optional(),
+  environment: AppEnvironmentSchema,
   /**
    * When this Application was PROMOTED into production, or null/absent.
    *
    * Null on a PRODUCTION Application means it was created production rather
    * than promoted into it. `environment` cannot distinguish the two, and only
    * one of them is an event with a date.
-   *
-   * Optional for the same reason `environment` is: the tenant surfaces return
-   * it, `GET /api/v1/me` does not, and a client that assumes its presence is
-   * wrong until every deployment ships it. Narrow before use.
    */
-  promotedAt: z.string().datetime().nullable().optional(),
+  promotedAt: z.string().datetime().nullable(),
   /**
-   * Set while the Application is frozen; null or absent when it is running.
+   * Set while the Application is frozen; null when it is running.
    *
    * A disabled Application refuses every end-user request with
    * `403 APPLICATION_DISABLED`, serves no hosted portal, and sends no mail or
@@ -907,23 +893,22 @@ export const ApplicationDtoSchema = z.object({
    * restores it exactly. A disabled PRODUCTION Application also stops counting
    * against the workspace's `maxProductionApps`.
    */
-  disabledAt: z.string().datetime().nullable().optional(),
-  /** The operator's own note recorded at the freeze. Never shown to end-users. */
-  disabledReason: z.string().nullable().optional(),
+  disabledAt: z.string().datetime().nullable(),
+  /** The operator's own note recorded at the freeze, or null. Never shown to end-users. */
+  disabledReason: z.string().nullable(),
   publicKey: z.string(),
   authConfig: AuthConfigSchema,
   billingConfig: BillingConfigSchema,
   /**
    * Where this Application's end-users should write for help, as the operator
-   * set it with `PATCH .../email-sender`. Null when unset. Optional because
-   * older deployments do not return it.
+   * set it with `PATCH .../email-sender`. Null when unset.
    */
-  supportEmail: z.string().email().nullable().optional(),
+  supportEmail: z.string().email().nullable(),
   /**
    * The IANA zone the daily analytics rollup counts days in (`UTC` by default). Set with
-   * `PATCH .../settings`. Optional because older deployments do not return it.
+   * `PATCH .../settings`.
    */
-  reportingTimezone: z.string().optional(),
+  reportingTimezone: z.string(),
   /**
    * Only on `GET /api/v1/tenant/applications?include=summary` rows. Each
    * field is left out when the caller may not read it, so absent means
@@ -1079,6 +1064,13 @@ export const SignUpRequestSchema = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
+  /**
+   * Secret key only. `true` says your server has already confirmed that this
+   * person owns the address: the account is created verified and no
+   * verification email is sent. A publishable key sending it is refused with
+   * 403 `EMAIL_VERIFIED_REQUIRES_SECRET_KEY`.
+   */
+  emailVerified: z.boolean().optional(),
   device: DeviceBindingRequestSchema.optional(),
   /** What the client is, for the session list and platform stats. See `ClientHintSchema`. */
   client: ClientHintSchema.optional(),
@@ -1116,17 +1108,16 @@ export const AuthResultDtoSchema = z.object({
   refreshTokenExpiresAt: z.string().datetime(),
   /**
    * The device this session is bound to (the access token's `dev` claim), or
-   * null when the client sent no fingerprint. Optional in the schema so an SDK
-   * one version ahead still parses a response from an older deployment.
+   * null when the client sent no fingerprint.
    */
-  deviceId: z.string().nullable().optional(),
+  deviceId: z.string().nullable(),
   /**
    * True when this request created the account: password sign-up, a magic
    * link or an OAuth callback that made a new user. False for every other
    * sign-in, MFA completion, refresh and organization switch. Route new users
-   * to onboarding on it. Defaults to false when an older deployment omits it.
+   * to onboarding on it.
    */
-  isNewUser: z.boolean().default(false),
+  isNewUser: z.boolean(),
 });
 export type AuthResultDto = z.infer<typeof AuthResultDtoSchema>;
 
@@ -3859,14 +3850,14 @@ export interface EndUserExportProfile {
    * instead of being a snapshot.
    */
   lockedUntil: string | null;
-  /** When an operator banned this person, or `null`. The operator's reason is never exported. Absent from an older API. */
-  bannedAt?: string | null;
+  /** When an operator banned this person, or `null`. The operator's reason is never exported. */
+  bannedAt: string | null;
   /** Profile answers, keyed by field key. */
-  profile?: EndUserProfile;
-  onboardingCompletedAt?: string | null;
-  onboardingSkippedAt?: string | null;
+  profile: EndUserProfile;
+  onboardingCompletedAt: string | null;
+  onboardingSkippedAt: string | null;
   /** How the account was created; null when it predates the record. */
-  createdVia?: string | null;
+  createdVia: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -4010,9 +4001,9 @@ export interface EndUserExportDocument {
   }>;
   /**
    * Every support case opened on this user, open or closed. The operator's
-   * reason is left out, as a ban's is. Absent from an older API.
+   * reason is left out, as a ban's is.
    */
-  supportCases?: Array<{
+  supportCases: Array<{
     id: string;
     status: 'OPEN' | 'CLOSED';
     capabilities: string[];
@@ -4048,10 +4039,9 @@ export interface EndUserExportDocument {
   }>;
   /**
    * The contact at this user's address, with every list they joined and what
-   * they submitted. Empty when the address is on no list. Absent from a
-   * server older than lists.
+   * they submitted. Empty when the address is on no list.
    */
-  contacts?: EndUserExportContact[];
+  contacts: EndUserExportContact[];
 }
 
 /** A contact inside a DSAR export: list memberships with their consent proof, and submissions. */

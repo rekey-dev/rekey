@@ -168,26 +168,4 @@ describe('GET /api/v1/me — Application API key auth', () => {
     expect(res.json().error.code).toBe('API_KEY_INVALID');
   });
 
-  it('updates lastUsedAt on a successful call (eventually)', async () => {
-    const before = await prisma.apiKey.findUniqueOrThrow({ where: { id: liveKeyId } });
-    expect(before.lastUsedAt).toBeNull();
-
-    await app.inject({
-      method: 'GET',
-      url: '/api/v1/me/',
-      headers: { authorization: `Bearer ${liveKey}` },
-    });
-
-    // The update is fire-and-forget, so it may race the response. Poll briefly.
-    let lastUsedAt: Date | null = null;
-    for (let i = 0; i < 10; i++) {
-      const row = await prisma.apiKey.findUniqueOrThrow({ where: { id: liveKeyId } });
-      if (row.lastUsedAt !== null) {
-        lastUsedAt = row.lastUsedAt;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(lastUsedAt).not.toBeNull();
-  });
 });

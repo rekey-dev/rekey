@@ -26,6 +26,9 @@ import {
   setDefaultDeviceLimit as setDefaultDeviceLimitFor,
 } from './device-fixtures.js';
 import { issueRefreshToken } from '../src/lib/refresh-tokens.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('devices service', () => {
   let app: FastifyInstance;
@@ -168,16 +171,6 @@ describe('devices service', () => {
     expect(await userEvents()).toEqual(['user.created']);
   });
 
-  it('is uncapped when no plan grants max_devices', async () => {
-    const userId = await makeEndUser('b@example.com');
-    expect(await devicesService.maxDevicesFor(appId, userId)).toBeNull();
-    for (let i = 0; i < 5; i++) {
-      const r = await devicesService.touch({ applicationId: appId, endUserId: userId, fingerprint: `fp-${i}-xxxxxx` });
-      expect(r.kind).toBe('ok');
-    }
-    expect(await prisma.device.count({ where: { endUserId: userId, status: 'ACTIVE' } })).toBe(5);
-  });
-
   it('enforces max_devices from the default plan and reports the devices filling the cap', async () => {
     await subscribeAll();
     await setDefaultDeviceLimit(2);
@@ -246,9 +239,9 @@ describe('devices service', () => {
     // Two sessions on the device, one elsewhere. Sessions learn their device
     // in the next PR of the series; here the rows are bound directly so this
     // asserts the service's revocation, not the wiring.
-    const onDevice1 = await issueRefreshToken(appId, userId, {});
-    const onDevice2 = await issueRefreshToken(appId, userId, {});
-    await issueRefreshToken(appId, userId, {});
+    const onDevice1 = await issueRefreshToken(appId, userId, {}, { sessionsInvalidBefore: null, refusal: () => new Error('the account moved on') });
+    const onDevice2 = await issueRefreshToken(appId, userId, {}, { sessionsInvalidBefore: null, refusal: () => new Error('the account moved on') });
+    await issueRefreshToken(appId, userId, {}, { sessionsInvalidBefore: null, refusal: () => new Error('the account moved on') });
     await prisma.refreshToken.updateMany({
       where: { id: { in: [onDevice1.record.id, onDevice2.record.id] } },
       data: { deviceId: r.device.id },

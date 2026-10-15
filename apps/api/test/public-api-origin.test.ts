@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { firstPublicOrigin, isPublicHttpUrl } from '../src/lib/public-api-origin.js';
-import {
-  unknownApiKeyText,
-  unknownPublishableKeyText,
-} from '../src/middleware/api-key-auth.js';
 
 describe('firstPublicOrigin (#578)', () => {
   it('skips an in-cluster service name', () => {
@@ -27,25 +23,3 @@ describe('firstPublicOrigin (#578)', () => {
   });
 });
 
-describe('unknown key text', () => {
-  it('names a public origin in both message and fix', () => {
-    const text = unknownApiKeyText('https://api.example.com');
-    expect(text.message).toBe('API key is unknown, revoked, or expired at https://api.example.com.');
-    expect(text.fix).toContain('came from https://api.example.com (Panel');
-  });
-
-  it('names no host when the origin is not public', () => {
-    for (const text of [unknownApiKeyText(null), unknownPublishableKeyText(null)]) {
-      expect(text.message).toContain('on this deployment');
-      expect(`${text.message} ${text.fix}`).not.toMatch(/https?:\/\//);
-    }
-  });
-
-  it('never uses an em dash', () => {
-    for (const origin of ['https://api.example.com', null]) {
-      for (const text of [unknownApiKeyText(origin), unknownPublishableKeyText(origin)]) {
-        expect(`${text.message} ${text.fix}`).not.toContain('—');
-      }
-    }
-  });
-});

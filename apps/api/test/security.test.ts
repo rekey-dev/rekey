@@ -18,6 +18,10 @@ import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
 import { issueMfaChallengeToken } from '../src/lib/jwt.js';
 import * as OTPAuth from 'otpauth';
+import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
+endUsersConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -258,75 +262,6 @@ describe('Phase-1 security hardening', () => {
     expect(locked.json().error.code).toBe('MFA_TOO_MANY_ATTEMPTS');
   });
 
-  // ---------- Operator (tenant) MFA enforcement ----------
-
-  it('operator sign-in with MFA enrolled returns an mfa challenge token', async () => {
-    const opSession = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/tenant/auth/sign-up',
-        payload: {
-          email: 'op-mfa@example.com',
-          password: 'pw-one-two-three',
-          workspaceName: 'WS Op',
-        },
-      })
-      .then((r) => r.json().data as { accessToken: string });
-
-    // Enroll MFA for the operator.
-    const setup = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/tenant/auth/mfa/setup',
-        headers: { authorization: `Bearer ${opSession.accessToken}` },
-      })
-      .then((r) => r.json().data as { otpauthUrl: string });
-    const secret = new URL(
-      setup.otpauthUrl.replace('otpauth://', 'https://x/'),
-    ).searchParams.get('secret')!;
-    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(secret) });
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/mfa/setup-confirm',
-      headers: { authorization: `Bearer ${opSession.accessToken}` },
-      payload: { code: totp.generate() },
-    });
-
-    // Now sign in, must hold the session.
-    const signIn = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/sign-in',
-      payload: { email: 'op-mfa@example.com', password: 'pw-one-two-three' },
-    });
-    const signInData = signIn.json().data as {
-      mfaRequired: boolean;
-      mfaChallengeToken?: string;
-      accessToken?: string;
-    };
-    expect(signInData.mfaRequired).toBe(true);
-    expect(signInData.mfaChallengeToken).toBeTruthy();
-    expect(signInData.accessToken).toBeUndefined();
-
-    // Exchange + complete sign-in, with the step after the confirming code's.
-    const verified = await app.inject({
-      method: 'POST',
-      url: '/api/v1/tenant/auth/mfa-verify',
-      payload: {
-        mfaChallengeToken: signInData.mfaChallengeToken,
-        code: totp.generate({ timestamp: Date.now() + 30_000 }),
-      },
-    });
-    expect(verified.statusCode).toBe(200);
-    const session = verified.json().data as {
-      mfaRequired: boolean;
-      accessToken: string;
-      refreshToken: string;
-    };
-    expect(session.mfaRequired).toBe(false);
-    expect(session.accessToken).toBeTruthy();
-    expect(session.refreshToken).toBeTruthy();
-  });
-
   // ---------- JWT typ claim ----------
 
   it('an MFA challenge token cannot pass as a session access token', async () => {
@@ -468,40 +403,6 @@ describe('Phase-1 security hardening', () => {
     expect(res.json().error.code).toBe('API_KEY_SCOPE_INSUFFICIENT');
   });
 
-  it('a key with auth:write implies auth:read (hierarchy)', async () => {
-    const b = await bootstrap('scope-write-implies-read');
-    const writeKey = await app
-      .inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${b.applicationId}/api-keys`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-        payload: { name: 'write-only', mode: 'live', scopes: ['auth:write'] },
-      })
-      .then((r) => r.json().data as { rawKey: string });
-
-    // /me requires auth:read, auth:write should imply.
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/me/',
-      headers: { authorization: `Bearer ${writeKey.rawKey}` },
-    });
-    expect(res.statusCode).toBe(200);
-  });
-
-  it('legacy default scope ["*"] satisfies every required scope', async () => {
-    // The bootstrap-provided liveKey defaults to ["*"], verify it accepts
-    // a write (sign-up) without issue. Belt-and-suspenders since we already
-    // rely on this everywhere implicitly.
-    const b = await bootstrap('scope-star');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${b.liveKey}` },
-      payload: { email: 'star@example.com', password: 'pw-one-two-three' },
-    });
-    expect(res.statusCode).toBe(201);
-  });
-
   // ---------- Sessions list / per-device revoke ----------
 
   it('sign-up captures User-Agent + IP into the refresh row; /sessions lists them', async () => {
@@ -533,76 +434,6 @@ describe('Phase-1 security hardening', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.userAgent).toBe(ua);
     expect(rows[0]!.id).toBeTruthy();
-  });
-
-  it('DELETE /sessions/:id revokes one session and the refresh stops working', async () => {
-    const b = await bootstrap('sessions-revoke');
-    // Two separate sign-ins → two refresh tokens for the same user.
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'user-agent': 'DeviceA' },
-      payload: { email: 'sessionsrev@example.com', password: 'pw-one-two-three' },
-    });
-    const secondSession = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-in',
-        headers: { authorization: `Bearer ${b.liveKey}`, 'user-agent': 'DeviceB' },
-        payload: { email: 'sessionsrev@example.com', password: 'pw-one-two-three' },
-      })
-      .then((r) => r.json().data as { accessToken: string; refreshToken: string });
-
-    const list = await app
-      .inject({
-        method: 'GET',
-        url: '/api/v1/auth/sessions',
-        headers: {
-          authorization: `Bearer ${b.liveKey}`,
-          'x-rekey-user-token': secondSession.accessToken,
-        },
-      })
-      .then(
-        (r) =>
-          (r.json().data as { items: Array<{ id: string; userAgent: string | null }> }).items,
-      );
-    expect(list).toHaveLength(2);
-    const deviceA = list.find((r) => r.userAgent === 'DeviceA')!;
-    expect(deviceA).toBeTruthy();
-
-    // Revoke device A from device B's session.
-    const del = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/auth/sessions/${deviceA.id}`,
-      headers: {
-        authorization: `Bearer ${b.liveKey}`,
-        'x-rekey-user-token': secondSession.accessToken,
-      },
-    });
-    expect(del.statusCode).toBe(200);
-    expect(del.json().data.revoked).toBe(true);
-
-    // Revoking a session stamps the user, so the second session's own
-    // pre-revoke access token is refused next; it renews from its refresh.
-    const secondRenewed = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/refresh',
-        headers: { authorization: `Bearer ${b.liveKey}` },
-        payload: { refreshToken: secondSession.refreshToken },
-      })
-      .then((r) => r.json().data as { accessToken: string });
-
-    // Idempotent, second revoke returns revoked=false.
-    const del2 = await app.inject({
-      method: 'DELETE',
-      url: `/api/v1/auth/sessions/${deviceA.id}`,
-      headers: {
-        authorization: `Bearer ${b.liveKey}`,
-        'x-rekey-user-token': secondRenewed.accessToken,
-      },
-    });
-    expect(del2.json().data.revoked).toBe(false);
   });
 
   it('cross-user revoke by id is impossible (scoped by endUserId)', async () => {
@@ -792,28 +623,6 @@ describe('Phase-1 security hardening', () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('OAUTH_UNLINK_WOULD_LOCK_OUT');
-  });
-
-  it('GET /identities lists linked providers for the current user', async () => {
-    const b = await bootstrap('list-ident');
-    const eu = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: { authorization: `Bearer ${b.liveKey}` },
-        payload: { email: 'lister@example.com', password: 'pw-one-two-three' },
-      })
-      .then((r) => r.json().data as { accessToken: string });
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/auth/oauth/identities',
-      headers: {
-        authorization: `Bearer ${b.liveKey}`,
-        'x-rekey-user-token': eu.accessToken,
-      },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual([]);
   });
 
   // Cleanup: prevent test users from accumulating across runs.

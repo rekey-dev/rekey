@@ -11,6 +11,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { MCP_ADMIN_SCOPE, operatorMcpOAuthToken } from './operator-mcp-oauth-token.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Operator MCP member tools', () => {
   let app: FastifyInstance;
@@ -95,7 +99,7 @@ describe('Operator MCP member tools', () => {
 
   it('change_member_role then remove_member', async () => {
     const op = await makeOperator('mgmt');
-    const token = await mintPat(op.accessToken, ['read', 'applications:write']);
+    const token = await operatorMcpOAuthToken(app, op.accessToken, op.tenantId, MCP_ADMIN_SCOPE);
     const memberUserId = await seedMember(op.tenantId, 'member-mgmt@example.com');
 
     const promoted = toolResult(
@@ -125,7 +129,7 @@ describe('Operator MCP member tools', () => {
     const victimMember = await seedMember(victim.tenantId, 'victim-member@example.com');
 
     const attacker = await makeOperator('attacker');
-    const attackerToken = await mintPat(attacker.accessToken, ['read', 'applications:write']);
+    const attackerToken = await operatorMcpOAuthToken(app, attacker.accessToken, attacker.tenantId, MCP_ADMIN_SCOPE);
 
     const attempt = toolResult(
       (await rpc(attackerToken, 'tools/call', {
@@ -139,7 +143,7 @@ describe('Operator MCP member tools', () => {
 
   it('cannot demote the last OWNER (guard fires through MCP)', async () => {
     const op = await makeOperator('lastowner');
-    const token = await mintPat(op.accessToken, ['read', 'applications:write']);
+    const token = await operatorMcpOAuthToken(app, op.accessToken, op.tenantId, MCP_ADMIN_SCOPE);
     // The operator is the sole OWNER. Find their own tenantUserId via list_members.
     const members = toolResult((await rpc(token, 'tools/call', { name: 'list_members' })).body);
     const self = (members.data as { members: Array<{ tenantUserId: string; role: string }> }).members.find(

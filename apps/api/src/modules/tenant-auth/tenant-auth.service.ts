@@ -46,6 +46,7 @@ import {
   issueTenantRefreshToken,
   lookupTenantRefreshToken,
   rotateTenantRefreshToken,
+  revokeEveryOperatorSession,
   revokeTenantRefreshToken,
   revokeAllTenantRefreshTokensForUser,
   listActiveTenantSessions,
@@ -92,6 +93,90 @@ import {
   resolveSignupInvite,
 } from './operator-signup-policy.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import {
+  authEmailCappedError,
+  mayMailUnattended,
+  OPERATOR_EMAIL_SCOPE,
+  reserveAuthEmail,
+} from '../email/auth-email-caps.js';
+import {
+  issueTenantEmailVerificationToken,
+  lookupTenantEmailVerificationToken,
+} from '../../lib/tenant-email-verification.js';
+import { boundStamp, lockOperatorCredentials, sessionBasis, type SessionBasis } from '../../lib/session-basis.js';
+import { unanchoredTokenEnded } from '../../lib/session-stamp.js';
+import { operatorCredentialSuperseded, operatorSessionEndedMeanwhile } from '../../lib/session-refusals.js';
+import { fromEndedGeneration } from '../../lib/refresh-tokens.js';
+import {
+  claimUnverifiedOperator,
+  reviewHasFindings,
+  operatorConfirmation,
+  operatorConfirmationFix,
+  promoteOperatorAfterMfa,
+  sendOperatorClaimedEmail,
+  type OperatorMailboxProof,
+} from './operator-claim.js';
+
+/**
+ * Run a claim for an operator who just proved the mailbox, and send the
+ * notice it owes. `mailboxProven` is true when an enrolled second factor held
+ * the claim back, for the MFA challenge to carry forward.
+ */
+async function claimOperatorOnProof(
+  user: TenantUser,
+  provenBy: OperatorMailboxProof,
+  notice: 'mail' | 'silent' = 'mail',
+): Promise<{ user: TenantUser; mailboxProven: boolean }> {
+  if (user.emailVerified) return { user, mailboxProven: false };
+  const claim = await prisma.$transaction((tx) => claimUnverifiedOperator(tx, user, provenBy));
+  if (claim.kind === 'claimed') {
+    invalidateOperatorAuth(user.id);
+    // Owed when something that signs in was removed, or when the workspace
+    // holds people or credentials the owner should look over.
+    if (notice === 'mail' && (claim.signInMethodsRemoved || reviewHasFindings(claim.review))) {
+      sendOperatorClaimedEmail(claim.user, claim.review);
+    }
+    return { user: claim.user, mailboxProven: false };
+  }
+  return {
+    user: await prisma.tenantUser.findUniqueOrThrow({ where: { id: user.id } }),
+    mailboxProven: claim.kind === 'held_for_mfa',
+  };
+}
+
+/**
+ * Mint a confirmation token and mail its link. The raw token comes back only
+ * where tokens are echoed and the mail did not go out.
+ */
+async function mailOperatorConfirmation(
+  user: Pick<TenantUser, 'id' | 'email'>,
+  tenantId: string | null,
+): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+  const issued = await issueTenantEmailVerificationToken(user.id, user.email);
+  const base = panelBaseUrl();
+  if (base) {
+    const outcome = await emailService.dispatchSystem({
+      eventKey: 'operator_email_verification',
+      to: user.email,
+      variables: {
+        userEmail: user.email,
+        verifyUrl: `${base}/verify-email?token=${encodeURIComponent(issued.raw)}`,
+        expiresAtIso: issued.record.expiresAt.toISOString(),
+      },
+      tenantId,
+    });
+    if (outcome.kind === 'sent') return { emailSent: true, verificationToken: null };
+    if (outcome.kind === 'error') {
+      void recordAuthEmailDeliveryFailure({
+        applicationId: null,
+        tenantId,
+        eventKey: 'operator_email_verification',
+        reason: outcome.message,
+      });
+    }
+  }
+  return { emailSent: false, verificationToken: echoAuthTokensInDev() ? issued.raw : null };
+}
 
 const PASSWORD_MIN_LENGTH = 8;
 
@@ -263,19 +348,39 @@ export interface TenantDeviceContext {
   ip?: string | null;
 }
 
+/** The answer to a password that is wrong, or that stopped being the account's while it was checked. */
+function invalidCredentials(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'INVALID_CREDENTIALS',
+    message: 'Email or password is incorrect.',
+    fix: 'Double-check the credentials. If you signed up via OAuth, password sign-in will not work for you.',
+  });
+}
+
+function refreshTokenRevoked(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'REFRESH_TOKEN_REVOKED',
+    message: 'This session was revoked.',
+    fix: 'Sign in again. Either this session was signed out, or a reuse of one of its tokens elsewhere revoked the whole family.',
+  });
+}
+
 async function issueSession(
   user: TenantUser,
   activeTenantId: string,
   activeRole: TenantRole,
   memberships: MembershipSummary[],
-  device?: TenantDeviceContext,
+  device: TenantDeviceContext | undefined,
+  basis: SessionBasis,
 ): Promise<AuthSessionResult> {
   // Refresh row first: its session id rides on the access token as `sid`.
-  const refresh = await issueTenantRefreshToken(user.id, {
-    userAgent: device?.userAgent ?? null,
-    ip: device?.ip ?? null,
-    activeTenantId,
-  });
+  const refresh = await issueTenantRefreshToken(
+    user.id,
+    { userAgent: device?.userAgent ?? null, ip: device?.ip ?? null, activeTenantId },
+    basis,
+  );
   const access = issueTenantAccessToken(user.id, activeTenantId, activeRole, {
     sessionId: refresh.record.sessionId,
   });
@@ -337,6 +442,14 @@ async function refuseRotatedTenantReplay(
   device: TenantDeviceContext | undefined,
   via: 'lookup' | 'rotation_race',
 ): Promise<never> {
+  // A token from before the last time every session was ended cannot show
+  // that a session the operator has now was stolen. See `refuseRotatedReplay`
+  // in auth.service.ts.
+  const owner = await prisma.tenantUser.findUnique({
+    where: { id: presented.tenantUserId },
+    select: { sessionsInvalidBefore: true },
+  });
+  if (fromEndedGeneration(presented, owner?.sessionsInvalidBefore)) throw refreshTokenRevoked();
   const successor = presented.replacedById
     ? await prisma.tenantRefreshToken.findUnique({ where: { id: presented.replacedById } })
     : null;
@@ -495,8 +608,169 @@ export const tenantAuthService = {
       });
     }
 
+    // The confirmation email, where this deployment can send one. Counted
+    // against the address's allowance like any mail nobody asked for by
+    // address, and never a reason for the sign-up to fail.
+    if (operatorConfirmation.ways().mail && (await mayMailUnattended(OPERATOR_EMAIL_SCOPE, result.user.email))) {
+      await mailOperatorConfirmation(result.user, result.tenantId).catch(() => undefined);
+    }
+
     const memberships = await loadMemberships(result.user.id);
-    return issueSession(result.user, result.tenantId, result.role, memberships, input.device);
+    return issueSession(
+      result.user,
+      result.tenantId,
+      result.role,
+      memberships,
+      input.device,
+      sessionBasis(result.user, operatorCredentialSuperseded),
+    );
+  },
+
+  /**
+   * Send the signed-in operator another confirmation email.
+   *
+   * `verificationToken` is the raw token only where tokens are echoed
+   * (development with REKEY_DEV_ECHO_AUTH_TOKENS, and the test runner);
+   * otherwise it is null and the link is in the mail.
+   *
+   * @example
+   *   const { emailSent } = await tenantAuthService.resendVerification(req.tenantUser!.id);
+   */
+  async resendVerification(
+    tenantUserId: string,
+  ): Promise<{ emailSent: boolean; alreadyVerified: boolean; verificationToken: string | null }> {
+    const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: tenantUserId } });
+    if (user.emailVerified) return { emailSent: false, alreadyVerified: true, verificationToken: null };
+    if (!operatorConfirmation.ways().mail) {
+      throw new RekeyError({
+        statusCode: 409,
+        code: 'OPERATOR_CONFIRMATION_EMAIL_UNAVAILABLE',
+        message: 'This deployment cannot send email, so no confirmation email was sent.',
+        fix: operatorConfirmation.possible()
+          ? operatorConfirmationFix({ hasSecondFactor: await tenantMfaService.isEnrolled(user.id) })
+          : 'Nothing is refused to an unconfirmed account on this deployment, so there is nothing to confirm yet. To send confirmation emails, set PANEL_URL, RESEND_DEFAULT_API_KEY and RESEND_DEFAULT_FROM on the API and restart it.',
+      });
+    }
+    const reserved = await reserveAuthEmail(OPERATOR_EMAIL_SCOPE, user.email);
+    if (!reserved.allowed) throw authEmailCappedError(reserved.retryAfterSeconds);
+    const sent = await mailOperatorConfirmation(user, await primaryTenantId(user.id));
+    return { ...sent, alreadyVerified: false };
+  },
+
+  /**
+   * Consume a confirmation link, for the signed-in operator it was mailed
+   * for. It sets `emailVerified` and nothing else: the link ratifies the
+   * sign-up, password included, where a sign-in link, a provider or a reset
+   * on an unconfirmed account replaces what was there. No session is issued.
+   *
+   * The session is what makes ratifying safe. The link goes to the mailbox,
+   * and the mailbox owner may not be who created the account. Whoever can
+   * sign in to it already holds its password, so keeping that password takes
+   * nothing from them; a mailbox owner who cannot sign in has only the routes
+   * that replace it.
+   *
+   * @example
+   *   await tenantAuthService.verifyEmail({ token, tenantUserId: req.tenantUser!.id });
+   */
+  async verifyEmail(input: {
+    token: string;
+    tenantUserId: string;
+    device?: TenantDeviceContext;
+  }): Promise<{ ok: true; emailVerified: true }> {
+    const outcome = await lookupTenantEmailVerificationToken(input.token);
+    if (outcome.kind === 'unknown') {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'EMAIL_VERIFICATION_TOKEN_INVALID',
+        message: 'Confirmation token is unknown, or a newer confirmation email replaced it.',
+        fix: 'Use the link in the newest confirmation email, or request a fresh one via POST /api/v1/tenant/auth/resend-verification.',
+      });
+    }
+    if (outcome.kind === 'consumed') {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'EMAIL_VERIFICATION_TOKEN_USED',
+        message: 'Confirmation token has already been used.',
+        fix: 'Nothing to do if the address is already confirmed: GET /api/v1/tenant/auth/me shows `emailVerified`. If it is not, request a fresh confirmation email via POST /api/v1/tenant/auth/resend-verification.',
+      });
+    }
+    if (outcome.kind === 'expired') {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'EMAIL_VERIFICATION_TOKEN_EXPIRED',
+        message: 'Confirmation token has expired.',
+        fix: 'Request a fresh confirmation email via POST /api/v1/tenant/auth/resend-verification.',
+      });
+    }
+    const { token } = outcome;
+    let holder: { email: string } | null = null;
+    if (token.tenantUserId !== input.tenantUserId) {
+      throw new RekeyError({
+        statusCode: 403,
+        code: 'EMAIL_VERIFICATION_WRONG_ACCOUNT',
+        message: 'This confirmation link belongs to a different account than the one signed in.',
+        fix: 'Sign in as the account the confirmation email was sent to, then open the link again. The link was not used up.',
+      });
+    }
+    const confirmedNow = await prisma.$transaction(async (tx) => {
+      const consumed = await tx.tenantEmailVerificationToken.updateMany({
+        where: { id: token.id, consumedAt: null },
+        data: { consumedAt: new Date() },
+      });
+      if (consumed.count !== 1) {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'EMAIL_VERIFICATION_TOKEN_USED',
+          message: 'Confirmation token has already been used.',
+          fix: 'Nothing to do if the address is already confirmed: GET /api/v1/tenant/auth/me shows `emailVerified`. If it is not, request a fresh confirmation email via POST /api/v1/tenant/auth/resend-verification.',
+        });
+      }
+      holder = await tx.tenantUser.findUnique({
+        where: { id: token.tenantUserId },
+        select: { email: true },
+      });
+      if (!holder || holder.email !== token.email) {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'EMAIL_VERIFICATION_STALE',
+          message: 'This confirmation link was sent to an address the account no longer uses.',
+          fix: 'Request a fresh confirmation email via POST /api/v1/tenant/auth/resend-verification.',
+        });
+      }
+      const flipped = await tx.tenantUser.updateMany({
+        where: { id: token.tenantUserId, emailVerified: false },
+        data: { emailVerified: true },
+      });
+      return flipped.count === 1;
+    });
+    invalidateOperatorAuth(token.tenantUserId);
+    if (confirmedNow) {
+      // A security notice, so not counted against the per-recipient cap. If
+      // the person at the mailbox did not do this, it tells them what to do.
+      const tenantId = await primaryTenantId(token.tenantUserId);
+      void emailService
+        .dispatchSystem({
+          eventKey: 'operator_email_confirmed',
+          to: token.email,
+          variables: {
+            userEmail: token.email,
+            confirmedAtIso: new Date().toISOString(),
+            appUrl: panelBaseUrl() ?? '',
+          },
+          tenantId,
+        })
+        .catch(() => undefined);
+      void recordSecurityEvent({
+        type: 'operator.email_confirmed',
+        actorType: 'operator',
+        actorId: token.tenantUserId,
+        tenantId: await primaryTenantId(token.tenantUserId),
+        ip: input.device?.ip ?? null,
+        userAgent: input.device?.userAgent ?? null,
+        metadata: { via: 'confirmation_link' },
+      });
+    }
+    return { ok: true, emailVerified: true };
   },
 
   /**
@@ -515,22 +789,26 @@ export const tenantAuthService = {
      *  this login would create a NEW operator. Ignored for existing operators. */
     inviteKey?: string | undefined;
     device?: TenantDeviceContext;
-  }): Promise<TenantUser> {
+    /**
+     * `silent` for the ID Token handoff. An account provisioned for that
+     * handoff was registered by automation with a password nobody was shown,
+     * so "your password was removed" on its first sign-in reads as an alarm
+     * about nothing. The claim itself is unchanged.
+     */
+    claimNotice?: 'mail' | 'silent';
+  }): Promise<{ user: TenantUser; mailboxProven: boolean }> {
     const email = input.email.toLowerCase();
     const existing = await prisma.tenantUser.findUnique({ where: { email } });
     if (existing) {
-      // Existing operator, sign-in, never gated. The provider vouched for the
-      // email, so upgrade a stale unverified flag.
-      if (input.emailVerified && !existing.emailVerified) {
-        const upgraded = await prisma.tenantUser.update({
-          where: { id: existing.id },
-          data: { emailVerified: true },
-        });
-        // The cached row carries the flag, and GET /me must not show it stale.
-        invalidateOperatorAuth(existing.id);
-        return upgraded;
-      }
-      return existing;
+      // Existing operator, sign-in, never gated.
+      if (!input.emailVerified) return { user: existing, mailboxProven: false };
+      // The provider vouches for the mailbox. On an account nobody had
+      // confirmed, whoever registered the address first must not keep a way in.
+      return claimOperatorOnProof(
+        existing,
+        { via: 'oauth', ip: input.device?.ip ?? null, userAgent: input.device?.userAgent ?? null },
+        input.claimNotice,
+      );
     }
     // This branch creates a brand-new operator → enforce OPERATOR_SIGNUP_MODE.
     const invite = await resolveSignupInvite(input.inviteKey);
@@ -567,7 +845,7 @@ export const tenantAuthService = {
         },
       });
     }
-    return created.user;
+    return { user: created.user, mailboxProven: false };
   },
 
   /**
@@ -577,7 +855,11 @@ export const tenantAuthService = {
    * of the session/MFA internals. An MFA-enrolled operator still gets the
    * challenge, the passwordless primary factor doesn't bypass the second one.
    */
-  async completeSignIn(user: TenantUser, device?: TenantDeviceContext): Promise<TenantSignInOutcome> {
+  async completeSignIn(
+    user: TenantUser,
+    device?: TenantDeviceContext,
+    proof: { mailboxProven?: boolean } = {},
+  ): Promise<TenantSignInOutcome> {
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
       throw new RekeyError({
@@ -588,7 +870,10 @@ export const tenantAuthService = {
       });
     }
     if (await tenantMfaService.isEnrolled(user.id)) {
-      const challenge = issueTenantMfaChallengeToken(user.id);
+      const challenge = issueTenantMfaChallengeToken(user.id, {
+        mailboxProven: proof.mailboxProven === true && !user.emailVerified,
+        basisStamp: user.sessionsInvalidBefore,
+      });
       return {
         mfaRequired: true,
         user: redact(user),
@@ -597,7 +882,14 @@ export const tenantAuthService = {
       };
     }
     const active = memberships[0]!;
-    const session = await issueSession(user, active.tenantId, active.role, memberships, device);
+    const session = await issueSession(
+      user,
+      active.tenantId,
+      active.role,
+      memberships,
+      device,
+      sessionBasis(user, operatorCredentialSuperseded),
+    );
     return { mfaRequired: false, ...session };
   },
 
@@ -614,8 +906,15 @@ export const tenantAuthService = {
    * transport is configured, same shape as `requestPasswordReset`.
    */
   async requestMagicLink(input: { email: string }): Promise<{ delivered: boolean; token: string | null }> {
+    // Before the lookup, so a known and an unknown address spend the
+    // recipient's allowance alike, and a counter outage refuses both.
+    const reserved = await reserveAuthEmail(OPERATOR_EMAIL_SCOPE, input.email);
+    if (!reserved.allowed) return { ...CONSTANT_MAGIC_LINK_RESPONSE };
     const user = await prisma.tenantUser.findUnique({ where: { email: input.email.toLowerCase() } });
     if (!user) {
+      // Nothing is sent, so the address keeps its allowance. Not awaited: the
+      // answer must not take longer for an address with no account.
+      void reserved.unsent();
       // Constant-ish delay to flatten the timing side channel, then the same
       // body a real send produces. `delivered: false` here used to be the
       // whole oracle: one request per address told you which operators exist.
@@ -700,8 +999,15 @@ export const tenantAuthService = {
         fix: 'Request a fresh magic link.',
       });
     }
-    const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: outcome.token.tenantUserId } });
-    return this.completeSignIn(user, input.device);
+    const holder = await prisma.tenantUser.findUniqueOrThrow({ where: { id: outcome.token.tenantUserId } });
+    // The link went to the mailbox and nowhere else, so consuming it proves
+    // the address. On an account nobody had confirmed that is a claim.
+    const { user, mailboxProven } = await claimOperatorOnProof(holder, {
+      via: 'magic_link',
+      ip: input.device?.ip ?? null,
+      userAgent: input.device?.userAgent ?? null,
+    });
+    return this.completeSignIn(user, input.device, { mailboxProven });
   },
 
   async signIn(input: {
@@ -780,12 +1086,7 @@ export const tenantAuthService = {
         })().catch(() => undefined);
       }
 
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'INVALID_CREDENTIALS',
-        message: 'Email or password is incorrect.',
-        fix: 'Double-check the credentials. If you signed up via OAuth, password sign-in will not work for you.',
-      });
+      throw invalidCredentials();
     }
 
     // Success, clear the failure counter + any lock.
@@ -807,7 +1108,7 @@ export const tenantAuthService = {
     // MFA gate, if the operator enrolled, hold the session and emit a
     // 5-min challenge token. The panel exchanges it via /tenant/auth/mfa-verify.
     if (await tenantMfaService.isEnrolled(user.id)) {
-      const challenge = issueTenantMfaChallengeToken(user.id);
+      const challenge = issueTenantMfaChallengeToken(user.id, { basisStamp: user.sessionsInvalidBefore });
       return {
         mfaRequired: true,
         user: redact(user),
@@ -819,13 +1120,11 @@ export const tenantAuthService = {
     // Default active workspace = first (oldest) membership. UI can call
     // switchWorkspace to change.
     const active = memberships[0]!;
-    const session = await issueSession(
-      user,
-      active.tenantId,
-      active.role,
-      memberships,
-      input.device,
-    );
+    const session = await issueSession(user, active.tenantId, active.role, memberships, input.device, {
+      sessionsInvalidBefore: user.sessionsInvalidBefore,
+      passwordHash: user.passwordHash,
+      refusal: invalidCredentials,
+    });
     return { mfaRequired: false, ...session };
   },
 
@@ -862,7 +1161,27 @@ export const tenantAuthService = {
     // spending, then spend the code and claim the challenge.
     const match = await tenantMfaService.match({ tenantUserId: claims.sub, code: input.code });
     if (match.outcome !== 'matched') throw codeRefused(match.outcome);
-    const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: claims.sub } });
+    let user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: claims.sub } });
+    // A challenge from before the account's sessions were all ended stands
+    // for a first factor that no longer counts.
+    const challengeInvalid = (): RekeyError =>
+      new RekeyError({
+        statusCode: 401,
+        code: 'MFA_CHALLENGE_INVALID',
+        message: 'MFA challenge token is invalid or expired.',
+        fix: 'Sign in again to obtain a fresh challenge token (they expire after 5 minutes).',
+      });
+    // The session is issued on the stamp the first factor saw, carried in the
+    // challenge, not on whatever the row holds when the code arrives.
+    const firstFactorStamp = boundStamp(claims.sib);
+    if (
+      firstFactorStamp === undefined ||
+      unanchoredTokenEnded(claims, user.sessionsInvalidBefore) ||
+      (firstFactorStamp?.getTime() ?? null) !== (user.sessionsInvalidBefore?.getTime() ?? null)
+    ) {
+      throw challengeInvalid();
+    }
+    const basis: SessionBasis = { sessionsInvalidBefore: firstFactorStamp, refusal: challengeInvalid };
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
       throw new RekeyError({
@@ -875,8 +1194,9 @@ export const tenantAuthService = {
     const spent = await match.spend();
     if (spent !== 'accepted') throw codeRefused(spent);
     if (!(await claimMfaChallenge(input.mfaChallengeToken, claims.exp))) throw mfaChallengeUsedError();
+    if (claims.mbx === true && !user.emailVerified) user = await promoteOperatorAfterMfa(user.id);
     const active = memberships[0]!;
-    return issueSession(user, active.tenantId, active.role, memberships, input.device);
+    return issueSession(user, active.tenantId, active.role, memberships, input.device, basis);
   },
 
   async refresh(presentedRaw: string, device?: TenantDeviceContext): Promise<AuthSessionResult> {
@@ -914,12 +1234,7 @@ export const tenantAuthService = {
       if (outcome.token.replacedById !== null) {
         await refuseRotatedTenantReplay(outcome.token, device, 'lookup');
       }
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'REFRESH_TOKEN_REVOKED',
-        message: 'This session was revoked.',
-        fix: 'Sign in again. Either this session was signed out, or a reuse of one of its tokens elsewhere revoked the whole family.',
-      });
+      throw refreshTokenRevoked();
     }
     if (outcome.kind === 'expired') {
       throw new RekeyError({
@@ -962,6 +1277,11 @@ export const tenantAuthService = {
       // caught mid-flight, judged on the row as the winner committed it.
       if ((e as Error).message === 'TENANT_REFRESH_RACE') {
         const spent = await prisma.tenantRefreshToken.findUniqueOrThrow({ where: { id: outcome.token.id } });
+        // Revoked without a successor: the session was ended (a claim, a
+        // sign-out, a password change) while this request was in flight. Not
+        // a replay, and answering it as one would revoke the sessions of
+        // whoever now holds the account.
+        if (spent.replacedById === null) throw refreshTokenRevoked();
         await refuseRotatedTenantReplay(spent, device, 'rotation_race');
       }
       throw e;
@@ -1002,6 +1322,8 @@ export const tenantAuthService = {
   async switchWorkspace(args: {
     tenantUserId: string;
     targetTenantId: string;
+    /** `req.tenantSessionStamp`: the stamp the session middleware admitted this request against. */
+    sessionStamp: Date | null;
     device?: TenantDeviceContext;
   }): Promise<AuthSessionResult> {
     const memberships = await loadMemberships(args.tenantUserId);
@@ -1015,7 +1337,10 @@ export const tenantAuthService = {
       });
     }
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: args.tenantUserId } });
-    return issueSession(user, target.tenantId, target.role, memberships, args.device);
+    return issueSession(user, target.tenantId, target.role, memberships, args.device, {
+      sessionsInvalidBefore: args.sessionStamp,
+      refusal: operatorSessionEndedMeanwhile,
+    });
   },
 
   async getById(id: string): Promise<{ user: PublicTenantUser; memberships: MembershipSummary[] }> {
@@ -1040,10 +1365,17 @@ export const tenantAuthService = {
   async requestPasswordReset(input: {
     email: string;
   }): Promise<{ delivered: boolean; resetToken: string | null }> {
+    // Before the lookup, so a known and an unknown address spend the
+    // recipient's allowance alike, and a counter outage refuses both.
+    const reserved = await reserveAuthEmail(OPERATOR_EMAIL_SCOPE, input.email);
+    if (!reserved.allowed) return { ...CONSTANT_RESET_RESPONSE };
     const user = await prisma.tenantUser.findUnique({
       where: { email: input.email.toLowerCase() },
     });
     if (!user) {
+      // Nothing is sent, so the address keeps its allowance. Not awaited: the
+      // answer must not take longer for an address with no account.
+      void reserved.unsent();
       // Constant-ish sleep, same shape as end-user requestPasswordReset,
       // then the same body a real send produces. `delivered: false` here used
       // to answer "does this operator exist?" for anyone who asked.
@@ -1140,11 +1472,33 @@ export const tenantAuthService = {
     }
 
     const passwordHash = await hashPassword(input.newPassword);
-    await prisma.tenantUser.update({
-      where: { id: outcome.token.tenantUserId },
-      data: { passwordHash },
+    // The reset link went to the mailbox and nowhere else, so completing it
+    // proves the address. On an account nobody had confirmed that is a claim:
+    // passkeys, access tokens and grants set by whoever registered first go
+    // with the old password.
+    // One transaction holding the operator's row (the claim takes it first):
+    // the new hash, the stamp and the revocations land together, and a
+    // sign-in with the old password that is in flight cannot write a session
+    // after them.
+    const claim = await prisma.$transaction(async (tx) => {
+      const claimed = await claimUnverifiedOperator(
+        tx,
+        { id: outcome.token.tenantUserId },
+        { via: 'password_reset', passwordHash },
+      );
+      if (claimed.kind === 'claimed') return claimed;
+      await tx.tenantUser.update({ where: { id: outcome.token.tenantUserId }, data: { passwordHash } });
+      await revokeEveryOperatorSession(tx, outcome.token.tenantUserId);
+      return claimed;
     });
-    await revokeAllTenantRefreshTokensForUser(outcome.token.tenantUserId);
+    invalidateOperatorAuth(outcome.token.tenantUserId);
+    // A reset says nothing by mail about itself. When it claimed the account
+    // and removed a passkey, an access token, an MCP grant, a key or an
+    // endpoint, or left people and credentials to look over, the address is
+    // owed the notice.
+    if (claim.kind === 'claimed' && (claim.signInMethodsRemoved || reviewHasFindings(claim.review))) {
+      sendOperatorClaimedEmail(claim.user, claim.review);
+    }
     return { ok: true };
   },
 
@@ -1172,8 +1526,21 @@ export const tenantAuthService = {
     }
     await clearFailures(lockScope);
     const newHash = await hashPassword(input.newPassword);
-    await prisma.tenantUser.update({ where: { id: user.id }, data: { passwordHash: newHash } });
-    await revokeAllTenantRefreshTokensForUser(user.id);
+    await prisma.$transaction(async (tx) => {
+      const row = await lockOperatorCredentials(tx, user.id);
+      // The password that was checked above is no longer the account's.
+      if (row?.passwordHash !== user.passwordHash) {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'INVALID_CREDENTIALS',
+          message: 'Current password is incorrect.',
+          fix: 'Verify the current password and try again.',
+        });
+      }
+      await tx.tenantUser.update({ where: { id: user.id }, data: { passwordHash: newHash } });
+      await revokeEveryOperatorSession(tx, user.id);
+    });
+    invalidateOperatorAuth(user.id);
     return { ok: true };
   },
 };

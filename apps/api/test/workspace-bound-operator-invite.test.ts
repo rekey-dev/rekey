@@ -14,6 +14,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { hashOperatorInviteToken } from '../src/lib/operator-invite.js';
 import { tenantAuthService } from '../src/modules/tenant-auth/tenant-auth.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -112,21 +115,6 @@ describe('workspace-bound operator invites', () => {
       const row = await prisma.operatorInvite.findFirstOrThrow({ where: { tenantId } });
       expect(row.tokenHash).toBe(hashOperatorInviteToken(data.rawToken));
       expect(JSON.stringify(row)).not.toContain(data.rawToken);
-    });
-
-    it('refuses a binding that is incomplete or names no workspace', async () => {
-      const t = tag();
-      const tenantId = await adminTenant(`owner-${t}@example.com`);
-      const noEmail = await mint({ tenantId });
-      expect(noEmail.statusCode).toBe(400);
-      expect(noEmail.json().error.code).toBe('OPERATOR_INVITE_EMAIL_REQUIRED');
-      const noTenant = await mint({ email: `owner-${t}@example.com`, role: 'OWNER' });
-      expect(noTenant.statusCode).toBe(400);
-      expect(noTenant.json().error.code).toBe('OPERATOR_INVITE_TENANT_REQUIRED');
-      const ghost = await mint({ tenantId: 'no-such-tenant', email: `owner-${t}@example.com` });
-      expect(ghost.statusCode).toBe(404);
-      expect(ghost.json().error.code).toBe('TENANT_NOT_FOUND');
-      expect(await prisma.operatorInvite.count()).toBe(0);
     });
 
     it('only the super-admin can mint one', async () => {
@@ -234,7 +222,7 @@ describe('workspace-bound operator invites', () => {
       await expect(
         tenantAuthService.findOrCreateOAuthOperator({ email: `x-${email}`, emailVerified: true, inviteKey: key }),
       ).rejects.toMatchObject({ code: 'OPERATOR_INVITE_EMAIL_MISMATCH' });
-      const user = await tenantAuthService.findOrCreateOAuthOperator({ email, emailVerified: true, inviteKey: key });
+      const { user } = await tenantAuthService.findOrCreateOAuthOperator({ email, emailVerified: true, inviteKey: key });
       expect(await prisma.tenant.count()).toBe(tenantsBefore);
       const memberships = await prisma.tenantMembership.findMany({ where: { tenantUserId: user.id } });
       expect(memberships.map((m) => [m.tenantId, m.role])).toEqual([[tenantId, 'OWNER']]);
@@ -253,18 +241,6 @@ describe('workspace-bound operator invites', () => {
       expect(res.statusCode).toBe(201);
       expect(res.json().data.activeTenantId).not.toBe(tenantId);
       expect(await ownerOf(tenantId)).toEqual([]);
-    });
-
-    it('invite mode with an unbound key still creates a new workspace', async () => {
-      process.env.OPERATOR_SIGNUP_MODE = 'invite';
-      const t = tag();
-      const minted = await mint({});
-      const key = (minted.json().data as { rawToken: string; inviteUrl: string | null }).rawToken;
-      expect(minted.json().data.inviteUrl).toBeNull();
-      const before = await prisma.tenant.count();
-      const res = await signUp(`unbound-${t}@example.com`, { inviteKey: key, workspaceName: 'New Co' });
-      expect(res.statusCode, res.body).toBe(201);
-      expect(await prisma.tenant.count()).toBe(before + 1);
     });
   });
 

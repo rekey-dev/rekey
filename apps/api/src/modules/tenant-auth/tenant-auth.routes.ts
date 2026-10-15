@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { RekeyError } from '../../lib/error.js';
 import {
   tenantAuthService,
   type AuthSessionResult,
@@ -21,6 +22,7 @@ import { OPERATOR_TOKEN_SCOPES } from '../../lib/operator-token.js';
 import { operatorSignupMode } from './operator-signup-policy.js';
 import { ok, okPage, okFlag, errs, ref } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertOperatorVerifiedForCredential, operatorConfirmation } from './operator-claim.js';
 
 function deviceContext(req: FastifyRequest): { userAgent: string | null; ip: string | null } {
   const ua = req.headers['user-agent'];
@@ -50,6 +52,7 @@ const SwitchBody = z.object({ tenantId: z.string().min(1) });
 const ForgotBody = z.object({ email: z.string().email().max(254) });
 const MagicLinkRequestBody = z.object({ email: z.string().email().max(254) });
 const MagicLinkVerifyBody = z.object({ token: z.string().min(1).max(512) });
+const VerifyEmailBody = z.object({ token: z.string().min(1).max(512) });
 const ResetBody = z.object({
   token: z.string().min(1).max(512),
   newPassword: z.string().min(1).max(256),
@@ -634,6 +637,73 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       return { success: true, data: result };
     },
   );
+
+  app.post(
+    '/verify-email',
+    {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      config: { rateLimit: authRateLimit(10) },
+      schema: {
+        tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
+        summary:
+          "Confirm the signed-in operator's email address with the token from their confirmation email. Changes nothing else and issues no session.",
+        description:
+          'Needs a session of the account the token was mailed for. The link goes to the mailbox, and whoever ' +
+          'reads it may not be who created the account: confirming keeps the sign-up password, so only someone ' +
+          'who can already sign in may do it. Someone who cannot uses an emailed sign-in link, a sign-in ' +
+          'provider or a password reset, which confirm the address and replace what was set before.',
+        body: {
+          type: 'object',
+          required: ['token'],
+          properties: { token: { type: 'string', minLength: 1, maxLength: 512 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                ok: { type: 'boolean', enum: [true] },
+                emailVerified: { type: 'boolean', enum: [true] },
+              },
+              required: ['ok', 'emailVerified'],
+            },
+            'The address is confirmed. The password, sessions, access tokens and MCP grants are unchanged.',
+          ),
+          ...errs({
+            401:
+              'TENANT_SESSION_MISSING / TENANT_SESSION_INVALID: no session, or not a valid one; or ' +
+              'EMAIL_VERIFICATION_TOKEN_INVALID: unknown token; or EMAIL_VERIFICATION_TOKEN_USED: already ' +
+              'consumed or replaced by a newer email; or EMAIL_VERIFICATION_TOKEN_EXPIRED; or ' +
+              'EMAIL_VERIFICATION_STALE: sent to an address the account no longer uses.',
+            403: 'EMAIL_VERIFICATION_WRONG_ACCOUNT: the token belongs to a different account than the session.',
+            429: 'RATE_LIMITED: too many requests. Honour `Retry-After`.',
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      const body = VerifyEmailBody.parse(req.body);
+      // Registered with the routes that need no session so that the missing
+      // one can be answered with what to do about it here, which differs from
+      // every other route: there is a way forward for someone who cannot sign in.
+      if (!req.headers.authorization) {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'TENANT_SESSION_MISSING',
+          message: 'Sign in to the account this confirmation link was sent for, then confirm.',
+          fix: 'If you created this account: sign in (POST /api/v1/tenant/auth/sign-in) and send the token again with the session accessToken as `Authorization: Bearer`. If you did not create it, or do not know its password: do not confirm. Ask for an emailed sign-in link instead (POST /api/v1/tenant/auth/magic-link/request, then /magic-link/verify), which confirms the address and removes the password that was set before.',
+        });
+      }
+      await requireTenantSession(req, reply);
+      const result = await tenantAuthService.verifyEmail({
+        token: body.token,
+        tenantUserId: req.tenantUser!.id,
+        device: deviceContext(req),
+      });
+      return { success: true, data: result };
+    },
+  );
 }
 
 /**
@@ -659,8 +729,17 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
                 memberships: { type: 'array', items: ref('MembershipSummary') },
                 activeTenantId: { type: 'string' },
                 activeRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                emailConfirmation: {
+                  type: 'object',
+                  description:
+                    'What an unconfirmed address means on this deployment. `required`: actions that create ' +
+                    'lasting access answer 403 EMAIL_NOT_VERIFIED until `user.emailVerified` is true. ' +
+                    '`byEmail`: POST /tenant/auth/resend-verification can mail a confirmation link.',
+                  properties: { required: { type: 'boolean' }, byEmail: { type: 'boolean' } },
+                  required: ['required', 'byEmail'],
+                },
               },
-              required: ['user', 'memberships', 'activeTenantId', 'activeRole'],
+              required: ['user', 'memberships', 'activeTenantId', 'activeRole', 'emailConfirmation'],
             },
             'The calling operator.',
           ),
@@ -680,8 +759,59 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           memberships,
           activeTenantId: req.tenantId,
           activeRole: req.tenantRole,
+          emailConfirmation: {
+            required: operatorConfirmation.possible(),
+            byEmail: operatorConfirmation.ways().mail,
+          },
         },
       };
+    },
+  );
+
+  app.post(
+    '/resend-verification',
+    {
+      config: { rateLimit: authRateLimit(10) },
+      schema: {
+        tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
+        summary:
+          'Send the signed-in operator another confirmation email. Counted against the per-recipient auth email cap.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                emailSent: { type: 'boolean' },
+                alreadyVerified: {
+                  type: 'boolean',
+                  description: 'True when the address is already confirmed. Nothing is sent then.',
+                },
+                verificationToken: {
+                  type: 'string',
+                  nullable: true,
+                  description:
+                    'The raw token. Present only in development with REKEY_DEV_ECHO_AUTH_TOKENS when the ' +
+                    'mail did not go out; otherwise `null` and the link is in the email.',
+                },
+              },
+              required: ['emailSent', 'alreadyVerified', 'verificationToken'],
+            },
+            'Whether a confirmation email went out.',
+          ),
+          ...errs({
+            ...TENANT_SESSION_ERRORS,
+            409: 'OPERATOR_CONFIRMATION_EMAIL_UNAVAILABLE: this deployment has no mail transport for the panel.',
+            429:
+              'AUTH_EMAIL_RECIPIENT_CAPPED: this address has had its hourly or daily allowance of auth ' +
+              'email; or RATE_LIMITED. Honour `Retry-After`.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const result = await tenantAuthService.resendVerification(req.tenantUser!.id);
+      return { success: true, data: result };
     },
   );
 
@@ -714,6 +844,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
       const result = await tenantAuthService.switchWorkspace({
         tenantUserId: req.tenantUser!.id,
         targetTenantId: body.tenantId,
+        sessionStamp: req.tenantSessionStamp ?? null,
         device: deviceContext(req),
       });
       return { success: true, data: shape(result) };
@@ -891,7 +1022,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
       bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Checks a secret inside a session, so it gets the credential tier's
       // 10/min per (account, IP), not the 600/min identity budget. See
-      // test/rate-limit-hardening.test.ts.
+      // test/credential-guess-rate-limits.test.ts.
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -994,6 +1125,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     },
     async (req, reply) => {
       const body = MintApiTokenBody.parse(req.body);
+      await assertOperatorVerifiedForCredential(req.tenantUser!.id, 'create an access token');
       const result = await operatorTokensService.mint({
         tenantUserId: req.tenantUser!.id,
         tenantId: req.tenantId!,

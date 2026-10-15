@@ -1,7 +1,5 @@
 # `@rekey.dev/shared-types`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 The Zod schemas + TypeScript types shared between the [Rekey](https://rekey.dev) API and its SDKs. Anything serialized over the wire lives here, so there's a single source of truth for every shape.
 
 ```bash

@@ -56,7 +56,7 @@ export default async function BillingSettingsPage({
   const dunningEnabled = app.billingConfig.dunningEnabled ?? false;
   const subject = app.billingConfig.billingSubject ?? 'user';
   const { localPrices, reportingCurrency, onUnavailableCurrency } = app.billingConfig;
-  const canWrite = hasScope(app.access?.scopes ?? null, 'billing:write');
+  const canWrite = hasScope(app.access.scopes, 'billing:write');
   const orgsEnabled = app.authConfig.organizationsEnabled === true;
 
   if (!billingEnabled && !orgsEnabled) {

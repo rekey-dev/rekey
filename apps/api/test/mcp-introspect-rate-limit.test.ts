@@ -18,6 +18,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import type { GlobalRateLimitBudgets } from '../src/lib/rate-limit.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 let fixtures: FastifyInstance;
 

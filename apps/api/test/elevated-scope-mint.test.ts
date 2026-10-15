@@ -18,6 +18,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { operatorWriteTools } from '../src/modules/tenant-mcp/operator-write-tools.js';
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { ALL_SCOPES, UNRESTRICTED, type Scope } from '../src/lib/operator-scopes.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('minting a key with an elevated scope', () => {
   let app: FastifyInstance;

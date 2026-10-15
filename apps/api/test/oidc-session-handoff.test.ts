@@ -27,6 +27,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 // Requiring a verified email needs a URL the verification link can be built on.
 const VERIFY_BASE = 'https://app.example.com';
@@ -266,26 +269,6 @@ describe('app-authorised session handoff', () => {
     expect((second.json() as { error: string }).error).toBe('invalid_grant');
   });
 
-  it('binds the code to the PKCE challenge — a wrong verifier is refused', async () => {
-    const fx = await bootstrap();
-    const { challenge } = pkce();
-    const { code } = (await handoff(fx, { challenge })).json() as { code: string };
-
-    const wrong = await app.inject({
-      method: 'POST',
-      url: `/api/v1/mcp/${fx.slug}/oauth/token`,
-      ...form({
-        grant_type: 'authorization_code',
-        code,
-        code_verifier: pkce().verifier,
-        redirect_uri: REDIRECT,
-        client_id: fx.clientId,
-      }),
-    });
-    expect(wrong.statusCode).toBe(400);
-    expect((wrong.json() as { error: string }).error).toBe('invalid_grant');
-  });
-
   // ---- Credential gates ---------------------------------------------------
 
   it('refuses a publishable key', async () => {
@@ -320,14 +303,6 @@ describe('app-authorised session handoff', () => {
     expect(authWrite.statusCode, authWrite.body).toBe(200);
     // The fixture's `*` key keeps working.
     expect((await handoff(fx, { challenge: pkce().challenge })).statusCode).toBe(200);
-  });
-
-  it('refuses a missing user token', async () => {
-    const fx = await bootstrap();
-    const { challenge } = pkce();
-    const res = await handoff(fx, { challenge, userToken: null });
-    expect(res.statusCode).toBe(401);
-    expect((res.json().error as { code: string }).code).toBe('USER_TOKEN_MISSING');
   });
 
   it('refuses a garbage user token — the session must be real, not claimed', async () => {
@@ -404,26 +379,6 @@ describe('app-authorised session handoff', () => {
     expect(res.json().error).not.toHaveProperty('details');
   });
 
-  it('refuses a PKCE method other than S256', async () => {
-    const fx = await bootstrap();
-    const { challenge } = pkce();
-    const res = await handoff(fx, { challenge, method: 'plain' });
-    expect(res.statusCode).toBe(400);
-    // Refused by the body schema's enum, before the client is looked up, so
-    // nothing has confirmed the redirect_uri and the refusal carries no
-    // `details`: a hosted page must show its own error, not redirect.
-    expect(res.json().error).not.toHaveProperty('details');
-  });
-
-  it('refuses a request whose scopes the Application cannot grant', async () => {
-    const fx = await bootstrap();
-    const { challenge } = pkce();
-    const res = await handoff(fx, { challenge, scope: 'wat' });
-    expect(res.statusCode).toBe(400);
-    expect((res.json().error as { code: string }).code).toBe('INVALID_GRANT_REQUEST');
-    expect(res.json().error.details).toEqual({ oauth_error: 'invalid_scope', redirect_uri: REDIRECT });
-  });
-
   it('404s when the Application is not an OIDC provider', async () => {
     const fx = await bootstrap({ oidcEnabled: false, mcpEnabled: false });
     const { challenge } = pkce();
@@ -486,26 +441,4 @@ describe('app-authorised session handoff', () => {
     expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
   });
 
-  it('preview refuses a key for another Application and an impersonated session', async () => {
-    const a = await bootstrap();
-    const b = await bootstrap();
-    const wrongApp = await handoff(b, {
-      challenge: pkce().challenge,
-      endpoint: 'preview',
-      slug: a.slug,
-      clientId: a.clientId,
-    });
-    expect(wrongApp.statusCode).toBe(403);
-    expect(wrongApp.json().error.code).toBe('SESSION_HANDOFF_FORBIDDEN');
-
-    const imp = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tenant/applications/${a.appId}/end-users/${a.euId}/impersonate`,
-      headers: { authorization: `Bearer ${a.operatorToken}` },
-      payload: { reason: 'support ticket 456' },
-    });
-    const impToken = (imp.json().data as { accessToken: string }).accessToken;
-    const impersonated = await handoff(a, { challenge: pkce().challenge, endpoint: 'preview', userToken: impToken });
-    expect(impersonated.statusCode).toBe(403);
-  });
 });

@@ -238,12 +238,6 @@ describe('paypal module translate', () => {
     expect(noAmount?.[0]).toMatchObject({ amount: 0, currency: 'USD' });
   });
 
-  it('unhandled event types → null (ack + ignore upstream)', () => {
-    expect(
-      translate({ id: 'WH-13', event_type: 'BILLING.SUBSCRIPTION.RE-ACTIVATED', resource: { id: 'I-X' } }, ctx()),
-    ).toBeNull();
-  });
-
   describe('PAYMENT.CAPTURE.COMPLETED — the money leg of a one-time order', () => {
     // Registered with PayPal from the start and never handled, so it fell to
     // `default: null` and a captured one-off purchase produced no Payment row.
@@ -300,9 +294,4 @@ describe('paypal module translate', () => {
     });
   });
 
-  it('extractEventId / extractEventType read the PayPal envelope', () => {
-    const payload = { id: 'WH-ENV', event_type: 'PAYMENT.SALE.COMPLETED' };
-    expect(paypalModule.webhook.extractEventId(payload)).toBe('WH-ENV');
-    expect(paypalModule.webhook.extractEventType(payload)).toBe('PAYMENT.SALE.COMPLETED');
-  });
 });

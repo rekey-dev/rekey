@@ -14,13 +14,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const apiGet = vi.fn();
 vi.mock('@/lib/api', () => ({ apiGet: (...args: unknown[]) => apiGet(...args) }));
 
-const { actorLabel, eventDetails, eventSummary, resolveActorEmails } = await import('@/lib/security-events');
+const { actorLabel, eventDetails, eventSummary, actorEmailsOf } = await import('@/lib/security-events');
 
 beforeEach(() => apiGet.mockReset());
 
-describe('resolveActorEmails', () => {
-  it("uses the API's actorEmail and makes no lookups of its own", async () => {
-    const emails = await resolveActorEmails([
+describe('actorEmailsOf', () => {
+  it("uses the API's actorEmail and makes no lookups of its own", () => {
+    const emails = actorEmailsOf([
       { actorType: 'operator', actorId: 'op1', actorEmail: 'ops@example.com', applicationId: 'app1' },
       { actorType: 'end_user', actorId: 'eu1', actorEmail: 'eu@example.com', applicationId: 'app1' },
       { actorType: 'system', actorId: null, actorEmail: null, applicationId: 'app1' },
@@ -30,19 +30,12 @@ describe('resolveActorEmails', () => {
     expect(apiGet).not.toHaveBeenCalled();
   });
 
-  it('treats null as the API saying there is no one to name, not as missing', async () => {
-    const emails = await resolveActorEmails([
+  it('treats null as the API saying there is no one to name', () => {
+    const emails = actorEmailsOf([
       { actorType: 'operator', actorId: 'gone', actorEmail: null, applicationId: 'app1' },
     ]);
     expect(emails.has('gone')).toBe(false);
     expect(apiGet).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the member list only for an event from an older API (no field at all)', async () => {
-    apiGet.mockResolvedValue({ items: [{ tenantUserId: 'op2', email: 'old@example.com' }] });
-    const emails = await resolveActorEmails([{ actorType: 'operator', actorId: 'op2', applicationId: 'app1' }]);
-    expect(emails.get('op2')).toBe('old@example.com');
-    expect(apiGet).toHaveBeenCalledTimes(1);
   });
 });
 

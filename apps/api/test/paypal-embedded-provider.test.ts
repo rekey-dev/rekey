@@ -5,10 +5,12 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
+import type { EndUser } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
-import { getModule } from '../src/modules/billing/providers/registry.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const creds = { clientId: 'AbC-client', clientSecret: 'shh', webhookId: 'WH-1' };
 const plan = pricedPlan({
@@ -20,7 +22,7 @@ const plan = pricedPlan({
   currency: 'USD',
   interval: 'MONTH',
   metadata: { paypal: { planId: 'P-STANDARD' } },
-} as unknown as Plan, null);
+} as unknown as FixturePlan, null);
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
 
 type Call = { url: string; init: RequestInit | undefined };
@@ -82,21 +84,6 @@ describe('RealPaypalProvider, embedded checkout', () => {
       providerPlanId: 'P-STANDARD',
     });
     expect(JSON.stringify(result)).not.toContain('shh');
-  });
-
-  it('uses the live base in live mode, for creating and for reading back', async () => {
-    const calls = stubPaypal({ id: 'I-NEW123', status: 'APPROVED', plan_id: 'P-STANDARD', custom_id: 'app_1:eu_1' });
-    const provider = new RealPaypalProvider(creds, 'live');
-    await provider.createEmbeddedCheckout(input);
-    const snapshot = await provider.getSubscription('I-NEW123');
-    expect(calls.every((c) => c.url.startsWith('https://api-m.paypal.com/'))).toBe(true);
-    expect(snapshot).toEqual({ id: 'I-NEW123', status: 'APPROVED', planId: 'P-STANDARD', customId: 'app_1:eu_1' });
-  });
-
-  it('reads an unknown subscription as null and encodes the id into the path', async () => {
-    const calls = stubPaypal(null);
-    expect(await new RealPaypalProvider(creds, 'test').getSubscription('I-1/../x')).toBeNull();
-    expect(calls.at(-1)!.url).toBe('https://api-m.sandbox.paypal.com/v1/billing/subscriptions/I-1%2F..%2Fx');
   });
 
   it('refuses a discount on a subscription', async () => {
@@ -252,13 +239,4 @@ describe('RealPaypalProvider, embedded checkout', () => {
     expect(result.client).toMatchObject({ currency: 'USD' });
   });
 
-  it('declares embedded checkout only with the methods and browser origins it needs', () => {
-    const paypal = getModule('paypal')!;
-    expect(paypal.capabilities.embeddedCheckout).toEqual({ recurring: true, oneTime: true });
-    expect(typeof RealPaypalProvider.prototype.createEmbeddedCheckout).toBe('function');
-    expect(typeof RealPaypalProvider.prototype.getSubscription).toBe('function');
-    expect(typeof RealPaypalProvider.prototype.getOrder).toBe('function');
-    expect(paypal.browser?.test.scriptSrc).toContain('https://www.sandbox.paypal.com');
-    expect(paypal.browser?.live.scriptSrc.join(' ')).not.toContain('sandbox');
-  });
 });

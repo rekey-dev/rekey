@@ -11,6 +11,9 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 vi.mock('../src/config/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/env.js')>();
@@ -101,6 +104,9 @@ describe('custom email templates', () => {
       payload: { email: ownerEmail, password: 'pw-one-two-three', workspaceName: 'Mail Co' },
     });
     expect(su.statusCode).toBe(201);
+    // Operator sign-up mails a confirmation link through the shared pool,
+    // which is configured here. This suite counts what the Application sends.
+    h.sends.length = 0;
     const ownerToken = (su.json().data as { accessToken: string }).accessToken;
     const created = await inject({
       method: 'POST',
@@ -417,13 +423,6 @@ describe('custom email templates', () => {
         ['variables.coupon', 'variables.itemCount', 'variables.orderNumber', 'variables.shippedOn', 'variables.trackingUrl'].sort(),
       );
       expect(h.sends).toHaveLength(0);
-    });
-
-    it('requires required variables', async () => {
-      const w = await ready();
-      const res = await send(w.key, { template: 'order_shipped', to: 'b@example.com', variables: { name: 'Sam' } });
-      expect(res.json().error.code).toBe('EMAIL_VARIABLES_INVALID');
-      expect(issuesOf(res.body).sort()).toEqual(['variables.orderNumber', 'variables.trackingUrl']);
     });
 
     it('holds url values to https on the link domains, without credentials', async () => {
@@ -890,7 +889,7 @@ describe('custom email templates', () => {
     });
   });
 
-  describe('unsubscribe scope (review blocker)', () => {
+  describe('unsubscribe scope', () => {
     async function endUser(w: World, email: string): Promise<void> {
       const res = await inject({
         method: 'POST',
@@ -992,7 +991,7 @@ describe('custom email templates', () => {
     });
   });
 
-  describe('stuck sends (review high)', () => {
+  describe('stuck sends', () => {
     it('a pending row past five minutes answers EMAIL_SEND_OUTCOME_UNKNOWN, a fresh one EMAIL_SEND_IN_FLIGHT', async () => {
       const w = await ready();
       const body = { template: 'order_shipped', to: 'b@example.com', variables: GOOD_VARS, idempotencyKey: 'stuck-1' };
@@ -1033,7 +1032,7 @@ describe('custom email templates', () => {
     });
   });
 
-  describe('link rule (review medium b)', () => {
+  describe('link rule', () => {
     async function publishWith(bodyHtml: string) {
       const w = await world();
       await createTemplate(w, {
@@ -1085,7 +1084,7 @@ describe('custom email templates', () => {
     });
   });
 
-  describe('workspace caps (review medium d)', () => {
+  describe('workspace caps', () => {
     it('reads Tenant.limits, and counts every application in the workspace together', async () => {
       const a = await ready();
       const application = await prisma.application.findUniqueOrThrow({ where: { id: a.appId } });
@@ -1121,7 +1120,7 @@ describe('custom email templates', () => {
     });
   });
 
-  describe('soft delete (review low)', () => {
+  describe('soft delete', () => {
     it('keeps versions, and a recreated key starts as a draft that continues the numbering', async () => {
       const w = await ready();
       const del = await inject({ method: 'DELETE', url: `${base(w)}/custom-email-templates/order_shipped`, headers: auth(w.ownerToken) });

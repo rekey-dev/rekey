@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { CAPABILITY_NAME_PATTERN, caseAgeLabel } from '../src/lib/support-mode';
+import { ALL_SCOPES } from './all-scopes';
 
 const CASE = {
   id: 'case_1',
@@ -52,7 +53,7 @@ vi.mock('@/lib/api', async (orig) => ({
   readErrorFlash: async () => ({}),
   getApplication: async () => ({
     id: 'app_1',
-    access: scopes === null ? undefined : { level: 'read', scopes },
+    access: { level: 'read', scopes: scopes ?? ALL_SCOPES },
   }),
   apiGet: async (path: string) => {
     reads.push(path);

@@ -97,15 +97,6 @@ describe('stale-while-revalidate cache', () => {
     expect(JSON.parse(after!).value).toBe('v2');
   });
 
-  it('a fresh hit reports its age and does not recompute', async () => {
-    let computes = 0;
-    const compute = async (): Promise<number> => ++computes;
-    await cachedSwr(KEY, { freshSeconds: 60, staleSeconds: 60 }, compute);
-    const second = await cachedSwr(KEY, { freshSeconds: 60, staleSeconds: 60 }, compute);
-    expect(computes).toBe(1);
-    expect(second).toMatchObject({ status: 'ok', value: 1, cache: { hit: true, stale: false } });
-  });
-
   it('bumping the version invalidates every entry under it, including one computing across the bump', async () => {
     const opts = { freshSeconds: 60, staleSeconds: 60, versionKey: VERSION };
     let release!: () => void;

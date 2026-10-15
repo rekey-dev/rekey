@@ -13,6 +13,9 @@ import { prisma } from '../src/lib/prisma.js';
 import { __useRedisForTests } from '../src/lib/dashboard-cache.js';
 import { __setTriggeredRollupForTests, requestRollup } from '../src/modules/analytics/rollup/trigger.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const RACERS = 10;

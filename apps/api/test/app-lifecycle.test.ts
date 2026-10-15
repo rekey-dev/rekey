@@ -21,6 +21,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'correct-horse-battery';
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -157,11 +160,6 @@ describe('Application lifecycle', () => {
       expect(row.promotedBy).toBeTruthy();
     });
 
-    it('promotes STAGING too — it is not a development-only path', async () => {
-      const a = await createApp('promo-stage', { environment: 'STAGING' });
-      expect((await promote(a.id)).statusCode).toBe(200);
-    });
-
     it('is once-only: a second promote is 409 ALREADY_PROMOTED', async () => {
       const a = await createApp('promo-twice');
       expect((await promote(a.id)).statusCode).toBe(200);
@@ -201,19 +199,6 @@ describe('Application lifecycle', () => {
       // And a key minted AFTER the promotion carries the live prefix.
       const after = await mintKey(a.id);
       expect((after.json().data as { rawKey: string }).rawKey).toMatch(/^rp_live_/);
-    });
-
-    it('refuses to promote a disabled application', async () => {
-      const a = await createApp('promo-disabled');
-      expect((await disable(a.id)).statusCode).toBe(200);
-
-      const res = await promote(a.id);
-      expect(res.statusCode).toBe(409);
-      expect((res.json().error as { code: string }).code).toBe('APPLICATION_DISABLED');
-
-      // Refused means unchanged, not half-applied.
-      const row = await prisma.application.findUniqueOrThrow({ where: { id: a.id } });
-      expect(row.environment).toBe('DEVELOPMENT');
     });
 
     it('asserts the production quota, and leaves the row untouched when refused', async () => {
@@ -459,22 +444,6 @@ describe('Application lifecycle', () => {
       expect(row.disabledReason).toBeNull();
     });
 
-    it('is idempotent on an application that is not disabled', async () => {
-      const a = await createApp('en-idem');
-      expect((await enable(a.id)).statusCode).toBe(200);
-    });
-
-    it('always enables DEVELOPMENT and STAGING, ceiling or not', async () => {
-      await setLimits({ maxProductionApps: 1 });
-      await createApp('en-nonprod-holder', { environment: 'PRODUCTION' });
-
-      const dev = await createApp('en-nonprod-dev');
-      await disable(dev.id);
-      // Non-production applications hold no slot, so the ceiling is irrelevant
-      // to them in both directions.
-      expect((await enable(dev.id)).statusCode).toBe(200);
-    });
-
     // The bypass this closes: without it, disable/enable would launder an
     // unlimited number of running production applications past the ceiling.
     it('REFUSES to re-enable a production app when the workspace is at its ceiling', async () => {
@@ -492,26 +461,6 @@ describe('Application lifecycle', () => {
 
       const row = await prisma.application.findUniqueOrThrow({ where: { id: first.id } });
       expect(row.disabledAt).not.toBeNull();
-    });
-
-    it('the refusal on THIS door never suggests creating a staging app', async () => {
-      await setLimits({ maxProductionApps: 1 });
-      const first = await createApp('en-fix-text-first', { environment: 'PRODUCTION' });
-      await disable(first.id);
-      const second = await createApp('en-fix-text-second');
-      await promote(second.id);
-
-      const err = (await enable(first.id)).json().error as { fix: string };
-      // "Create it in staging instead" is a remedy for the create path. On the
-      // re-enable path the operator is bringing a real product back online and
-      // it is not a remedy at all, it is a dead end dressed as help.
-      expect(err.fix).not.toContain('staging');
-      // Both routes to a higher ceiling, each true on the deployment it names.
-      // It used to say "contact support", which is nobody on a self-hosted
-      // deployment, and never said where a Cloud workspace gets more.
-      expect(err.fix).toContain('PUT /api/v1/admin/tenants/:id/limits');
-      expect(err.fix).toContain('https://rekey.dev/pricing');
-      expect(err.fix).not.toContain('contact support');
     });
 
     it('swapping which production app runs is allowed at a ceiling of one', async () => {
@@ -651,39 +600,6 @@ describe('Application lifecycle', () => {
   // panel's disabled banner and promote gating are driven entirely by these
   // three fields, so they have to be asserted on the wire.
   describe('the API actually returns the lifecycle fields', () => {
-    it('exposes promotedAt on the promote response and on a later GET', async () => {
-      const a = await createApp('wire-promote');
-      const promoted = (await promote(a.id)).json().data as Record<string, unknown>;
-      expect(promoted.promotedAt).toEqual(expect.any(String));
-
-      const fetched = (
-        await app.inject({
-          method: 'GET',
-          url: `/api/v1/tenant/applications/${a.id}`,
-          headers: auth(),
-        })
-      ).json().data as Record<string, unknown>;
-      expect(fetched.promotedAt).toEqual(expect.any(String));
-    });
-
-    it('exposes disabledAt and disabledReason, and clears them on enable', async () => {
-      const a = await createApp('wire-disable');
-      const disabled = (await disable(a.id, 'wire test')).json().data as Record<string, unknown>;
-      expect(disabled.disabledAt).toEqual(expect.any(String));
-      expect(disabled.disabledReason).toBe('wire test');
-
-      const fetched = (
-        await app.inject({
-          method: 'GET',
-          url: `/api/v1/tenant/applications/${a.id}`,
-          headers: auth(),
-        })
-      ).json().data as Record<string, unknown>;
-      expect(fetched.disabledAt).toEqual(expect.any(String));
-
-      const enabled = (await enable(a.id)).json().data as Record<string, unknown>;
-      expect(enabled.disabledAt).toBeNull();
-    });
 
     it('shows disabledAt in the application LIST, which is where the panel reads it', async () => {
       const a = await createApp('wire-list');

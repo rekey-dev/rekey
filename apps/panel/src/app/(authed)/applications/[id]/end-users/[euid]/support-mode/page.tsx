@@ -230,9 +230,9 @@ export default async function EndUserSupportModePage({
     getApplication(id),
     getEndUserSupport(id, euid),
   ]);
-  const canWrite = hasScope(application.access?.scopes ?? null, 'end-users:write');
+  const canWrite = hasScope(application.access.scopes, 'end-users:write');
   const isErased = detail.endUser.erasedAt !== null;
-  const isBanned = (detail.endUser.bannedAt ?? null) !== null;
+  const isBanned = detail.endUser.bannedAt !== null;
   const catalogueHref = `/applications/${id}/support`;
 
   if (support === null) {

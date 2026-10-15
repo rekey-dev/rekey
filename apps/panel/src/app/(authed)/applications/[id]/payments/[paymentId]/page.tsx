@@ -73,7 +73,7 @@ export default async function PaymentPage({
   const payment = paymentRead.ok ? paymentRead.payment : null;
   const entries = trail?.entries ?? [];
   const verification = payment ? VERIFICATION_COPY[payment.verification] : null;
-  const canWrite = hasScope(app.access?.scopes ?? null, 'billing:write');
+  const canWrite = hasScope(app.access.scopes, 'billing:write');
   const refusal = payment ? refundRefusal(payment, canWrite) : null;
   const refusalId = 'refund-refusal';
 

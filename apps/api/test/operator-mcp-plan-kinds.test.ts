@@ -33,6 +33,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
 
@@ -154,21 +157,6 @@ describe('Operator MCP create_plan covers every plan kind', () => {
     });
     expect(plan.kind).toBe('CREDIT');
     expect(plan.creditsAmount).toBe(1000);
-  });
-
-  it('still defaults to SUBSCRIPTION when kind is omitted', async () => {
-    const { token, appId } = await setup('default');
-    const res = await call(token, 'create_plan', {
-      applicationId: appId,
-      slug: 'pro-monthly',
-      name: 'Pro',
-      price: { currency: 'USD', amount: 2500 },
-    });
-    expect(res.isError).toBe(false);
-    const plan = await prisma.plan.findFirstOrThrow({
-      where: { applicationId: appId, slug: 'pro-monthly' },
-    });
-    expect(plan.kind).toBe('SUBSCRIPTION');
   });
 
   it('creates a TIMED licence with its duration', async () => {

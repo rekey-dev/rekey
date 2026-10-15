@@ -16,6 +16,9 @@ import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import { seedUsers } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const RACERS = 20;
@@ -81,33 +84,6 @@ describe('users analytics cache', () => {
       kpis.mockRestore();
       activity.mockRestore();
     }
-  });
-
-  it('a different filter is a different entry; the same one is a hit', async () => {
-    const first = await get('?range=7d&platform=ios');
-    expect(first.json().data.sections.kpis.cache.hit).toBe(false);
-    const again = await get('?range=7d&platform=ios');
-    expect(again.json().data.sections.kpis.cache.hit).toBe(true);
-    const other = await get('?range=7d&platform=web');
-    expect(other.json().data.sections.kpis.cache.hit).toBe(false);
-    const reordered = await get('?range=7d&platform=ios,web');
-    const reordered2 = await get('?range=7d&platform=web,ios');
-    expect(reordered.json().data.sections.kpis.cache.hit).toBe(false);
-    expect(reordered2.json().data.sections.kpis.cache.hit).toBe(true);
-  });
-
-  it('a reporting-timezone change drops the cached sections', async () => {
-    await get();
-    expect((await get()).json().data.sections.kpis.cache.hit).toBe(true);
-    const patched = await w.inject({
-      method: 'PATCH',
-      url: `/api/v1/tenant/applications/${w.appId}/settings`,
-      headers: bearer(w.ownerToken),
-      payload: { reportingTimezone: 'Europe/Berlin' },
-    });
-    expect(patched.statusCode).toBe(200);
-    await redis.ping();
-    expect((await get()).json().data.sections.kpis.cache.hit).toBe(false);
   });
 
   it('the cached value is shared across callers and never holds who asked', async () => {

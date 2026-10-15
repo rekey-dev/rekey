@@ -46,6 +46,7 @@ export const SECURITY_EVENT_LABEL = {
   'operator.mcp_tool_called': 'MCP tool called',
   'operator.api_token.revoked': 'Operator API token revoked',
   'operator.invite_redeemed': 'Operator invite redeemed',
+  'operator.email_confirmed': 'Operator confirmed their email address',
   // Refresh-token replay, the operator counterparts of the `user.refresh_token_*`
   // pair below (same semantics, see there).
   'operator.refresh_token_raced': 'Operator refresh token replayed within the reuse window',
@@ -264,6 +265,13 @@ export const SECURITY_EVENT_LABEL = {
   'admin.operator_invite.revoked': 'Operator invite revoked',
   'license.org_key_rotated': 'Organization licence key rotated',
   'auth.email_delivery_failed': 'Outbound email failed to send',
+  // An account whose address nobody had confirmed was signed in to by someone
+  // who proved the mailbox. Every credential set before that was removed.
+  // Recorded for end-users and operators alike; `actorType` says which.
+  'auth.unverified_account_claimed': 'Unconfirmed account claimed by the mailbox owner',
+  // One mailbox reached AUTH_EMAIL_RECIPIENT_HOURLY_CAP or _DAILY_CAP for auth
+  // email. At most one per recipient per hour; the recipient is a hash.
+  'auth.email_recipient_capped': 'Auth email to one address reached its limit',
   // Failed sign-in / MFA attempts with no visitor address (a backend that
   // does not send X-Rekey-Client-Ip) reached RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX
   // for one Application. At most one per Application per rate-limit window.

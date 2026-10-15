@@ -74,7 +74,7 @@ export function postgresBusyReason(err: unknown): PostgresBusyReason | null {
  * these messages rather than a socket error code.
  */
 const REDIS_MESSAGE_PATTERNS =
-  /Stream isn't writeable|Connection is closed|Reached the max retries per request/i;
+  /Stream isn't writeable|Connection is closed|Reached the max retries per request|Command timed out/i;
 
 /** Socket-level codes that mean "nothing answered". */
 const CONNECTION_ERROR_CODES = new Set([

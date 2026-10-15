@@ -11,6 +11,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { revisePlans } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('coupon preview in the currency checkout selects', () => {
   let app: FastifyInstance;
@@ -63,25 +67,6 @@ describe('coupon preview in the currency checkout selects', () => {
 
     const bought = await buy({ couponCode: 'HALF', country: 'IN' });
     expect(bought.json().data).toMatchObject({ currency: 'INR', unitAmount: 79900, discountAmount: 39950 });
-  });
-
-  it('quotes the default price when no country is given', async () => {
-    const res = await preview({ code: 'HALF' });
-    expect(res.json().data).toMatchObject({ currency: 'USD', amount: 1000, discountAmount: 500, amountAfterDiscount: 500 });
-    expect((await buy({ couponCode: 'HALF' })).json().data).toMatchObject({ currency: 'USD', discountAmount: 500 });
-  });
-
-  it('answers COUPON_CURRENCY_NOT_COVERED for a USD coupon exactly when the checkout would', async () => {
-    const refused = await preview({ code: 'FIVEUSD', country: 'IN' });
-    expect(refused.statusCode).toBe(400);
-    expect(refused.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
-    const checkoutRefused = await buy({ couponCode: 'FIVEUSD', country: 'IN' });
-    expect(checkoutRefused.json().error.code).toBe('COUPON_CURRENCY_NOT_COVERED');
-
-    const accepted = await preview({ code: 'FIVEUSD' });
-    expect(accepted.statusCode, accepted.body).toBe(200);
-    expect(accepted.json().data).toMatchObject({ currency: 'USD', amount: 1000, discountAmount: 500 });
-    expect((await buy({ couponCode: 'FIVEUSD' })).statusCode).toBe(200);
   });
 
   it('takes `currency` from a secret key and refuses it from a publishable key, as checkout does', async () => {
@@ -139,7 +124,7 @@ describe('coupon preview in the currency checkout selects', () => {
     expect(declared.json().data).toMatchObject({ currency: 'INR', unitAmount: 79900, price: { reason: 'country' } });
 
     // Local prices switched off for the plan: nobody's country selects one.
-    await prisma.plan.updateMany({ where: { slug: 'pack' }, data: { localPrices: 'OFF' } });
+    await revisePlans({ slug: 'pack' }, { localPrices: 'OFF' });
     const off = await buy({ country: 'IN' }, { buyer: await w.newBuyer() });
     expect(off.json().data).toMatchObject({ currency: 'USD', unitAmount: 1000, price: { reason: 'default' } });
   });

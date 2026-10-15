@@ -806,9 +806,8 @@ export interface WorkspaceLimitsDto {
     /** Production applications that are RUNNING, not disabled. */
     productionApps: number;
     activeEndUsers: number;
-    /** Absent from an API older than lists. */
-    contacts?: number;
-    contactLists?: number;
+    contacts: number;
+    contactLists: number;
   };
 }
 
@@ -914,7 +913,12 @@ export function getSubscriptionGrantsMode(): Promise<'enabled' | 'disabled'> {
 // ---------- DTOs ----------
 
 export interface MeDto {
-  user: { id: string; email: string; name: string | null };
+  user: { id: string; email: string; name: string | null; emailVerified: boolean };
+  /**
+   * Whether an unconfirmed address locks anything on this deployment
+   * (`required`), and whether it can mail a confirmation link (`byEmail`).
+   */
+  emailConfirmation: { required: boolean; byEmail: boolean };
   memberships: Array<{
     tenantId: string;
     tenantName: string;
@@ -943,16 +947,16 @@ export interface ApplicationRow {
    * production application means it was created production rather than
    * promoted, the two are different events and only one has a date.
    */
-  promotedAt?: string | null;
+  promotedAt: string | null;
   /**
    * Set while the application is frozen. A disabled application refuses every
    * end-user request, serves no hosted portal and sends no mail, while every
    * operator surface (including this panel) stays fully readable. Nothing is
    * deleted; re-enabling restores it exactly.
    */
-  disabledAt?: string | null;
-  /** The operator's own note recorded at the time of the freeze. */
-  disabledReason?: string | null;
+  disabledAt: string | null;
+  /** The operator's own note recorded at the time of the freeze, or null. */
+  disabledReason: string | null;
   publicKey: string;
   /** Previous publishable key during a rotation grace window (null otherwise). */
   previousPublicKey?: string | null;
@@ -1037,21 +1041,18 @@ export interface ApplicationRow {
   mcpUrl?: string;
   /**
    * Origin of this deployment's hosted portal (the API's PUBLIC_PORTAL_URL),
-   * or null when it runs none. Absent from APIs that predate the field.
+   * or null when it runs none. Sent by the single-Application read only, so
+   * a list row has none.
    */
   portalBaseUrl?: string | null;
   /**
    * How the caller reached this Application and their effective scopes on it.
    * The panel renders navigation from `scopes`: a section whose scope is
-   * absent is not shown, rather than shown and refused. Optional only for the
-   * moment between deploys; the API always sends it.
+   * absent is not shown, rather than shown and refused.
    */
-  access?: { level: string; scopes: string[] };
-  /**
-   * IANA zone the Users overview counts days in. Arrives with the analytics
-   * API, so its absence also means that API is not there yet.
-   */
-  reportingTimezone?: string;
+  access: { level: string; scopes: string[] };
+  /** IANA zone the Users overview counts days in. */
+  reportingTimezone: string;
   /**
    * Only on list rows fetched with `include=summary`. Each field is left out
    * when the caller may not read it, so absent means "unknown", not zero.
@@ -1089,9 +1090,8 @@ export interface ApplicationStatsRow {
     creditsOutstanding: number;
     usageLast30d: number;
   };
-  /** Absent from an API older than the activity columns. */
-  activeUsers?: { d1: number; d7: number; d30: number };
-  activitySeries?: Array<{ date: string; count: number }>;
+  activeUsers: { d1: number; d7: number; d30: number };
+  activitySeries: Array<{ date: string; count: number }>;
 }
 
 export interface SecurityEventRow {
@@ -1101,10 +1101,9 @@ export interface SecurityEventRow {
   actorId: string | null;
   /**
    * The actor's email, resolved by the API when the log is read (operator
-   * account or end-user). Absent from an API older than this panel during a
-   * rolling deploy, which `resolveActorEmails` covers.
+   * account or end-user). Null when there is no one to name.
    */
-  actorEmail?: string | null;
+  actorEmail: string | null;
   applicationId: string | null;
   ip: string | null;
   userAgent: string | null;
@@ -1437,20 +1436,19 @@ export interface EndUserRow {
   emailVerified: boolean;
   role: string;
   metadata: Record<string, unknown> | null;
-  /** Absent from an older API. */
-  bannedAt?: string | null;
+  bannedAt: string | null;
   createdAt: string;
-  /** Last credential sign-in; null if never. Absent from an API older than the column. */
-  lastSignedInAt?: string | null;
-  /** Platform of the latest sign-in; null if never. Absent from an older API. */
-  lastPlatform?: string | null;
-  /** Profile answers keyed by field key. Absent from an older API. */
-  profile?: Record<string, string | number | boolean>;
-  /** UTC day of the last sign-in or session refresh. Absent from an API older than the field. */
-  lastActiveOn?: string | null;
-  lastCountry?: string | null;
-  /** Derived from the completion and skip times. Absent from an API older than onboarding skip. */
-  onboardingStatus?: 'pending' | 'completed' | 'skipped';
+  /** Last credential sign-in; null if never. */
+  lastSignedInAt: string | null;
+  /** Platform of the latest sign-in; null if never. */
+  lastPlatform: string | null;
+  /** Profile answers keyed by field key. */
+  profile: Record<string, string | number | boolean>;
+  /** UTC day of the last sign-in or session refresh. */
+  lastActiveOn: string | null;
+  lastCountry: string | null;
+  /** Derived from the completion and skip times. */
+  onboardingStatus: 'pending' | 'completed' | 'skipped';
 }
 
 /**
@@ -1645,10 +1643,9 @@ export interface BillingCredentialRow {
 export interface BillingProviderCapabilities {
   /**
    * false → inbound only: the operator's own billing system posting events.
-   * No checkout, no routing, no dashboard to register a webhook in. Absent
-   * (an older API) means the provider hosts a checkout.
+   * No checkout, no routing, no dashboard to register a webhook in.
    */
-  checkout?: boolean;
+  checkout: boolean;
   oneTime: boolean;
   captureStep: boolean;
   /** false → no webhook-create API (Razorpay): manual dashboard setup only. */

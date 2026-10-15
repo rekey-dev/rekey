@@ -258,6 +258,10 @@ export default async function TemplateEditorPage({
             </label>
             <SubmitButton pendingLabel="Sending…">Send test</SubmitButton>
           </ActionForm>
+          <p className="text-xs text-[var(--color-muted-fg)]">
+            Until this Application has its own email provider connected, a test can only go to your own address.
+            Test sends count toward the hourly limit of email to one address.
+          </p>
         </section>
       </div>
     </div>

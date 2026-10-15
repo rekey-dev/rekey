@@ -69,37 +69,35 @@ describe('RekeyError', () => {
 const MINIMAL_AUTH_CONFIG = { methods: ['password'], redirectUrls: [] };
 
 describe('ApplicationDtoSchema', () => {
-  it('parses the body GET /api/v1/me actually returns — no `environment`', () => {
-    // `apps/api/src/routes/me.ts` omits `environment` entirely. The field was
-    // declared required, so `rekey.applications.me()` returned `undefined`
-    // typed as a guaranteed enum, and a strict parse would have thrown.
-    const body = {
-      id: 'app_1',
-      tenantId: 'tn_1',
-      name: 'Acme',
-      slug: 'acme',
-      publicKey: 'rp_pub_x',
-      authConfig: MINIMAL_AUTH_CONFIG,
-      billingConfig: { provider: 'stripe' },
-      createdAt: new Date().toISOString(),
-    };
-    const parsed = ApplicationDtoSchema.parse(body);
-    expect(parsed.environment).toBeUndefined();
+  // What every route that returns an Application sends: `GET /api/v1/me`
+  // included. `apps/api/test/dto-required-fields-on-the-wire.test.ts` reads
+  // these off each route.
+  const body = {
+    id: 'app_1',
+    tenantId: 'tn_1',
+    name: 'Acme',
+    slug: 'acme',
+    environment: 'PRODUCTION',
+    promotedAt: null,
+    disabledAt: null,
+    disabledReason: null,
+    publicKey: 'rp_pub_x',
+    authConfig: MINIMAL_AUTH_CONFIG,
+    billingConfig: { provider: 'stripe' },
+    supportEmail: null,
+    reportingTimezone: 'UTC',
+    createdAt: new Date().toISOString(),
+  };
+
+  it('parses an Application as the API sends it', () => {
+    expect(ApplicationDtoSchema.parse(body)).toMatchObject({ environment: 'PRODUCTION', supportEmail: null, reportingTimezone: 'UTC' });
   });
 
-  it('still accepts an `environment` when a deployment does send one', () => {
-    const parsed = ApplicationDtoSchema.parse({
-      id: 'app_1',
-      tenantId: 'tn_1',
-      name: 'Acme',
-      slug: 'acme',
-      environment: 'PRODUCTION',
-      publicKey: 'rp_pub_x',
-      authConfig: MINIMAL_AUTH_CONFIG,
-      billingConfig: { provider: 'stripe' },
-      createdAt: new Date().toISOString(),
-    });
-    expect(parsed.environment).toBe('PRODUCTION');
+  it('refuses a body that leaves out a field every route sends', () => {
+    for (const field of ['environment', 'promotedAt', 'disabledAt', 'disabledReason', 'supportEmail', 'reportingTimezone'] as const) {
+      const { [field]: _left, ...rest } = body;
+      expect(ApplicationDtoSchema.safeParse(rest).success, field).toBe(false);
+    }
   });
 });
 

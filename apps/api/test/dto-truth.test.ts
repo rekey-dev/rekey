@@ -38,6 +38,9 @@ import {
   UsageRecordDtoSchema,
 } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('published DTOs describe the responses they name', () => {
   let app: FastifyInstance;

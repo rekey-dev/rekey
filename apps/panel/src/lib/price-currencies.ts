@@ -22,7 +22,7 @@ export interface ChargingProvider {
   name: string;
   label: string;
   supportedCurrencies: readonly string[] | 'all-sellable';
-  capabilities: { checkout?: boolean };
+  capabilities: { checkout: boolean };
   status: { enabled: boolean; currencies: readonly string[]; unsupportedCurrencies: readonly string[] } | null;
 }
 
@@ -39,7 +39,7 @@ export interface CurrencyChoice {
 }
 
 function hostsCheckout(provider: ChargingProvider): boolean {
-  return provider.capabilities.checkout !== false;
+  return provider.capabilities.checkout;
 }
 
 function publishes(provider: ChargingProvider, code: string): boolean {
@@ -151,7 +151,7 @@ export function toChargingProviders(providers: readonly ChargingProvider[]): Cha
     name: provider.name,
     label: provider.label,
     supportedCurrencies: provider.supportedCurrencies,
-    capabilities: provider.capabilities.checkout === undefined ? {} : { checkout: provider.capabilities.checkout },
+    capabilities: { checkout: provider.capabilities.checkout },
     status:
       provider.status === null
         ? null

@@ -44,13 +44,9 @@ import { pricedPlan } from '../billing/priced-plan.js';
 import { planNotRegisteredError } from './plan-registration.js';
 import { reportingCurrency } from '../billing/reporting-currency.js';
 import {
-  METERED_PLAN_COLUMNS,
   WITH_DEFAULT_PRICE,
   createPlanWithDefaultPrice,
-  defaultPriceColumns,
   updatePlanAndDefaultPrice,
-  withDefaultPrice,
-  withDefaultPrices,
   type DefaultPriceChange,
   type PlanWithDefaultPrice,
 } from './default-price.js';
@@ -258,7 +254,7 @@ export const plansService = {
       ...(opts?.take !== undefined ? { take: opts.take } : {}),
       ...(opts?.skip !== undefined ? { skip: opts.skip } : {}),
     });
-    return withDefaultPrices(plans);
+    return plans;
   },
 
   async countForApplication(applicationId: string, includeInactive = false): Promise<number> {
@@ -278,7 +274,7 @@ export const plansService = {
         fix: `Check the slug against the plans that exist. GET /api/v1/billing/plans lists the ones on sale; the operator sees every plan in Panel → Application → Plans (/applications/${applicationId}/plans) or with GET /api/v1/tenant/applications/${applicationId}/plans, and creates one with POST there.`,
       });
     }
-    return withDefaultPrice(plan);
+    return plan;
   },
 
   async create(input: CreatePlanInput): Promise<PlanWithDefaultPrice> {
@@ -414,8 +410,6 @@ export const plansService = {
             ? { active: false, registrationStatus: 'PENDING' as const }
             : { registrationStatus: 'NOT_REQUIRED' as const }),
           name: input.name,
-          ...defaultPriceColumns(price),
-          ...(kind === 'USAGE' && METERED_PLAN_COLUMNS),
           interval: input.interval ?? 'MONTH',
           kind,
           ...(input.licenseKind !== undefined && { licenseKind: input.licenseKind }),
@@ -442,7 +436,7 @@ export const plansService = {
           // `create_plan` tool, which advertises `metadata` and validates
           // nothing. Fixed at the single write rather than at each caller.
           metadata: stripProviderMetadata(input.metadata) as never,
-        }, tx);
+        }, price, tx);
         await recordDefaultPriceChange(tx, created, { before: null, after: created.defaultPrice, retired: null }, input.actor);
         return created;
       });
@@ -577,7 +571,7 @@ export const plansService = {
         ...(patch.localPrices !== undefined && { localPrices: patch.localPrices }),
         ...(metadata !== undefined && { metadata: metadata as object }),
       },
-      (tx, updated, _change, previous) => recordLocalPricesChange(tx, updated, previous, actor),
+      { onChange: (tx, updated, _change, previous) => recordLocalPricesChange(tx, updated, previous, actor) },
     );
   },
 
@@ -707,15 +701,17 @@ export const plansService = {
       {
         ...(patch.active !== undefined && { active: patch.active }),
         ...(patch.name !== undefined && { name: patch.name }),
-        ...(patch.price !== undefined && defaultPriceColumns(nextPrice)),
         ...(patch.interval !== undefined && { interval: patch.interval }),
         ...(nextTrialDays !== undefined && { trialDays: nextTrialDays }),
         ...(patch.localPrices !== undefined && { localPrices: patch.localPrices }),
         ...(metadata !== undefined && { metadata: metadata as object }),
       },
-      async (tx, updated, change, previous) => {
-        await recordDefaultPriceChange(tx, updated, change, actor);
-        await recordLocalPricesChange(tx, updated, previous, actor);
+      {
+        ...(patch.price !== undefined && { price: nextPrice }),
+        onChange: async (tx, updated, change, previous) => {
+          await recordDefaultPriceChange(tx, updated, change, actor);
+          await recordLocalPricesChange(tx, updated, previous, actor);
+        },
       },
     );
   },

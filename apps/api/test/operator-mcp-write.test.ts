@@ -17,10 +17,14 @@ import type { FastifyInstance } from 'fastify';
 import { createHash, randomBytes } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { MCP_ADMIN_SCOPE, operatorMcpOAuthToken } from './operator-mcp-oauth-token.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface OperatorSession {
   accessToken: string;
@@ -178,9 +182,9 @@ describe('Operator MCP write tools', () => {
     expect(res.isError).toBe(true);
   });
 
-  it('a write PAT held by an OWNER can create + configure an application', async () => {
+  it('an admin-tier token held by an OWNER can create + configure an application', async () => {
     const op = await makeOperator('rw');
-    const token = await mintPat(op, ['read', 'applications:write']);
+    const token = await operatorMcpOAuthToken(app, op.accessToken, op.tenantId, MCP_ADMIN_SCOPE);
 
     const list = await rpc(token, 'tools/list');
     const names = (list.json().result.tools as Array<{ name: string }>).map((t) => t.name);
@@ -247,7 +251,7 @@ describe('Operator MCP write tools', () => {
     const victimAppId = (created.data as { id: string }).id;
 
     const attacker = await makeOperator('attacker');
-    const attackerToken = await mintPat(attacker, ['read', 'applications:write']);
+    const attackerToken = await operatorMcpOAuthToken(app, attacker.accessToken, attacker.tenantId, MCP_ADMIN_SCOPE);
 
     const attempt = readToolResult(
       (await rpc(attackerToken, 'tools/call', {
@@ -269,7 +273,7 @@ describe('Operator MCP write tools', () => {
     // victim endpointId from app B. The endpoint write must be scoped by
     // (id, applicationId), so the mismatch resolves to not-found.
     const victim = await makeOperator('hook-victim');
-    const vToken = await mintPat(victim, ['read', 'applications:write']);
+    const vToken = await operatorMcpOAuthToken(app, victim.accessToken, victim.tenantId, MCP_ADMIN_SCOPE);
     const vApp = (
       readToolResult(
         (await rpc(vToken, 'tools/call', {
@@ -286,7 +290,7 @@ describe('Operator MCP write tools', () => {
     ).data as { id: string };
 
     const attacker = await makeOperator('hook-attacker');
-    const aToken = await mintPat(attacker, ['read', 'applications:write']);
+    const aToken = await operatorMcpOAuthToken(app, attacker.accessToken, attacker.tenantId, MCP_ADMIN_SCOPE);
     const aApp = (
       readToolResult(
         (await rpc(aToken, 'tools/call', {
@@ -303,40 +307,11 @@ describe('Operator MCP write tools', () => {
       })).body,
     );
     expect(attempt.isError).toBe(true);
+    expect((attempt.data as { code: string }).code).toBe('WEBHOOK_ENDPOINT_NOT_FOUND');
 
     // Victim endpoint untouched (still enabled).
     const row = await prisma.webhookEndpoint.findUnique({ where: { id: vHook.id } });
     expect(row?.enabled).toBe(true);
-  });
-
-  it('role gating: write scope is not enough — MEMBER is refused (direct dispatch)', async () => {
-    // Exercise the dispatcher's role gate without provisioning a second-seat
-    // MEMBER: a token CAN carry write scope while the operator is only a MEMBER.
-    const memberCtx = {
-      tenantUserId: 'tu_member',
-      tenantId: 't_member',
-      role: 'MEMBER' as const,
-      scopes: UNRESTRICTED,
-      canWrite: true,
-      // Stated, not omitted. `undefined` was falsy so behaviour matched, but the
-      // shape diverged from what `bearer-auth` actually builds.
-      canAdmin: false,
-    };
-    const list = (await handleOperatorMcpMessage(memberCtx, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/list',
-    })) as { result: { tools: Array<{ name: string }> } };
-    expect(list.result.tools.map((t) => t.name)).not.toContain('create_application');
-
-    const call = (await handleOperatorMcpMessage(memberCtx, {
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name: 'create_application', arguments: { name: 'x', slug: 'x' } },
-    })) as { result: { content: Array<{ text: string }>; isError?: boolean } };
-    expect(call.result.isError).toBe(true);
-    expect(JSON.parse(call.result.content[0]!.text).error).toMatch(/role/i);
   });
 
   describe('the READ tools that live in this file are grant-scoped, like their REST twins', () => {

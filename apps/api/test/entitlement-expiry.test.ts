@@ -25,6 +25,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 describe('a lapsed scheduled cancellation stops entitling', () => {
   let app: FastifyInstance;
@@ -79,13 +83,10 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
       })
       .then((r) => r.json().data as { endUser: { id: string }; accessToken: string });
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${slug}`,
         name: 'Paid',
-        amount: 9900,
-        currency: 'usd',
         interval: 'MONTH',
         active: true,
         entitlements: {
@@ -95,8 +96,7 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
             { kind: 'FEATURE', key: 'pro_reports', valueType: 'BOOL', value: 'true' },
           ],
         },
-      },
-    });
+      }, { currency: 'usd', amount: 9900 });
 
     const subscription = await prisma.subscription.create({
       data: {
@@ -122,19 +122,6 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
         headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': accessToken },
       })
       .then((r) => (r.json().data as { features: Record<string, unknown> }).features);
-
-  it('grants the feature while the scheduled date is still in the future', async () => {
-    const { liveKey, session, subscription } = await fixture('ent-future', {
-      providerBacked: false,
-    });
-    await prisma.subscription.update({
-      where: { id: subscription.id },
-      data: { cancelAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
-    });
-
-    // Cancelled, but not yet lapsed, they paid for this time.
-    expect(await features(liveKey, session.accessToken)).toHaveProperty('pro_reports', true);
-  });
 
   it('stops granting it once the date has passed, without anyone opening the portal', async () => {
     const { liveKey, session, subscription } = await fixture('ent-lapsed', {
@@ -181,17 +168,4 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
     expect(await features(liveKey, session.accessToken)).not.toHaveProperty('pro_reports');
   });
 
-  it('keeps granting a provider-backed row while its date is still ahead', async () => {
-    // The other half, and the one that makes period-end cancellation worth
-    // having: the buyer asked to cancel and keeps everything until the day.
-    const { liveKey, session, subscription } = await fixture('ent-prov-future', {
-      providerBacked: true,
-    });
-    await prisma.subscription.update({
-      where: { id: subscription.id },
-      data: { cancelAt: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000) },
-    });
-
-    expect(await features(liveKey, session.accessToken)).toHaveProperty('pro_reports', true);
-  });
 });

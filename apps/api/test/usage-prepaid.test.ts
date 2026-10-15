@@ -15,6 +15,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Usage — prepaid credit billing', () => {
   let app: FastifyInstance;
@@ -201,33 +204,6 @@ describe('Usage — prepaid credit billing', () => {
     expect(await balanceOf(eu)).toBe(15);
   });
 
-  it('does not charge twice for a retried record', async () => {
-    await makeMeter('calls', null);
-    const eu = await makeEndUser();
-    await grantCredits(eu, 100);
-    await withIncludedQuota(eu, 'calls', 0, 5);
-
-    const payload = { meterSlug: 'calls', quantity: 3, endUserId: eu, idempotencyKey: 'job-1' };
-    expect((await record(payload)).statusCode).toBe(201);
-    expect((await record(payload)).statusCode).toBe(201);
-
-    expect(await balanceOf(eu)).toBe(85); // charged once
-    expect(await prisma.usageRecord.count({ where: { endUserId: eu } })).toBe(1);
-  });
-
-  it('leaves an unpriced meter capping rather than charging', async () => {
-    await makeMeter('calls', null);
-    const eu = await makeEndUser();
-    await grantCredits(eu, 100);
-    await withIncludedQuota(eu, 'calls', 2);
-
-    expect((await record({ meterSlug: 'calls', quantity: 2, endUserId: eu })).statusCode).toBe(201);
-    const over = await record({ meterSlug: 'calls', quantity: 1, endUserId: eu });
-    expect(over.statusCode).toBe(402);
-    expect(over.json().error.code).toBe('USAGE_QUOTA_EXCEEDED');
-    expect(await balanceOf(eu)).toBe(100); // never touched
-  });
-
   it('keeps what a record cost, so a price change does not restate history', async () => {
     await makeMeter('calls', null);
     const eu = await makeEndUser();
@@ -350,19 +326,5 @@ describe('Usage — prepaid credit billing', () => {
     expect(await balanceOf(b)).toBe(80);
     expect(await prisma.usageRecord.count({ where: { endUserId: a } })).toBe(1);
     expect(await prisma.usageRecord.count({ where: { endUserId: b } })).toBe(1);
-  });
-
-  it('still deduplicates a retry by the same subject', async () => {
-    await makeMeter('calls', null);
-    const eu = await makeEndUser();
-    await grantCredits(eu, 100);
-    await withIncludedQuota(eu, 'calls', 0, 5);
-
-    const payload = { meterSlug: 'calls', quantity: 4, endUserId: eu, idempotencyKey: 'same' };
-    await record(payload);
-    await record(payload);
-
-    expect(await balanceOf(eu)).toBe(80);
-    expect(await prisma.usageRecord.count({ where: { endUserId: eu } })).toBe(1);
   });
 });

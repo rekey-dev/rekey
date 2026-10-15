@@ -28,7 +28,13 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { issueMcpAccessToken, verifyMcpAccessToken, type McpAccessClaims } from '../../lib/jwt.js';
-import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { unanchoredTokenEnded } from '../../lib/session-stamp.js';
+import {
+  assertBasisHolds,
+  lockEndUserCredentials,
+  sessionBasis,
+  type SessionBasis,
+} from '../../lib/session-basis.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { getOrganizationRoles } from '../../lib/organization-role-cache.js';
 import {
@@ -481,7 +487,7 @@ async function liveAccessTokenSubject(
   claims: McpAccessClaims,
 ): Promise<{ user: EndUser; organization: GrantOrganization | null } | null> {
   const user = await liveGrantSubject(applicationId, claims.sub);
-  if (!user || sessionIssuedBefore(claims, user.sessionsInvalidBefore)) return null;
+  if (!user || unanchoredTokenEnded(claims, user.sessionsInvalidBefore)) return null;
   // An organization-bound token is live only while the binding is. Checked on
   // every use, not only at refresh: the access token lives an hour, and
   // removal from an organization has to take effect before that.
@@ -578,6 +584,15 @@ export const mcpOAuthService = {
     authTime: Date;
     /** The organization chosen at consent. Only meaningful with `mcp:account`. */
     organizationId?: string | null | undefined;
+    /**
+     * What the code is issued on the strength of: `sessionsInvalidBefore` as
+     * it stood when the sign-in, consent or session behind this request was
+     * checked. The code is written holding the user's row and only while the
+     * row still carries that stamp (lib/session-basis.ts). Without it, a code
+     * written just after a claim, on a sign-in from just before it, would be
+     * exchanged for a full grant.
+     */
+    basis: SessionBasis;
   }): Promise<string> {
     if (args.organizationId && !hasScope(args.scope, MCP_SCOPE)) {
       // Callers only offer the choice for MCP grants; a binding on anything
@@ -585,20 +600,23 @@ export const mcpOAuthService = {
       throw new Error('An organization binding requires the mcp:account scope.');
     }
     const raw = randomBytes(32).toString('base64url');
-    await prisma.oAuthAuthCode.create({
-      data: {
-        codeHash: sha256(raw),
-        applicationId: args.applicationId,
-        clientId: args.clientId,
-        endUserId: args.endUserId,
-        redirectUri: args.redirectUri,
-        codeChallenge: args.codeChallenge,
-        scope: args.scope,
-        nonce: args.nonce ?? null,
-        authTime: args.authTime,
-        organizationId: args.organizationId ?? null,
-        expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
-      },
+    await prisma.$transaction(async (tx) => {
+      assertBasisHolds(args.basis, await lockEndUserCredentials(tx, args.endUserId));
+      await tx.oAuthAuthCode.create({
+        data: {
+          codeHash: sha256(raw),
+          applicationId: args.applicationId,
+          clientId: args.clientId,
+          endUserId: args.endUserId,
+          redirectUri: args.redirectUri,
+          codeChallenge: args.codeChallenge,
+          scope: args.scope,
+          nonce: args.nonce ?? null,
+          authTime: args.authTime,
+          organizationId: args.organizationId ?? null,
+          expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
+        },
+      });
     });
     return raw;
   },
@@ -624,6 +642,19 @@ export const mcpOAuthService = {
     ) {
       invalid();
     }
+    // Read before the code is spent. A claim deletes unspent codes and moves
+    // the stamp under the user's row lock, so either the spend below finds
+    // nothing, or the tokens are refused when they are written because the
+    // stamp is no longer this one.
+    const seen = await prisma.endUser.findUnique({
+      where: { id: row!.endUserId },
+      select: { sessionsInvalidBefore: true },
+    });
+    // The backstop to the check `createAuthCode` makes when it writes the
+    // code: a code whose authentication is not after the last time every
+    // session was ended stands for a sign-in that no longer counts.
+    const authenticatedAt = row!.authTime ?? row!.createdAt;
+    if (seen?.sessionsInvalidBefore && authenticatedAt <= seen.sessionsInvalidBefore) invalid();
     // Atomic single-use claim, a replayed code loses the race.
     const claimed = await prisma.oAuthAuthCode.updateMany({
       where: { id: row!.id, consumedAt: null },
@@ -645,7 +676,8 @@ export const mcpOAuthService = {
     if (organizationId && !(await grantOrganization(args.application.id, user.id, organizationId))) {
       throw organizationBindingLapsed();
     }
-    return this.issueTokens(args.application, user, row!.scope, args.clientId, organizationId, {
+    const subject = { ...user, sessionsInvalidBefore: seen?.sessionsInvalidBefore ?? null };
+    return this.issueTokens(args.application, subject, row!.scope, args.clientId, organizationId, {
       nonce: row!.nonce ?? undefined,
       // Codes minted before `auth_time` existed have none. The authorize form
       // authenticates the user seconds before the code is redeemed, so the
@@ -694,13 +726,10 @@ export const mcpOAuthService = {
     // rows minted before the column existed, those could only ever have been
     // MCP grants, which is exactly what this used to hard-code.
     const scope = outcome.token.scope ?? MCP_SCOPE;
-    let replacement;
-    try {
-      replacement = await rotateRefreshToken(outcome.token);
-    } catch {
-      throw new OAuthError('invalid_grant', 'Refresh token could not be rotated (possible reuse).');
-    }
-    await recordActivitySafely(outcome.token.endUserId, 'mcp');
+    // Minted before the rotation, and thrown away if the rotation is refused.
+    // This token names no session, so all that can end it early is its `iat`
+    // falling at or before a later stamp. Minted after the rotation commits,
+    // a claim could stamp in between and the token would outlive it.
     const access = issueMcpAccessToken({
       endUserId: outcome.token.endUserId,
       applicationId: args.application.id,
@@ -709,6 +738,13 @@ export const mcpOAuthService = {
       scope,
       organizationId,
     });
+    let replacement;
+    try {
+      replacement = await rotateRefreshToken(outcome.token);
+    } catch {
+      throw new OAuthError('invalid_grant', 'Refresh token could not be rotated (possible reuse).');
+    }
+    await recordActivitySafely(outcome.token.endUserId, 'mcp');
     // Deliberately NO `id_token` here, though OIDC Core §12.2 permits one. A
     // refresh performs no authentication: the only honest `auth_time` would be
     // the original sign-in, and re-asserting it hours later reads to a relying
@@ -751,12 +787,15 @@ export const mcpOAuthService = {
     // session /auth/refresh endpoint and only redeemable by the same client.
     // The granted scope rides along so the refresh grant can reproduce it
     // exactly instead of assuming.
-    const refresh = await issueRefreshToken(application.id, endUserId, {
-      kind: 'mcp',
-      clientId,
-      scope,
-      grantOrganizationId: organizationId,
-    });
+    const refresh = await issueRefreshToken(
+      application.id,
+      endUserId,
+      { kind: 'mcp', clientId, scope, grantOrganizationId: organizationId },
+      sessionBasis(
+        user,
+        () => new OAuthError('invalid_grant', 'Authorization code is invalid, expired, or already used.'),
+      ),
+    );
     await recordActivitySafely(user, 'mcp');
     const response: Record<string, unknown> = {
       access_token: access.token,

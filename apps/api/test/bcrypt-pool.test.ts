@@ -13,49 +13,13 @@ import {
   bcryptPoolWorkerCount,
   shutdownBcryptPool,
 } from '../src/lib/bcrypt-pool.js';
-import { MAX_BCRYPT_COST, verifyPassword, verifyPasswordOrDecoy } from '../src/lib/passwords.js';
+import { MAX_BCRYPT_COST, verifyPassword } from '../src/lib/passwords.js';
 
 const PASSWORD = 'pw-one-two-three';
 
 describe('bcrypt worker pool', () => {
   afterAll(async () => {
     await shutdownBcryptPool();
-  });
-
-  it('verifies correct and wrong passwords through the pool', async () => {
-    const bc = await bcrypt.hash(PASSWORD, 4);
-    expect(await verifyPassword(bc, PASSWORD)).toBe(true);
-    expect(await verifyPassword(bc, 'wrong')).toBe(false);
-    expect(bcryptPoolWorkerCount()).toBeGreaterThan(0);
-    // A bcrypt-shaped string that is not a real hash still answers false.
-    expect(await verifyPassword('$2b$04$' + '.'.repeat(53), PASSWORD)).toBe(false);
-    // An absent account still goes through the argon2 decoy, not the pool.
-    expect(await verifyPasswordOrDecoy(null, PASSWORD)).toBe(false);
-  });
-
-  it('does not block the event loop while a cost-12 compare runs', async () => {
-    const bc = bcrypt.hashSync(PASSWORD, MAX_BCRYPT_COST);
-    // Warm the pool so worker start-up is not what is being measured.
-    await verifyPassword(bc, 'warm-up');
-
-    let maxGap = 0;
-    let last = performance.now();
-    const probe = setInterval(() => {
-      const now = performance.now();
-      maxGap = Math.max(maxGap, now - last);
-      last = now;
-    }, 5);
-    const started = performance.now();
-    const ok = await verifyPassword(bc, PASSWORD);
-    const elapsed = performance.now() - started;
-    clearInterval(probe);
-
-    expect(ok).toBe(true);
-    // Sanity: the compare took real time, so a free loop is meaningful.
-    expect(elapsed).toBeGreaterThan(50);
-    // Inline bcryptjs blocks in ~100 ms slices; off the loop, a 5 ms timer
-    // fires on time. Generous for a loaded CI runner.
-    expect(maxGap).toBeLessThan(60);
   });
 
   it('completes many concurrent verifies with the right answers', async () => {

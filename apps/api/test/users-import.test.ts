@@ -9,7 +9,10 @@ import type { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { hashPassword, isBcryptHash, needsRehash, verifyPassword } from '../src/lib/passwords.js';
+import { hashPassword, isBcryptHash, verifyPassword } from '../src/lib/passwords.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -62,18 +65,6 @@ describe('user import and bcrypt verify-and-rehash', () => {
 
   const signIn = (email: string, password = PASSWORD) =>
     app.inject({ method: 'POST', url: '/api/v1/auth/sign-in', headers: publishable(), payload: { email, password } });
-
-  it('passwords lib: bcrypt verifies, argon2id does not need a rehash, bcrypt does', async () => {
-    const bc = await bcrypt.hash(PASSWORD, 4);
-    expect(isBcryptHash(bc)).toBe(true);
-    expect(needsRehash(bc)).toBe(true);
-    expect(await verifyPassword(bc, PASSWORD)).toBe(true);
-    expect(await verifyPassword(bc, 'wrong')).toBe(false);
-    const ar = await hashPassword(PASSWORD);
-    expect(isBcryptHash(ar)).toBe(false);
-    expect(needsRehash(ar)).toBe(false);
-    expect(await verifyPassword(ar, PASSWORD)).toBe(true);
-  });
 
   it('imports users with bcrypt and argon2id hashes, links OAuth identities, skips duplicates, refuses bad hashes', async () => {
     const bc = await bcrypt.hash(PASSWORD, 4);

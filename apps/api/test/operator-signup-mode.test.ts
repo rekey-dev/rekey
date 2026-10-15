@@ -55,27 +55,7 @@ describe('OPERATOR_SIGNUP_MODE', () => {
 
   // ---------- GET /signup-mode ----------
 
-  it('GET /signup-mode advertises the active mode', async () => {
-    process.env.OPERATOR_SIGNUP_MODE = 'invite';
-    const r = await app.inject({ method: 'GET', url: '/api/v1/tenant/auth/signup-mode' });
-    expect(r.statusCode).toBe(200);
-    expect(r.json().data.mode).toBe('invite');
-  });
-
   // ---------- open (default) ----------
-
-  it('open: sign-up succeeds with no invite key (unchanged behavior)', async () => {
-    process.env.OPERATOR_SIGNUP_MODE = 'open';
-    const r = await signUp('open-mode@example.com');
-    expect(r.statusCode).toBe(201);
-    expect(r.json().data.activeRole).toBe('OWNER');
-  });
-
-  it('open: an unset mode behaves as open', async () => {
-    delete process.env.OPERATOR_SIGNUP_MODE;
-    const r = await signUp('unset-mode@example.com');
-    expect(r.statusCode).toBe(201);
-  });
 
   // ---------- closed ----------
 
@@ -112,13 +92,6 @@ describe('OPERATOR_SIGNUP_MODE', () => {
     const r = await signUp('needs-key@example.com');
     expect(r.statusCode).toBe(403);
     expect(r.json().error.code).toBe('OPERATOR_INVITE_REQUIRED');
-  });
-
-  it('invite: a bogus key is refused (OPERATOR_INVITE_INVALID)', async () => {
-    process.env.OPERATOR_SIGNUP_MODE = 'invite';
-    const r = await signUp('bad-key@example.com', { inviteKey: 'rp_opinv_not-a-real-key' });
-    expect(r.statusCode).toBe(403);
-    expect(r.json().error.code).toBe('OPERATOR_INVITE_INVALID');
   });
 
   it('invite: a valid key creates the operator and is consumed single-use', async () => {

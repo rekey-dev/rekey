@@ -17,6 +17,9 @@ import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const lookup = vi.hoisted(() => ({ keys: [] as string[], list: vi.fn() }));
 

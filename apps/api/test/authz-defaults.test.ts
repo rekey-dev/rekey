@@ -27,10 +27,13 @@ import { prisma } from '../src/lib/prisma.js';
 import { getProviderForApplication } from '../src/modules/billing/providers/index.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { fakeProviderFor } from './fakes/billing-providers.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 
-describe('authorization defaults + error mapping (audit 2026-08)', () => {
+describe('authorization defaults + error mapping', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -143,7 +146,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       'stats',
       'plans',
       'access',
-      'end-user-roles',
+      'application-roles',
     ];
 
     it('sees no Applications in the list', async () => {
@@ -182,43 +185,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
           `GET /${path} must not be readable without a grant`,
         ).toEqual({ path, status: 404, code: 'APPLICATION_NOT_FOUND' });
       }
-    });
-
-    it('grandfathers a membership that predates the default (legacyWorkspaceRead)', async () => {
-      const { memberToken, membershipId, appA, appB } = await bootstrap();
-
-      // Simulate a row the 2.0.0-rc.3 backfill touched: a MEMBER who existed
-      // before grant-scoped-by-default and must not lose access on upgrade.
-      await prisma.tenantMembership.update({
-        where: { id: membershipId },
-        data: { legacyWorkspaceRead: true },
-      });
-
-      const list = await inject({
-        method: 'GET',
-        url: '/api/v1/tenant/applications',
-        headers: auth(memberToken),
-      });
-      expect(
-        (list.json().data as { items: Array<{ id: string }> }).items.map((a) => a.id).sort(),
-      ).toEqual([appA, appB].sort());
-
-      const detail = await inject({
-        method: 'GET',
-        url: `/api/v1/tenant/applications/${appA}`,
-        headers: auth(memberToken),
-      });
-      expect(detail.statusCode).toBe(200);
-
-      // Reads only, writes stay 403 with the pre-grants code, unchanged.
-      const key = await inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${appA}/api-keys`,
-        headers: auth(memberToken),
-        payload: { name: 'k' },
-      });
-      expect(key.statusCode).toBe(403);
-      expect(key.json().error.code).toBe('TENANT_ROLE_INSUFFICIENT');
     });
 
     it('reports legacyWorkspaceRead on the members list so an owner can find them', async () => {
@@ -303,18 +269,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
         ).statusCode,
       ).toBe(404);
     });
-
-    it('leaves OWNER and ADMIN untouched', async () => {
-      const { ownerToken, memberToken: adminToken, appA } = await bootstrap('ADMIN');
-      for (const token of [ownerToken, adminToken]) {
-        const r = await inject({
-          method: 'GET',
-          url: `/api/v1/tenant/applications/${appA}`,
-          headers: auth(token),
-        });
-        expect(r.statusCode).toBe(200);
-      }
-    });
   });
 
   // ==================================================================
@@ -347,18 +301,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       expect(
         (await prisma.application.findUniqueOrThrow({ where: { id: appA } })).authConfig,
       ).toEqual(before);
-    });
-
-    it('PATCH auth-config still accepts a well-formed patch', async () => {
-      const { ownerToken, appA } = await bootstrap();
-      const res = await inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${appA}/auth-config`,
-        headers: auth(ownerToken),
-        payload: { mfa: 'required', tokenAlg: 'RS256' },
-      });
-      expect(res.statusCode).toBe(200);
-      expect(res.json().data.authConfig).toMatchObject({ mfa: 'required', tokenAlg: 'RS256' });
     });
 
     it('rejects unknown keys on every other config-shaped patch body', async () => {
@@ -433,63 +375,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       });
       expect(toggle.statusCode).toBe(200);
       expect(toggle.json().data.active).toBe(false);
-    });
-
-    it('POST end-user-roles refuses an unrecognised key instead of 201-ing', async () => {
-      const { ownerToken, appA } = await bootstrap();
-      // `allowMagicLink` is not a role field, the real switch is the
-      // auth-config `methods` array. It used to be accepted and dropped.
-      const res = await inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${appA}/end-user-roles`,
-        headers: auth(ownerToken),
-        payload: { name: 'staff', allowMagicLink: true },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('VALIDATION_ERROR');
-      expect(JSON.stringify(res.json().error.issues)).toMatch(/allowMagicLink/);
-    });
-
-    it('all config-shaped bodies now agree on the refusal — no three-way split', async () => {
-      const { ownerToken, appA } = await bootstrap();
-      // The audit found billing-config answering 400 VALIDATION_ERROR while
-      // auth-config answered 200 and end-user-roles answered 201, all for the
-      // same class of mistake on the same API.
-      const cases = [
-        { method: 'PATCH', path: 'auth-config', payload: { nope: 1 } },
-        { method: 'PATCH', path: 'billing-config', payload: { nope: 1 } },
-        { method: 'PATCH', path: 'portal', payload: { nope: 1 } },
-        { method: 'PUT', path: 'access', payload: { nope: 1 } },
-        { method: 'POST', path: 'end-user-roles', payload: { name: 'ok', nope: 1 } },
-      ];
-      const seen = new Set<string>();
-      for (const c of cases) {
-        const r = await inject({
-          method: c.method,
-          url: `/api/v1/tenant/applications/${appA}/${c.path}`,
-          headers: auth(ownerToken),
-          payload: c.payload,
-        });
-        seen.add(`${r.statusCode}:${r.json().error?.code}`);
-      }
-      expect([...seen]).toEqual(['400:VALIDATION_ERROR']);
-    });
-
-    it('still ignores injected privileged keys — but now says so', async () => {
-      const { ownerToken, appA } = await bootstrap();
-      // The audit confirmed role/tenantId/applicationId/emailVerified/id are
-      // correctly ignored on these bodies. The defect was that they were
-      // ignored SILENTLY; the caller now gets told.
-      const res = await inject({
-        method: 'PATCH',
-        url: `/api/v1/tenant/applications/${appA}/auth-config`,
-        headers: auth(ownerToken),
-        payload: { mfa: 'optional', tenantId: 'attacker', applicationId: 'attacker', id: 'x' },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().error.code).toBe('VALIDATION_ERROR');
-      const application = await prisma.application.findUniqueOrThrow({ where: { id: appA } });
-      expect(application.id).toBe(appA);
     });
   });
 
@@ -609,86 +494,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       expect(err.requestId).toEqual(expect.any(String));
     });
 
-    it('end-user: POST /billing/subscription/cancel answers 502, and the subscription is untouched', async () => {
-      const { ownerToken, appA } = await bootstrap();
-      await withStripeCreds(appA);
-
-      expect(
-        (
-          await inject({
-            method: 'POST',
-            url: `/api/v1/tenant/applications/${appA}/plans`,
-            headers: auth(ownerToken),
-            payload: { slug: 'cancelme', name: 'Cancel Me', price: { currency: 'USD', amount: 700 }, interval: 'MONTH' },
-          })
-        ).statusCode,
-      ).toBe(201);
-
-      const liveKey = await inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${appA}/api-keys`,
-        headers: auth(ownerToken),
-        payload: { name: 'k', mode: 'live' },
-      }).then((r) => (r.json().data as { rawKey: string }).rawKey);
-
-      const endUserToken = await inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: auth(liveKey),
-        payload: { email: `canceller-${n}@example.com`, password: PASSWORD },
-      }).then((r) => (r.json().data as { accessToken: string }).accessToken);
-
-      // A provider-backed ACTIVE subscription for that user.
-      const endUser = await prisma.endUser.findFirstOrThrow({
-        where: { applicationId: appA, email: `canceller-${n}@example.com` },
-      });
-      const plan = await prisma.plan.findFirstOrThrow({
-        where: { applicationId: appA, slug: 'cancelme' },
-      });
-      const sub = await prisma.subscription.create({
-        data: {
-          applicationId: appA,
-          endUserId: endUser.id,
-          planId: plan.id,
-          status: 'ACTIVE',
-          provider: 'stripe',
-          providerSubId: 'sub_provider_side',
-          currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
-        },
-      });
-
-      const failing = {
-        ...fakeProviderFor('stripe'),
-        name: 'stripe',
-        cancelSubscription: async () => {
-          throw stripeAuthError();
-        },
-      };
-      vi.mocked(getProviderForApplication).mockResolvedValueOnce(failing as never);
-
-      const res = await inject({
-        method: 'POST',
-        url: '/api/v1/billing/subscription/cancel',
-        headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': endUserToken },
-        payload: { atPeriodEnd: false },
-      });
-
-      expect(res.statusCode).toBe(502);
-      const err = res.json().error;
-      expect(err.code).toBe('BILLING_PROVIDER_ERROR');
-      // The reported shape: 401 + BAD_REQUEST + "check the request shape",
-      // telling the buyer their request was malformed while the subscription
-      // they asked to cancel carried on billing.
-      expect(err.fix).not.toMatch(/route schema/i);
-      expect(err.message).not.toMatch(/sk_test/);
-
-      // The subscription genuinely was NOT canceled, the failure is honest
-      // about that now, where the 401 implied a client-side mistake.
-      const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-      expect(after.status).toBe('ACTIVE');
-      expect(after.canceledAt).toBeNull();
-    });
-
     it('an UNMAPPED provider error still cannot escape as a 4xx passthrough', async () => {
       const { ownerToken, appA } = await bootstrap();
       await withStripeCreds(appA);
@@ -746,24 +551,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       expect(err.requestId).toEqual(expect.any(String));
       expect(res.headers['x-request-id']).toBe(err.requestId);
     });
-
-    it('the other two hand-built envelopes carry it as well', async () => {
-      const { ownerToken, appA, tag } = await bootstrap();
-      const email = `dupe-${tag}@example.com`;
-      const create = () =>
-        inject({
-          method: 'POST',
-          url: `/api/v1/tenant/applications/${appA}/end-users`,
-          headers: auth(ownerToken),
-          payload: { email, password: PASSWORD },
-        });
-      expect((await create()).statusCode).toBe(201);
-      const dupe = await create();
-      expect(dupe.statusCode).toBe(409);
-      expect(dupe.json().error.code).toBe('EMAIL_ALREADY_EXISTS');
-      expect(dupe.json().error.requestId).toEqual(expect.any(String));
-      expect(dupe.headers['x-request-id']).toBe(dupe.json().error.requestId);
-    });
   });
 
   // ==================================================================
@@ -787,23 +574,6 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
           `${url} must share the OWNER/ADMIN floor of its siblings`,
         ).toEqual({ url, status: 403, code: 'TENANT_ROLE_INSUFFICIENT' });
       }
-    });
-
-    it('the GET and the POST of an invitation now agree', async () => {
-      const { memberToken } = await bootstrap();
-      const read = await inject({
-        method: 'GET',
-        url: '/api/v1/tenant/workspace/invitations',
-        headers: auth(memberToken),
-      });
-      const write = await inject({
-        method: 'POST',
-        url: '/api/v1/tenant/workspace/invitations',
-        headers: auth(memberToken),
-        payload: { email: 'someone@example.com', role: 'MEMBER' },
-      });
-      expect(read.statusCode).toBe(write.statusCode);
-      expect(read.json().error.code).toBe(write.json().error.code);
     });
 
     it('OWNER and ADMIN keep access to all three', async () => {

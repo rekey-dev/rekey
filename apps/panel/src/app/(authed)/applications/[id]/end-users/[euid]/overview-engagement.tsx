@@ -54,13 +54,11 @@ export function EngagementTiles({
         footer={
           !activity.lastActiveOn
             ? 'not active yet'
-            : activity.last63
-              ? `${activity.activeDaysLast7} in the last 7 · ${activity.last63.filter(Boolean).length} in 9 weeks`
-              : `${activity.activeDaysLast7} in the last 7 · last ${activity.lastActiveOn}`
+            : `${activity.activeDaysLast7} in the last 7 · ${activity.last63.filter(Boolean).length} in 9 weeks`
         }
         href={`${base}/security`}
       >
-        {activity.last63 ? <ActivityGrid days={activity.last63} /> : <ActivityStrip days={activity.last30} />}
+        <ActivityGrid days={activity.last63} />
       </StatTile>
       <StatTile
         title="Platforms"
@@ -97,22 +95,6 @@ function ActivityGrid({ days }: { days: boolean[] }): React.JSX.Element {
           key={i}
           className={`h-2 rounded-[2px] ${
             on ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-muted)] ring-1 ring-inset ring-[var(--color-border)]'
-          }`}
-        />
-      ))}
-    </span>
-  );
-}
-
-/** One cell per day, oldest left, today right. */
-function ActivityStrip({ days }: { days: boolean[] }): React.JSX.Element {
-  return (
-    <span className="mt-1 flex gap-[2px]" aria-label={`${days.filter(Boolean).length} active days in the last 30`}>
-      {days.map((active, i) => (
-        <span
-          key={i}
-          className={`h-3 flex-1 rounded-[2px] ${
-            active ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-muted)] ring-1 ring-inset ring-[var(--color-border)]'
           }`}
         />
       ))}

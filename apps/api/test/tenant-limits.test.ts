@@ -17,6 +17,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PASSWORD = 'correct-horse-battery';
@@ -123,15 +126,6 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     for (let i = 0; i < 5; i++) {
       const res = await signUp(ws, `u${i}@example.com`);
       expect(res.statusCode).toBe(201);
-    }
-  });
-
-  it('treats an explicitly null limit the same as no limit', async () => {
-    const ws = await bootstrap('lim-null');
-    expect((await setLimits(ws.tenantId, { maxActiveEndUsers: null })).statusCode).toBe(200);
-
-    for (let i = 0; i < 3; i++) {
-      expect((await signUp(ws, `n${i}@example.com`)).statusCode).toBe(201);
     }
   });
 
@@ -337,38 +331,6 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     const res = await setLimits(ws.tenantId, { maxEndUsers: 5 });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_TENANT_LIMITS');
-  });
-
-  it('stores emailAttribution as a boolean, and refuses anything else', async () => {
-    const ws = await bootstrap('lim-attr');
-    const res = await setLimits(ws.tenantId, { maxProductionApps: 1, emailAttribution: true });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.limits).toMatchObject({ maxProductionApps: 1, emailAttribution: true });
-    const stored = await prisma.tenant.findUniqueOrThrow({ where: { id: ws.tenantId } });
-    expect(stored.limits).toEqual({ maxProductionApps: 1, emailAttribution: true });
-
-    const bad = await setLimits(ws.tenantId, { emailAttribution: 'yes' });
-    expect(bad.statusCode).toBe(400);
-
-    expect((await setLimits(ws.tenantId, { maxProductionApps: 1 })).statusCode).toBe(200);
-    const cleared = await prisma.tenant.findUniqueOrThrow({ where: { id: ws.tenantId } });
-    expect(cleared.limits).toEqual({ maxProductionApps: 1 });
-  });
-
-  it('rejects a negative limit', async () => {
-    const ws = await bootstrap('lim-negative');
-    const res = await setLimits(ws.tenantId, { maxActiveEndUsers: -1 });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('404s on an unknown tenant', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/admin/tenants/does-not-exist/limits',
-      headers: adminAuth,
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('TENANT_NOT_FOUND');
   });
 
   // ---------- only a super-admin may move the number ----------

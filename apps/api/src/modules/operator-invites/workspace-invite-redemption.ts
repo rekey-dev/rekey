@@ -11,6 +11,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { OPERATOR_INVITE_PREFIX, hashOperatorInviteToken } from '../../lib/operator-invite.js';
 import { issueTenantRefreshToken } from '../../lib/tenant-refresh-tokens.js';
+import { operatorSessionEndedMeanwhile } from '../../lib/session-refusals.js';
 import { issueTenantAccessToken } from '../../lib/tenant-jwt.js';
 
 /** True for a raw token minted as an operator invite rather than a workspace invitation. */
@@ -116,7 +117,12 @@ export async function previewWorkspaceInvite(rawToken: string): Promise<{
  * const { membership, accessToken } = await redeemWorkspaceInvite({ rawToken, tenantUserId });
  * ```
  */
-export async function redeemWorkspaceInvite(args: { rawToken: string; tenantUserId: string }): Promise<{
+export async function redeemWorkspaceInvite(args: {
+  rawToken: string;
+  tenantUserId: string;
+  /** `req.tenantSessionStamp`: the stamp the session middleware admitted this request against. */
+  sessionStamp: Date | null;
+}): Promise<{
   membership: TenantMembership;
   inviteId: string;
   accessToken: string;
@@ -155,7 +161,12 @@ export async function redeemWorkspaceInvite(args: { rawToken: string; tenantUser
         data: { tenantUserId: args.tenantUserId, tenantId: row.tenantId, role: row.role },
       }));
 
-    const refresh = await issueTenantRefreshToken(args.tenantUserId, { activeTenantId: row.tenantId }, tx);
+    const refresh = await issueTenantRefreshToken(
+      args.tenantUserId,
+      { activeTenantId: row.tenantId },
+      { sessionsInvalidBefore: args.sessionStamp, refusal: operatorSessionEndedMeanwhile },
+      tx,
+    );
     const access = issueTenantAccessToken(args.tenantUserId, row.tenantId, membership.role, {
       sessionId: refresh.record.sessionId,
     });

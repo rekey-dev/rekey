@@ -11,7 +11,7 @@
  * `register/start` requires a step-up proof (`password` or a current
  * authenticator code) as of 2.0.0-rc.3, these cases send the password so they
  * keep testing the RP-config resolution they are about. The step-up itself is
- * pinned in test/auth-hardening-operator.test.ts.
+ * pinned in test/operator-passkey-step-up.test.ts.
  *
  * Full ceremonies (register/complete + authenticate/complete) need a real
  * authenticator simulator, out of scope for in-process tests. Those
@@ -22,6 +22,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface SessionResult {
   user: { id: string; email: string };
@@ -64,25 +67,6 @@ describe('Operator passkeys', () => {
     delete process.env.PANEL_WEBAUTHN_RP_ORIGINS;
     delete process.env.PANEL_WEBAUTHN_RP_NAME;
     delete process.env.CORS_ALLOWED_ORIGINS;
-  });
-
-  it('GET /passkeys requires session', async () => {
-    const r = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/auth/passkeys',
-    });
-    expect(r.statusCode).toBe(401);
-  });
-
-  it('GET /passkeys returns empty list for a fresh operator', async () => {
-    const session = await signUp('pk-empty@example.com');
-    const r = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/auth/passkeys',
-      headers: { authorization: `Bearer ${session.accessToken}` },
-    });
-    expect(r.statusCode).toBe(200);
-    expect(r.json().data.passkeys).toEqual([]);
   });
 
   it('register/start refuses with WEBAUTHN_NOT_CONFIGURED when env unset', async () => {

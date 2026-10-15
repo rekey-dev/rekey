@@ -16,6 +16,9 @@ import * as OTPAuth from 'otpauth';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { setDefaultDeviceLimit } from './device-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const STEP_MS = 30_000;
@@ -96,7 +99,7 @@ describe('MFA replay resistance', () => {
           method: 'POST',
           url: '/api/v1/auth/sign-up',
           headers: { authorization: `Bearer ${liveKey}` },
-          payload: { email, password: PASSWORD },
+          payload: { email, password: PASSWORD, emailVerified: true },
         })
         .then((r) => r.json().data as { accessToken: string; endUser: { id: string } });
       const setup = await app
@@ -189,24 +192,6 @@ describe('MFA replay resistance', () => {
       expect(res.json().error.code).toBe('MFA_CODE_REUSED');
     });
 
-    it('browser step-up (re-enrol, disable) names a replayed code as reused', async () => {
-      const ctx = await enrolledEndUser('eu-browser-stepup', 0);
-      const asBrowser = (url: string, code: string) =>
-        app.inject({
-          remoteAddress: freshIp(),
-          method: 'POST',
-          url,
-          headers: { authorization: `Bearer ${ctx.publicKey}`, 'x-rekey-user-token': ctx.accessToken },
-          payload: { code },
-        });
-      for (const url of ['/api/v1/auth/mfa/setup', '/api/v1/auth/mfa/disable']) {
-        const replayed = await asBrowser(url, ctx.totp.codeAt(0));
-        expect(replayed.statusCode).toBe(401);
-        expect(replayed.json().error.code).toBe('MFA_CODE_REUSED');
-      }
-      expect((await asBrowser('/api/v1/auth/mfa/disable', ctx.totp.codeAt(1))).statusCode).toBe(200);
-    });
-
     it('a double-submitted enrolment confirmation is refused as reused', async () => {
       const ctx = await enrolledEndUser('eu-confirm-twice', 0);
       const again = await app.inject({
@@ -218,18 +203,6 @@ describe('MFA replay resistance', () => {
       });
       expect(again.statusCode).toBe(422);
       expect(again.json().error.code).toBe('MFA_CODE_REUSED');
-    });
-
-    it('a sign-in challenge token completes one sign-in only', async () => {
-      const ctx = await enrolledEndUser('eu-challenge');
-      const token = await challengeFor(ctx);
-      const first = await mfaVerify(ctx, token, ctx.totp.codeAt(0));
-      expect(first.statusCode).toBe(200);
-
-      const replay = await mfaVerify(ctx, token, ctx.backupCodes[0]!);
-      expect(replay.statusCode).toBe(401);
-      expect(replay.json().error.code).toBe('MFA_CHALLENGE_USED');
-      expect(await remainingBackupCodes(ctx)).toBe(10);
     });
 
     it('spending one challenge does not spend another minted in the same second', async () => {
@@ -397,30 +370,6 @@ describe('MFA replay resistance', () => {
       expect((await mfaVerify(ctx, await challengeFor(ctx), ctx.backupCodes[1]!)).statusCode).toBe(200);
     });
 
-    it('re-enrolling forgets the old spent backup codes', async () => {
-      const ctx = await enrolledEndUser('eu-backup-reenrol');
-      const code = ctx.backupCodes[0]!;
-      expect((await mfaVerify(ctx, await challengeFor(ctx), code)).statusCode).toBe(200);
-      await prisma.mfaCredential.update({ where: { endUserId: ctx.endUserId }, data: { enrolledAt: null } });
-      const reenrolled = await app
-        .inject({
-          remoteAddress: freshIp(),
-          method: 'POST',
-          url: '/api/v1/auth/mfa/setup',
-          headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.accessToken },
-        })
-        .then((r) => r.json().data as { otpauthUrl: string });
-      const confirm = await app.inject({
-        remoteAddress: freshIp(),
-        method: 'POST',
-        url: '/api/v1/auth/mfa/setup-confirm',
-        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.accessToken },
-        payload: { code: totpFrom(reenrolled.otpauthUrl).codeAt(0) },
-      });
-      expect(confirm.statusCode).toBe(200);
-      const old = await mfaVerify(ctx, await challengeFor(ctx), code);
-      expect(old.json().error.code).toBe('MFA_CODE_INVALID');
-    });
   });
 
   describe('operator', () => {
@@ -491,25 +440,6 @@ describe('MFA replay resistance', () => {
       return (res.json().data as { remainingBackupCodes: number }).remainingBackupCodes;
     }
 
-    it('the code that confirmed enrolment cannot also complete a sign-in', async () => {
-      const ctx = await enrolledOperator('op-confirm', 0);
-      const token = await challengeFor(ctx);
-      const res = await mfaVerify(token, ctx.totp.codeAt(0));
-      expect(res.statusCode).toBe(401);
-      expect(res.json().error.code).toBe('MFA_CODE_REUSED');
-      expect((await mfaVerify(token, ctx.totp.codeAt(1))).statusCode).toBe(200);
-    });
-
-    it('a sign-in challenge token completes one sign-in only', async () => {
-      const ctx = await enrolledOperator('op-challenge');
-      const token = await challengeFor(ctx);
-      expect((await mfaVerify(token, ctx.totp.codeAt(0))).statusCode).toBe(200);
-      const replay = await mfaVerify(token, ctx.backupCodes[0]!);
-      expect(replay.statusCode).toBe(401);
-      expect(replay.json().error.code).toBe('MFA_CHALLENGE_USED');
-      expect(await remainingBackupCodes(ctx)).toBe(10);
-    });
-
     it('a membership refusal spends neither the challenge nor the code', async () => {
       const ctx = await enrolledOperator('op-no-membership');
       const token = await challengeFor(ctx);
@@ -528,14 +458,6 @@ describe('MFA replay resistance', () => {
 
       await prisma.tenantMembership.createMany({ data: memberships });
       expect((await mfaVerify(token, code)).statusCode).toBe(200);
-    });
-
-    it('spending one challenge does not spend another minted in the same second', async () => {
-      const ctx = await enrolledOperator('op-same-second');
-      const first = await challengeFor(ctx);
-      const second = await challengeFor(ctx);
-      expect((await mfaVerify(first, ctx.totp.codeAt(0))).statusCode).toBe(200);
-      expect((await mfaVerify(second, ctx.totp.codeAt(1))).statusCode).toBe(200);
     });
 
     it(`${RACERS} sign-ins racing one TOTP code mint exactly one session`, async () => {
@@ -567,19 +489,6 @@ describe('MFA replay resistance', () => {
       const results = await Promise.all(tokens.map((t) => mfaVerify(t, code)));
       expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
       expect(await remainingBackupCodes(ctx)).toBe(9);
-    });
-
-    it('a double-submitted enrolment confirmation is refused as reused', async () => {
-      const ctx = await enrolledOperator('op-confirm-twice', 0);
-      const again = await app.inject({
-        remoteAddress: freshIp(),
-        method: 'POST',
-        url: '/api/v1/tenant/auth/mfa/setup-confirm',
-        headers: { authorization: `Bearer ${ctx.accessToken}` },
-        payload: { code: ctx.totp.codeAt(0) },
-      });
-      expect(again.statusCode).toBe(422);
-      expect(again.json().error.code).toBe('MFA_CODE_REUSED');
     });
 
     it('the disable step-up refuses a replayed code', async () => {

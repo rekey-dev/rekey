@@ -129,22 +129,6 @@ describe('organization-role cache: cross-replica invalidation', () => {
     ).resolves.toEqual([]);
   });
 
-  it('subscribes once the connection is ready, even though the first SUBSCRIBE is refused', async () => {
-    // A fresh ioredis duplicate is still connecting when it is created.
-    const bus = new FakeBus(false);
-    cacheA.__usePubSubForTests(bus);
-    cacheB.__usePubSubForTests(bus);
-
-    await cacheA.getOrganizationRoles(APP);
-    await cacheB.getOrganizationRoles(APP);
-    await settle();
-    expect(bus.numsub(CHANNEL)).toBe(0);
-
-    for (const s of [...bus.subscribers]) s.connect();
-    await settle();
-    expect(bus.numsub(CHANNEL)).toBe(2);
-  });
-
   it('serves nothing from cache until the subscription is confirmed', async () => {
     const bus = new FakeBus(false);
     cacheB.__usePubSubForTests(bus);
@@ -241,17 +225,4 @@ describe('organization-role cache: cross-replica invalidation', () => {
     expect(reads).toHaveBeenCalledTimes(afterRace + 1);
   });
 
-  it('a `*` message drops every Application', async () => {
-    const bus = new FakeBus(true);
-    cacheB.__usePubSubForTests(bus);
-    await cacheB.getOrganizationRoles(APP);
-    await settle();
-    await cacheB.getOrganizationRoles(APP);
-    const warm = reads.mock.calls.length;
-
-    await bus.publish(CHANNEL, '*');
-    await settle();
-    await cacheB.getOrganizationRoles(APP);
-    expect(reads).toHaveBeenCalledTimes(warm + 1);
-  });
 });

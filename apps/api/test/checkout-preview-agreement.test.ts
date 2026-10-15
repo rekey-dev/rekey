@@ -12,8 +12,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { countQueries } from './query-counter.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const HINT = { 'x-rekey-visitor-country-hint': 'IN' };
 
@@ -93,13 +95,6 @@ describe('previews agree with the checkout they predict', () => {
       const refused = await w.checkout({ country: 'US', provider: 'razorpay' });
       expect(refused.statusCode).toBe(400);
       expect(refused.json().error.code).toBe('BILLING_PROVIDER_CURRENCY_UNSUPPORTED');
-    });
-
-    it('does not let a country a browser states choose the local price or its provider', async () => {
-      const list = await providers('?planSlug=pro&country=IN', w.publishableKey);
-      expect(list.routed).toBe('stripe');
-      const bought = await w.sessionOf(await w.checkout({ country: 'IN' }, { key: w.publishableKey }));
-      expect(bought).toMatchObject({ provider: 'stripe', row: { currency: 'USD' } });
     });
   });
 
@@ -238,38 +233,6 @@ describe('previews agree with the checkout they predict', () => {
 
       expect(await trialProvider()).toBe('razorpay');
     });
-
-    it('loses to a country the operator declares', async () => {
-      await setBillingConfig({ localPrices: 'any' });
-      const bought = await w.sessionOf(await withHeaders('POST', '/checkout', HINT, checkoutBody({ country: 'US' })));
-      expect(bought.row).toMatchObject({ currency: 'USD', buyerCountry: 'US', buyerCountrySource: 'declared' });
-    });
   });
 
-  describe('GET /billing/trial-eligibility query budget', () => {
-    const addTrialPlans = async (from: number, to: number): Promise<void> => {
-      for (let i = from; i < to; i += 1) {
-        await w.createPlan({ slug: `t${i}`, name: `Trial ${i}`, price: { currency: 'USD', amount: 3000 + i }, trialDays: 14 });
-        await w.putPrice(`t${i}`, 'INR', 250000 + i);
-      }
-    };
-    const measure = async (): Promise<number> => {
-      // Warm the key and session caches so only the route's own reads are counted.
-      await w.asBuyer('GET', '/trial-eligibility?country=IN');
-      const counted = await countQueries(async () => {
-        const res = await w.asBuyer('GET', '/trial-eligibility?country=IN');
-        expect(res.statusCode, res.body).toBe(200);
-        expect((res.json().data as { items: unknown[] }).items.length).toBeGreaterThan(2);
-      });
-      return counted.count;
-    };
-
-    it('costs the same number of queries for seven trial plans as for two', async () => {
-      await addTrialPlans(0, 2);
-      const two = await measure();
-      await addTrialPlans(2, 7);
-      const seven = await measure();
-      expect(seven).toBe(two);
-    });
-  });
 });

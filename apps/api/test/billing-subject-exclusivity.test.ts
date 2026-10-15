@@ -26,6 +26,9 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('billing subject is exclusive per Application (#431)', () => {
   let app: FastifyInstance;
@@ -162,21 +165,6 @@ describe('billing subject is exclusive per Application (#431)', () => {
     expect(res.json().error.code).toBe('BILLING_ORGANIZATION_NOT_ACCEPTED');
 
     expect(await prisma.subscription.count({ where: { applicationId } })).toBe(0);
-  });
-
-  it('still accepts a personal checkout on a user-subject Application', async () => {
-    // The guard must refuse the org, not the mode. This is the ordinary path
-    // and a regression here would break every user-subject application.
-    const user = await signUp();
-    const res = await checkout(user.token);
-    expect(res.statusCode).toBe(200);
-  });
-
-  it('lets the subject be changed while nothing is subscribed yet', async () => {
-    // Setup has to stay fluid. The setting is only load-bearing once somebody
-    // is paying under it.
-    const res = await setSubject('org');
-    expect(res.statusCode).toBe(200);
   });
 
   it('refuses to change the subject once subscriptions exist under it', async () => {

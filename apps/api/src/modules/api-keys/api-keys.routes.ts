@@ -153,6 +153,8 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
         name: body.name,
         scopes: body.scopes,
         revealsEndUserIps: true,
+        // The super-admin key, not an operator.
+        createdByTenantUserId: null,
         ...(body.expiresAt !== undefined && {
           expiresAt: new Date(body.expiresAt),
         }),

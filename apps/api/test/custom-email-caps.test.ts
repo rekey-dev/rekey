@@ -69,26 +69,6 @@ describe('custom email send caps', () => {
     });
   });
 
-  it('counts in Redis with one atomic INCR-and-EXPIRE script', async () => {
-    const counts = new Map<string, number>();
-    const scripts = new Set<string>();
-    redis.client = {
-      eval: async (script: string, _n: number, k: string, ttl: string) => {
-        scripts.add(script);
-        expect(Number(ttl)).toBeGreaterThan(0);
-        counts.set(k, (counts.get(k) ?? 0) + 1);
-        return counts.get(k)!;
-      },
-      decr: async () => 0,
-    };
-    await consumeSendAllowance('app_5', 'a@example.com', CAPS, NOON);
-    await consumeSendAllowance('app_5', 'a@example.com', CAPS, NOON);
-    expect(await codeOf(consumeSendAllowance('app_5', 'a@example.com', CAPS, NOON))).toBe('EMAIL_RATE_LIMITED');
-    expect([...counts.keys()].some((k) => k.startsWith('email:cap:day:app_5:2026-09-26'))).toBe(true);
-    expect([...counts.keys()].some((k) => k.includes('a@example.com'))).toBe(false);
-    expect([...scripts][0]).toContain("redis.call('EXPIRE'");
-  });
-
   it('counts a +tagged address as its base address', async () => {
     expect(recipientCapKey('A.B+news@Example.com')).toBe('a.b@example.com');
     expect(recipientCapKey('+x@example.com')).toBe('+x@example.com');

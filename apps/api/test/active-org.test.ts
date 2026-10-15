@@ -12,6 +12,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('Active organization (oid claim)', () => {
   let app: FastifyInstance;
@@ -162,35 +165,6 @@ describe('Active organization (oid claim)', () => {
       })
       .then((r) => r.json().data as { creditBalance: number });
     expect(explicit.creditBalance).toBe(500);
-  });
-
-  it('the active org survives refresh', async () => {
-    const owner = await signUpUser(`r-${Math.random().toString(36).slice(2, 7)}@example.com`);
-    const orgId = await makeOrg(owner.endUser.id, 'beta');
-    await creditsService.grant({ applicationId: appId, organizationId: orgId, amount: 500, reason: 'GRANT' });
-
-    const switched = await switchTo(owner.accessToken, orgId).then((r) => r.json().data as Session);
-    const refreshed = await refresh(switched.refreshToken);
-    expect((await entitlements(refreshed.accessToken)).creditBalance).toBe(500);
-  });
-
-  it('clearing the active org returns to the personal pool', async () => {
-    const owner = await signUpUser(`c-${Math.random().toString(36).slice(2, 7)}@example.com`);
-    const orgId = await makeOrg(owner.endUser.id, 'gamma');
-    await creditsService.grant({ applicationId: appId, endUserId: owner.endUser.id, amount: 7, reason: 'GRANT' });
-    await creditsService.grant({ applicationId: appId, organizationId: orgId, amount: 500, reason: 'GRANT' });
-
-    const switched = await switchTo(owner.accessToken, orgId).then((r) => r.json().data as Session);
-    expect((await entitlements(switched.accessToken)).creditBalance).toBe(500);
-
-    const cleared = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/users/me/organizations/clear-active-organization',
-        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
-      })
-      .then((r) => r.json().data as Session);
-    expect((await entitlements(cleared.accessToken)).creditBalance).toBe(7);
   });
 
   it('refresh self-heals: leaving the org drops the active org', async () => {

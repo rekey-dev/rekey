@@ -13,6 +13,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { operatorWriteTools } from '../src/modules/tenant-mcp/operator-write-tools.js';
 import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const EVERY_SCOPE = ['*', ...STANDARD_API_KEY_SCOPES, ...ELEVATED_API_KEY_SCOPES];

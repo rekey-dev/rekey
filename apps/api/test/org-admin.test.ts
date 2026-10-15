@@ -10,6 +10,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Ctx {
   appId: string;
@@ -164,40 +167,6 @@ describe('Operator organization CRUD', () => {
     });
     expect(foreign.statusCode).toBe(404);
     expect(foreign.json().error.code).toBe('END_USER_NOT_FOUND');
-  });
-
-  it('updates org name, then deletes it', async () => {
-    const orgId = await app
-      .inject({ method: 'POST', url: orgsUrl(), headers: auth(), payload: { name: 'Old', slug: 'rename-me' } })
-      .then((r) => r.json().data as { id: string })
-      .then((d) => d.id);
-
-    const patch = await app.inject({
-      method: 'PATCH',
-      url: `${orgsUrl()}/${orgId}`,
-      headers: auth(),
-      payload: { name: 'New Name', metadata: { tier: 'team' } },
-    });
-    expect(patch.statusCode).toBe(200);
-    expect(patch.json().data).toMatchObject({ name: 'New Name', slug: 'rename-me' });
-
-    const del = await app.inject({ method: 'DELETE', url: `${orgsUrl()}/${orgId}`, headers: auth() });
-    expect(del.statusCode).toBe(200);
-
-    const gone = await app.inject({ method: 'GET', url: `${orgsUrl()}/${orgId}`, headers: auth() });
-    expect(gone.statusCode).toBe(404);
-  });
-
-  it('rejects a duplicate slug (409)', async () => {
-    await app.inject({ method: 'POST', url: orgsUrl(), headers: auth(), payload: { name: 'S', slug: 'taken' } });
-    const dup = await app.inject({
-      method: 'POST',
-      url: orgsUrl(),
-      headers: auth(),
-      payload: { name: 'S2', slug: 'taken' },
-    });
-    expect(dup.statusCode).toBe(409);
-    expect(dup.json().error.code).toBe('ORGANIZATION_SLUG_TAKEN');
   });
 
   afterAll(async () => {

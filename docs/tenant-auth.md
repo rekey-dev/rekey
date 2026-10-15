@@ -231,6 +231,8 @@ GET  /api/v1/tenant/invitations/preview?token=…   ← lets a recipient see the
 ### Authenticated (`Authorization: Bearer <accessToken>`)
 
 ```
+POST /api/v1/tenant/auth/resend-verification                     ← mails another confirmation link, replacing earlier ones
+POST /api/v1/tenant/auth/verify-email            { token }          ← confirms this account's address; changes nothing else
 GET  /api/v1/tenant/auth/me                      → user + memberships + active
 POST /api/v1/tenant/auth/switch-workspace        { tenantId }       → new pair scoped to target
 POST /api/v1/tenant/auth/change-password         { currentPassword, newPassword }
@@ -278,9 +280,52 @@ POST /api/v1/tenant/auth/sign-up
 returns { user, memberships: [Acme Co (OWNER)], activeTenantId, accessToken, refreshToken }
 ```
 
-## Invitation flow (the one the user explicitly requested)
+### Confirming an operator's email address
 
-> Per the user's call: invitations are **unique-per-recipient single-use links with an expiry** — not domain-restricted "anyone with this link" links. We learned that `@gmail.com` invites cause havoc.
+Sign-up asks for no proof of the address, so a new operator is unconfirmed (`user.emailVerified: false` on `GET /tenant/auth/me`). Three rules follow.
+
+**1. The confirmation email ratifies the sign-up, for whoever is signed in to the account, and changes nothing else.** Sign-up mails a link to `{PANEL_URL}/verify-email?token=…`. Confirming sets `emailVerified` and nothing else: the password, sessions, passkeys, personal access tokens and MCP grants all stay, and no session is issued.
+
+Because it keeps the password, the link is not enough by itself. `POST /tenant/auth/verify-email` takes the token **and a session of the account the token was mailed for**: without a session it answers 401 `TENANT_SESSION_MISSING`, with another account's 403 `EMAIL_VERIFICATION_WRONG_ACCOUNT` (the link is not used up). The reason is who receives the mail. The link goes to the mailbox, and the person reading it may not be the person who created the account. Someone who can sign in already holds the password, so keeping it takes nothing from them. Someone who cannot sign in has no business ratifying a password a stranger chose, and their own routes in (an emailed sign-in link, a provider, a reset) replace it instead, as rule 3 describes. The panel page follows this: signed out, it offers "I created this account: sign in and confirm" (which comes back to the page) and "I did not create it: email me a sign-in link"; signed in, it asks for a press of "Confirm email" and spends the token only then, so a mail scanner that opens the link confirms nothing.
+
+The link works once and for 24 hours. `POST /tenant/auth/resend-verification` (signed in) sends another, which replaces any earlier unused link; it counts against the per-recipient auth email cap, and the panel's notice has a button for it. After a confirmation the address is mailed a short notice (`operator_email_confirmed`, not counted against the cap) that says to reset the password if this was not you.
+
+**2. Until the address is confirmed, the operator cannot create lasting access.** These answer 403 `EMAIL_NOT_VERIFIED`, and the `fix` names the ways to confirm that exist on the deployment:
+
+| Refused while unconfirmed | Where |
+|---|---|
+| Invite someone to the workspace | `POST /tenant/workspace/invitations`, MCP `invite_member` |
+| Change a member's role or scopes, or grant them an Application | `PATCH /tenant/workspace/members/:id`, `PUT …/members/:id/grants`, MCP `change_member_role` |
+| Create another workspace | `POST /tenant/workspace/` |
+| Mint an Application API key, rotate the publishable key | `POST …/api-keys`, `POST /tenant/operator/applications/:id/api-keys` (personal access token), `POST …/rotate-public-key`, MCP `mint_api_key` |
+| Create or change a webhook endpoint, rotate its secret | `POST`/`PATCH …/webhooks`, `…/rotate-secret`, MCP `create_webhook_endpoint`, `update_webhook_endpoint` |
+| Store or change billing provider credentials, register a provider webhook | `PUT`/`PATCH …/billing-credentials/:provider`, `…/register-webhook`, MCP `configure_billing_provider` |
+| Configure a sign-in provider | `PUT …/oauth-config/:provider` |
+| Change `appUrl` or `redirectUrls` | `PATCH …/auth-config`, MCP `update_auth_config` (other fields stay open) |
+| Change the IP allowlist and CORS origins | `PUT …/access` |
+| Set email credentials, the sender, or a built-in email template | `PUT …/email-credentials`, `PATCH …/email-sender`, `PUT …/email-templates/:eventKey` |
+| Add a passkey, turn on two-factor authentication | `/tenant/auth/passkeys/register/*`, `/tenant/auth/mfa/setup*` |
+| Create a personal access token, approve an MCP client | `POST /tenant/auth/api-tokens`, `POST /tenant/mcp/oauth/grant` |
+
+Everything else stays open, so a new operator can look around before confirming: creating Applications, plans, prices, coupons, meters and roles, managing end users, reading everything, revoking and deleting, and accepting an invitation into someone else's workspace. The rule is "does this create access that outlives my session, or a copy of user data sent somewhere": if yes, it waits.
+
+**3. Proving the mailbox another way takes the account.** A magic-link sign-in, a Google or GitHub sign-in, an accepted ID Token handoff or a completed password reset on an unconfirmed operator marks the address verified and removes what was set before it: the password (a reset replaces it), every session, passkeys, a second factor, personal access tokens, MCP grants, and invitations that account sent and nobody accepted. Application API keys that operator minted are revoked and webhook endpoints it created are switched off (not deleted), for keys and endpoints created from 2.2.0 on, which record who made them. Workspace memberships stay, and **other members are never removed automatically**. The security event `auth.unverified_account_claimed` is recorded in the operator's first workspace; its `metadata.review` lists, for each workspace the account owns or administers, the account's role there, every other member (name, email, role) and the number of Applications, live API keys, enabled webhook endpoints and configured billing providers, with how many of those keys and endpoints have no recorded creator (`unattributedApiKeys`, `unattributedWebhookEndpoints`): those were not revoked or switched off, because nothing says whose they are. Impersonation sessions the account had open are ended. The address is mailed the `operator_account_claimed` notice with the same list and the instruction to review it, whenever something was removed or there is something to review. An Application the first registrant created is left in place with its users, plans, sign-in settings and email templates; Applications cannot be deleted, so the notice says to disable any you did not create (Application, Settings, "Disable application"). The ID Token handoff sends no notice: its accounts are provisioned with a password nobody was shown.
+
+Which to use: **the confirmation email**, if you created the account. It keeps everything. If someone else registered your address you cannot use it (you cannot sign in to their account), and should not want to; sign in by emailed link, Google or GitHub, or reset the password, so that whatever they set is removed, then review the workspace as the notice says.
+
+**A deployment that gives operators no way to prove a mailbox does not refuse.** That is one with no deployment mail (`RESEND_DEFAULT_API_KEY` and `RESEND_DEFAULT_FROM`), no operator sign-in provider (`PANEL_OAUTH_*`), no ID Token handoff (`OPERATOR_OIDC_*`) and, in development, no `REKEY_DEV_ECHO_AUTH_TOKENS=true`: a fresh self-hosted install. Nobody can ever arrive there by proving a mailbox, so there is nothing to take over, and refusing would leave the CLI and the MCP server without a token for good. The refusals start the moment you configure any of those. `GET /tenant/auth/me` reports this as `emailConfirmation.required`, and `emailConfirmation.byEmail` says whether a confirmation link can be mailed; on a deployment with a sign-in provider but no mail, `resend-verification` answers 409 `OPERATOR_CONFIRMATION_EMAIL_UNAVAILABLE` and the operator confirms by signing in with the provider.
+
+An unconfirmed operator that already has two-factor authentication is neither wiped nor marked verified by a sign-in link or a provider until the code is given; a correct code marks the address verified and keeps everything. A password reset confirms nothing for such an operator, because it gives no session in which to ask for the code. The confirmation email works for them like for anyone.
+
+Accepting a workspace invitation does not confirm an address. The inviter is shown the invitation link, so holding it proves nothing about the mailbox.
+
+Operators who signed up with a password before 2.2.0 are unconfirmed unless they have already signed in by emailed link, Google or GitHub (which marked them verified at the time). The upgrade confirms nobody. The rest see the panel notice and confirm with the emailed link, which keeps their password, personal access tokens and MCP grants. Their existing tokens keep working for everything not in the table above in the meantime.
+
+Reset, sign-in-link and invitation mail to one operator address is capped at 5 an hour and 15 a UTC day (`AUTH_EMAIL_RECIPIENT_HOURLY_CAP`, `AUTH_EMAIL_RECIPIENT_DAILY_CAP`). Over it the reset and sign-in-link routes answer with their usual body and send nothing; an invitation is still created and its link returned, without the mail.
+
+## Invitation flow
+
+> Invitations are **unique-per-recipient single-use links with an expiry**, not domain-restricted "anyone with this link" links: a link that admits any address on a shared domain such as `@gmail.com` admits strangers.
 
 ```
 OWNER/ADMIN does:

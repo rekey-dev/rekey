@@ -19,15 +19,15 @@ import type { Plan, EndUser, Prisma, Subscription } from '@prisma/client';
 
 /**
  * A plan as one checkout charges it: `amount` and `currency` are the price
- * selected, taken from the `PlanPrice` row `planPriceId` names. The plan's own
- * price columns are not part of this type.
+ * selected, taken from the `PlanPrice` row `planPriceId` names. A plan row holds no
+ * price of its own.
  *
  * `registration` is the metadata object holding THAT price's provider ids
  * (`stripe.priceId`, `paypal.planId`, `razorpay.planId`). Adapters read
  * provider ids from it and never from `metadata`. Build one with `pricedPlan`
  * in `billing/priced-plan.ts`.
  */
-export type PricedPlan = Omit<Plan, 'amount' | 'currency' | 'pricePerUnitCents'> & {
+export type PricedPlan = Plan & {
   /** Minor units of `currency`. 0 for a plan with no flat price. */
   amount: number;
   currency: string;

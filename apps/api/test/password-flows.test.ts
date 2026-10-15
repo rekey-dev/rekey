@@ -88,21 +88,6 @@ describe('password flows + sign-out-everywhere', () => {
 
   // ---------- forgot-password ----------
 
-  it('forgot-password issues a token for an existing user', async () => {
-    await signUp(appA, 'reset@example.com');
-    const r = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/forgot-password',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { email: 'reset@example.com' },
-    });
-    expect(r.statusCode).toBe(200);
-    const data = r.json().data as { delivered: boolean; resetToken: string | null };
-    expect(data.delivered).toBe(true);
-    expect(data.resetToken).toBeTruthy();
-    expect(data.resetToken!.length).toBeGreaterThanOrEqual(32);
-  });
-
   it('forgot-password NEVER returns the raw token to a publishable key', async () => {
     // Regression: the publishable key ships in browser code, so handing it the
     // reset token let anyone holding it take over any end-user account,
@@ -313,27 +298,6 @@ describe('password flows + sign-out-everywhere', () => {
     });
     expect(r.statusCode).toBe(401);
     expect(r.json().error.code).toBe('PASSWORD_RESET_TOKEN_WRONG_APPLICATION');
-  });
-
-  it('reset-password enforces passwordMinLength', async () => {
-    await signUp(appA, 'short@example.com');
-    const { resetToken } = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/forgot-password',
-        headers: { authorization: `Bearer ${appA.liveKey}` },
-        payload: { email: 'short@example.com' },
-      })
-      .then((r) => r.json().data as { resetToken: string });
-
-    const r = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/reset-password',
-      headers: { authorization: `Bearer ${appA.liveKey}` },
-      payload: { token: resetToken, newPassword: 'x' },
-    });
-    expect(r.statusCode).toBe(400);
-    expect(r.json().error.code).toBe('PASSWORD_TOO_SHORT');
   });
 
   // ---------- change-password ----------

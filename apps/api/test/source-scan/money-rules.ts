@@ -4,18 +4,19 @@
  *
  *   1. A subscription's `planPriceId`, `currency` and `unitAmount` are
  *      written in `billing/subscription-snapshot.ts` and nowhere else.
- *   2. A plan's `amount`, `currency` and `pricePerUnitCents` are read and
- *      written in `plans/default-price.ts` and nowhere else.
+ *   2. A plan row is written in `plans/default-price.ts` and nowhere else,
+ *      because that file keeps the default price row and `isFree` with it.
+ *   3. No raw SQL names a money column that no longer exists. The compiler
+ *      refuses a typed read of one; it cannot read a SQL string.
  */
 
 import ts from 'typescript';
-import { declaredIn, type SourceProgram } from './program.js';
+import type { SourceProgram } from './program.js';
 
 export const SUBSCRIPTION_PRICE_WRITER = 'src/modules/billing/subscription-snapshot.ts';
 export const PLAN_PRICE_OWNER = 'src/modules/plans/default-price.ts';
 
 const SUBSCRIPTION_PRICE_COLUMNS = ['planPriceId', 'currency', 'unitAmount'] as const;
-const PLAN_PRICE_COLUMNS = new Set(['amount', 'currency', 'pricePerUnitCents']);
 const WRITE_METHODS = new Set(['create', 'createMany', 'createManyAndReturn', 'update', 'updateMany', 'updateManyAndReturn', 'upsert']);
 const WRITE_ARGUMENT_KEYS = new Set(['data', 'create', 'update']);
 
@@ -91,80 +92,62 @@ export function subscriptionPriceWrites(program: SourceProgram): string[] {
   return [...new Set(found)];
 }
 
-function sqlPlanAliases(text: string): string[] {
-  return [...text.matchAll(/"plans"\s+(?:AS\s+)?([a-z_]+)\b/gi)].map((match) => match[1]!).filter((alias) => !/^(where|on|set|join|left|inner)$/i.test(alias));
+/** Columns the money model dropped, by table. */
+const DROPPED_COLUMNS: Record<string, readonly string[]> = {
+  plans: ['amount', 'currency', 'price_per_unit_cents'],
+  coupons: ['amount_off', 'currency'],
+};
+
+function sqlAliases(text: string, table: string): string[] {
+  return [...text.matchAll(new RegExp(`"${table}"\\s+(?:AS\\s+)?([a-z_]+)\\b`, 'gi'))]
+    .map((match) => match[1]!)
+    .filter((alias) => !/^(where|on|set|join|left|inner|order|group|limit)$/i.test(alias));
 }
 
 /**
- * Every read or write of a plan's price columns outside the one owner:
- * property reads, destructuring, Prisma `select`, `where` and `orderBy`,
- * plan writes, and raw SQL.
+ * Every write of a plan row outside the one owner.
  *
  * @example
- * expect(planPriceColumnUses(sourceProgram())).toEqual([]);
+ * expect(planWritesOutsideOwner(sourceProgram())).toEqual([]);
  */
-export function planPriceColumnUses(program: SourceProgram): string[] {
+export function planWritesOutsideOwner(program: SourceProgram): string[] {
   const found: string[] = [];
-  const { checker } = program;
   for (const file of program.files) {
     if (program.relative(file) === PLAN_PRICE_OWNER) continue;
     walk(file, (node) => {
-      if (ts.isPropertyAccessExpression(node) && PLAN_PRICE_COLUMNS.has(node.name.text)) {
-        if (declaredIn(checker.getSymbolAtLocation(node.name), ['$PlanPayload'])) {
-          found.push(`${program.at(node)} reads ${node.getText().slice(0, 60)}`);
-        }
-      }
-      if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
-        const name = node.propertyName ?? node.name;
-        if (ts.isIdentifier(name) && PLAN_PRICE_COLUMNS.has(name.text)) {
-          const symbol = checker.getTypeAtLocation(node.parent).getProperty(name.text);
-          if (declaredIn(symbol, ['$PlanPayload'])) found.push(`${program.at(node)} destructures ${name.text}`);
-        }
-      }
       const call = delegateCall(node);
-      if (call !== null && call.model === 'plan') {
-        if (WRITE_METHODS.has(call.method) || call.method === 'delete' || call.method === 'deleteMany') {
-          if (call.method.startsWith('delete')) return;
-          found.push(`${program.at(node)} plan.${call.method}: plan writes go through ${PLAN_PRICE_OWNER}`);
-        }
-        if (call.args !== undefined) {
-          walk(call.args, (inner) => {
-            if (!ts.isPropertyAssignment(inner) && !ts.isShorthandPropertyAssignment(inner)) return;
-            if (!ts.isIdentifier(inner.name) || !PLAN_PRICE_COLUMNS.has(inner.name.text)) return;
-            // Columns of a related model reached through the plan query are that model's.
-            for (let up: ts.Node = inner.parent; up !== call.args; up = up.parent) {
-              if (ts.isPropertyAssignment(up) && ts.isIdentifier(up.name) && /^(defaultPrice|prices|subscriptions|licenses|entitlements)$/.test(up.name.text)) return;
-            }
-            found.push(`${program.at(inner)} plan.${call.method} names ${inner.name.text}`);
-          });
-        }
-      }
-      // `plan: { select: { amount: true } }` under another model's query.
-      if (
-        ts.isPropertyAssignment(node) &&
-        ts.isIdentifier(node.name) &&
-        node.name.text === 'plan' &&
-        ts.isObjectLiteralExpression(node.initializer)
-      ) {
-        for (const clause of node.initializer.properties) {
-          if (!ts.isPropertyAssignment(clause) || !ts.isIdentifier(clause.name)) continue;
-          if (!/^(select|where|orderBy|is|isNot)$/.test(clause.name.text) || !ts.isObjectLiteralExpression(clause.initializer)) continue;
-          for (const field of clause.initializer.properties) {
-            if (field.name !== undefined && ts.isIdentifier(field.name) && PLAN_PRICE_COLUMNS.has(field.name.text)) {
-              found.push(`${program.at(field)} plan ${clause.name.text} names ${field.name.text}`);
-            }
-          }
-        }
+      if (call !== null && call.model === 'plan' && WRITE_METHODS.has(call.method)) {
+        found.push(`${program.at(node)} plan.${call.method}: plan writes go through ${PLAN_PRICE_OWNER}`);
       }
       if (ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) {
-        const text = node.getText();
-        for (const alias of sqlPlanAliases(text)) {
-          const column = new RegExp(`\\b${alias}\\."(amount|currency|price_per_unit_cents)"`).exec(text);
-          if (column !== null) found.push(`${program.at(node)} raw SQL reads "plans".${column[1]}`);
+        if (/\b(UPDATE|INSERT\s+INTO)\s+"plans"/i.test(node.getText())) found.push(`${program.at(node)} raw SQL writes "plans"`);
+      }
+    });
+  }
+  return [...new Set(found)];
+}
+
+/**
+ * Every raw SQL string that names a dropped money column: through a table
+ * alias, or unqualified in a statement on that table alone.
+ *
+ * @example
+ * expect(droppedColumnsInSql(sourceProgram())).toEqual([]);
+ */
+export function droppedColumnsInSql(program: SourceProgram): string[] {
+  const found: string[] = [];
+  for (const file of program.files) {
+    walk(file, (node) => {
+      if (!ts.isNoSubstitutionTemplateLiteral(node) && !ts.isTemplateExpression(node)) return;
+      const text = node.getText();
+      for (const [table, columns] of Object.entries(DROPPED_COLUMNS)) {
+        const names = columns.join('|');
+        for (const alias of sqlAliases(text, table)) {
+          const column = new RegExp(`\\b${alias}\\."(${names})"`).exec(text);
+          if (column !== null) found.push(`${program.at(node)} raw SQL names "${table}".${column[1]}`);
         }
-        if (/FROM\s+"plans"\s+WHERE[^`]*"(amount|price_per_unit_cents)"/i.test(text)) {
-          found.push(`${program.at(node)} raw SQL filters "plans" on a price column`);
-        }
+        const alone = new RegExp(`\\b(?:FROM|UPDATE|INTO)\\s+"${table}"(?![^\`]*\\bJOIN\\b)[^\`]*[^.]"(${names})"`, 'i').exec(text);
+        if (alone !== null) found.push(`${program.at(node)} raw SQL names "${table}".${alone[1]}`);
       }
     });
   }

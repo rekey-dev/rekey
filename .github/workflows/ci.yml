@@ -110,6 +110,14 @@ jobs:
       # setting the API reads is always documented where self-hosters look.
       - name: Check compose files and .env.example cover every env var the API reads
         run: node .github/scripts/check-compose-env.mjs
+      # A file named for the work that produced it (`audit-3`, `review-fixes`,
+      # `money-v2-*`) says nothing about what it covers. AGENTS.md has the rule;
+      # this holds it. The self-test runs first so a broken word list cannot
+      # pass the tree by matching nothing.
+      - name: Check no source or test file is named for process
+        run: |
+          node .github/scripts/check-file-names.mjs --self-test
+          node .github/scripts/check-file-names.mjs
 
   oss-strip:
     name: OSS strip
@@ -120,7 +128,7 @@ jobs:
     # on rekey-dev/rekey the job would fail on a missing file, every run,
     # forever. The mirror image of the guard on release.yml, which publishes to
     # npm and must run ONLY on the public side.
-    if: github.repository == 'EtherLabZ/Rekey'
+    if: github.repository != 'rekey-dev/rekey' && !github.event.repository.fork
     steps:
       - uses: actions/checkout@v4
 
@@ -211,7 +219,11 @@ jobs:
       # scripts and has no root task, so `scripts/`, `tools/` and the repo root
       # would otherwise never be linted.
       - run: pnpm exec turbo run lint
+      # One process type-checks the whole repository for this pass; Node's
+      # default heap ran out as the tree grew.
       - run: pnpm exec eslint .
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
 
   test:
     name: Test
@@ -277,6 +289,17 @@ jobs:
         run: |
           PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
           PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_shadow;"
+
+      # Every test starts by emptying the domain tables, and Postgres fsyncs each
+      # file that creates. This database is thrown away with the job, so
+      # durability buys nothing here and costs time on every test.
+      - name: Turn off durability on the throwaway Postgres
+        run: |
+          PGPASSWORD=rekey psql -h localhost -U rekey -d rekey \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "SELECT pg_reload_conf()"
 
       - name: Verify migrations apply
         if: needs.changes.outputs.api == 'true'
@@ -414,6 +437,17 @@ jobs:
       - name: Create the test database
         run: PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
 
+      # Every test starts by emptying the domain tables, and Postgres fsyncs each
+      # file that creates. This database is thrown away with the job, so
+      # durability buys nothing here and costs time on every test.
+      - name: Turn off durability on the throwaway Postgres
+        run: |
+          PGPASSWORD=rekey psql -h localhost -U rekey -d rekey \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "SELECT pg_reload_conf()"
+
       # Coverage is COLLECTED per shard but not judged per shard: one shard
       # exercises a quarter of the suite, so the real thresholds would fail on
       # every one of them. They are zeroed here and enforced once, on the merged
@@ -429,15 +463,17 @@ jobs:
           # A shard is one process for all its files, with coverage and the
           # type-checked source scans in it; Node's default heap ran out.
           NODE_OPTIONS: --max-old-space-size=6144
+          # Coverage is measured on pushes to main, on manual runs and on any
+          # run the detector marks full (the `ci:full` label, `[ci full]`, a
+          # workflow edit). An ordinary pull request runs the same tests
+          # without it: collecting coverage slows every shard, and the number
+          # is only judged where it is collected.
+          COVERAGE_ARGS: ${{ (github.event_name != 'pull_request' || needs.changes.outputs.full == 'true') && '--coverage --coverage.thresholds.lines=0 --coverage.thresholds.statements=0 --coverage.thresholds.functions=0 --coverage.thresholds.branches=0' || '' }}
         run: >-
           pnpm run test:prepare &&
           pnpm exec vitest run
           --shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          --coverage
-          --coverage.thresholds.lines=0
-          --coverage.thresholds.statements=0
-          --coverage.thresholds.functions=0
-          --coverage.thresholds.branches=0
+          $COVERAGE_ARGS
           --reporter=default
           --reporter=blob
 
@@ -501,8 +537,12 @@ jobs:
       # coverage is under the thresholds in vitest.config.ts.
       - name: Merge shard reports and check coverage
         working-directory: apps/api
+        env:
+          # The same condition as in the shards: the thresholds are applied
+          # on every run that collected coverage, and on no other.
+          COVERAGE_ARGS: ${{ (github.event_name != 'pull_request' || needs.changes.outputs.full == 'true') && '--coverage' || '' }}
         run: >-
-          pnpm exec vitest run --merge-reports --coverage
+          pnpm exec vitest run --merge-reports $COVERAGE_ARGS
           --reporter=default --reporter=json --outputFile.json=merged-results.json
 
       # A shard can go green having run fewer files than it should: a file that

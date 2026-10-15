@@ -30,6 +30,9 @@ import { requestIdFor } from "./lib/request-id.js";
 import {
   authCeilingOptions,
   authClientIpCeilingOptions,
+  signUpHourlyKey,
+  SIGN_UP_HOURLY_MAX_PER_IP,
+  wantsSignUpHourlyCap,
   wantsAuthClientIpCeiling,
   wantsUnattributedFailureCap,
   unattributedFailureKey,
@@ -700,6 +703,19 @@ export async function buildApp(
   // Driven through `createRateLimit` rather than a second `rateLimit()` hook on
   // purpose: the hook form sets a per-request "already ran" flag that the
   // route's own limiter shares, so it would silently disable the tight cap.
+  const signUpHourly = app.createRateLimit({
+    max: globalRateLimitMax(SIGN_UP_HOURLY_MAX_PER_IP),
+    timeWindow: 60 * 60_000,
+    keyGenerator: signUpHourlyKey,
+    skipOnError: false,
+  });
+  app.addHook("preValidation", async (req) => {
+    if (!wantsSignUpHourlyCap(req)) return;
+    const result = await signUpHourly(req);
+    if (result.isAllowed || !result.isExceeded) return;
+    throw rateLimitedAfter(result.ttl, result.max);
+  });
+
   const authCeiling = app.createRateLimit(
     authCeilingOptions(
       { perApplication: budgets.authCeiling, perClientIp: budgets.anonymous },

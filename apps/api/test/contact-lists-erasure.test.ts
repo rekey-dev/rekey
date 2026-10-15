@@ -11,6 +11,9 @@ import { setDeliveryScheduler } from '../src/modules/webhooks/webhook.service.js
 import { pruneExpiredSubmissions, pruneExpiredTombstones } from '../src/modules/contacts/submission-retention.js';
 import { contactsHarness, type ContactsWorld } from './contacts-fixtures.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('contacts and GDPR', () => {
   let app: FastifyInstance;

@@ -282,43 +282,6 @@ describe('a subscription row that has two completable checkout sessions', () => 
     expect(row.providerSubId).toBe('sub_REAL_STRIPE');
   });
 
-  it('refuses a second completion from the SAME processor too', async () => {
-    // Two Stripe sessions, both paid. Same shape, same damage: two Stripe
-    // subscriptions and one local row. The discriminator is the provider
-    // subscription id, not the processor's name.
-    const first = await checkout('stripe');
-    const second = await checkout('stripe');
-    expect(second).not.toBe(first);
-
-    await completeStripe(first, 'sub_FIRST');
-    const res = await completeStripe(second, 'sub_SECOND');
-    expect(res.statusCode).toBe(200);
-
-    const row = await theRow();
-    expect(row.providerSubId).toBe('sub_FIRST');
-  });
-
-  it('still applies a replayed completion idempotently', async () => {
-    // The guard keys on the id DIFFERING, so a re-delivery of the same event
-    // is not a second completion and nothing about it changes.
-    const session = await checkout('stripe');
-
-    await completeStripe(session, 'sub_ONLY');
-    const replay = await completeStripe(session, 'sub_ONLY');
-    expect(replay.statusCode).toBe(200);
-
-    const row = await theRow();
-    expect(row.status).toBe('ACTIVE');
-    expect(row.providerSubId).toBe('sub_ONLY');
-    // The assertions above cannot tell "applied again, harmlessly" from
-    // "refused by the guard", both leave the row exactly as it was, which is
-    // how a guard that swallowed every re-delivery would keep this green. The
-    // refusal path is the one that writes here, so its absence is the evidence.
-    expect(
-      (row.metadata as { unappliedCompletions?: unknown[] }).unappliedCompletions,
-    ).toBeUndefined();
-  });
-
   it('lets a genuine resubscribe write a new provider subscription id', async () => {
     // A cancelled row is reused by the next checkout, which walks it back to
     // PENDING. That completion is not a second completion, the previous

@@ -161,6 +161,26 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
    * on impersonation tokens, which have no refresh token.
    */
   sid?: string;
+  /**
+   * MFA challenges only. The primary factor behind this challenge proved the
+   * mailbox (an emailed sign-in link, or a provider that verified the
+   * address) for an account whose address was still unconfirmed.
+   */
+  mbx?: true;
+  /**
+   * A provider identity that proved the mailbox behind a held challenge. It
+   * is linked to the account when the challenge passes, never before.
+   */
+  lnk?: PendingIdentity;
+  /**
+   * MFA challenges only. `sessionsInvalidBefore` of the account when the
+   * first factor verified, in milliseconds, 0 for none. The session the
+   * challenge turns into is issued on that basis, so a challenge from before
+   * every session was ended cannot become one.
+   */
+  sib?: number;
+  /** MFA challenges only: issue time in milliseconds (lib/session-stamp.ts). */
+  iat_ms?: number;
   iat: number;
   exp: number;
 }
@@ -174,6 +194,13 @@ const DEFAULT_ACCESS_LIFETIME_SECONDS = env.END_USER_ACCESS_TOKEN_TTL_SECONDS;
 // MFA challenge is even shorter, enough to scan a code, not enough to be useful if leaked.
 const DEFAULT_MFA_CHALLENGE_LIFETIME_SECONDS = 5 * 60;
 
+/** A provider identity waiting on an MFA challenge: provider name, the provider's account id, its email. */
+export interface PendingIdentity {
+  p: string;
+  a: string;
+  e: string;
+}
+
 export interface IssueOptions {
   /** Token lifetime in seconds. Defaults to END_USER_ACCESS_TOKEN_TTL_SECONDS for access; 5 minutes for challenge. */
   lifetimeSeconds?: number;
@@ -183,6 +210,12 @@ export interface IssueOptions {
   deviceId?: string;
   /** Refresh-token family → embedded as the `sid` claim (access tokens only). */
   sessionId?: string;
+  /** Embedded as the `mbx` claim (MFA challenges only). */
+  mailboxProven?: boolean;
+  /** Challenge tokens only, and only with `mailboxProven`: the identity to link once the code is given. */
+  pendingIdentity?: PendingIdentity;
+  /** Challenge tokens only: the account's `sessionsInvalidBefore` when the first factor verified. */
+  basisStamp?: Date | null;
 }
 
 function signEndUserToken(
@@ -194,6 +227,9 @@ function signEndUserToken(
   activeOrganizationId?: string,
   deviceId?: string,
   sessionId?: string,
+  mailboxProven?: boolean,
+  pendingIdentity?: PendingIdentity,
+  basisStamp?: Date | null,
 ): { token: string; expiresAt: Date } {
   const token = jwt.sign(
     {
@@ -203,6 +239,10 @@ function signEndUserToken(
       ...(activeOrganizationId && { oid: activeOrganizationId }),
       ...(deviceId && { dev: deviceId }),
       ...(sessionId && { sid: sessionId }),
+      ...(typ === 'eu_mfa_challenge' && mailboxProven === true && { mbx: true as const }),
+      ...(typ === 'eu_mfa_challenge' && mailboxProven === true && pendingIdentity && { lnk: pendingIdentity }),
+      ...(typ === 'eu_mfa_challenge' && { iat_ms: Date.now() }),
+      ...(typ === 'eu_mfa_challenge' && basisStamp !== undefined && { sib: basisStamp?.getTime() ?? 0 }),
     },
     appSigningKey(applicationId, tokenGeneration),
     {
@@ -302,6 +342,12 @@ export function issueMfaChallengeToken(
     applicationId,
     tokenGeneration,
     options.lifetimeSeconds ?? DEFAULT_MFA_CHALLENGE_LIFETIME_SECONDS,
+    undefined,
+    undefined,
+    undefined,
+    options.mailboxProven,
+    options.pendingIdentity,
+    options.basisStamp,
   );
 }
 
@@ -326,6 +372,8 @@ export interface McpAccessClaims {
    */
   oid?: string;
   iat: number;
+  /** Issue time in milliseconds, for the per-user stamp (lib/session-stamp.ts). */
+  iat_ms: number;
   exp: number;
 }
 
@@ -348,6 +396,7 @@ export function issueMcpAccessToken(args: {
       applicationId: args.applicationId,
       scope: args.scope,
       ...(args.organizationId && { oid: args.organizationId }),
+      iat_ms: Date.now(),
     },
     appSigningKey(args.applicationId, args.tokenGeneration),
     { expiresIn: lifetime, algorithm: 'HS256', audience: args.audience },
@@ -408,6 +457,8 @@ export interface McpConsentClaims {
   scope: string; // granted scope
   nonce?: string;
   iat: number;
+  /** Issue time in milliseconds, for the per-user stamp (lib/session-stamp.ts). */
+  iat_ms: number;
   exp: number;
 }
 
@@ -433,6 +484,7 @@ export function issueMcpConsentToken(args: {
       cc: args.codeChallenge,
       scope: args.scope,
       ...(args.nonce !== undefined && { nonce: args.nonce }),
+      iat_ms: Date.now(),
     },
     appSigningKey(args.applicationId, args.tokenGeneration),
     { expiresIn: MCP_CONSENT_LIFETIME_SECONDS, algorithm: 'HS256' },

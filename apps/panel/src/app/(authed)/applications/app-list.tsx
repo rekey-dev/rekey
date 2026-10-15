@@ -25,7 +25,7 @@ function Keys({ app }: { app: ApplicationRow }): React.JSX.Element {
   const n = app.summary?.activeApiKeys;
   if (n === undefined) return <span className="text-[var(--color-faint-fg)]">Hidden</span>;
   if (n > 0) return <span className="tabular-nums">{keysLabel(app)}</span>;
-  const canMint = hasScope(app.access?.scopes ?? null, 'developer:write');
+  const canMint = hasScope(app.access.scopes, 'developer:write');
   return canMint && !app.disabledAt ? (
     <Link
       href={`/applications/${app.id}/api-keys`}

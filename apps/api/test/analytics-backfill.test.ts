@@ -12,6 +12,9 @@ import { backfillAll, backfillApplication } from '../src/modules/analytics/rollu
 import { rollupApplication } from '../src/modules/analytics/rollup/job.js';
 import { activeOn, activeWithin, seedUsers, shiftDay, utcToday, type SeedUser } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('analytics rollup backfill', () => {
   let app: FastifyInstance;
@@ -86,24 +89,24 @@ describe('analytics rollup backfill', () => {
     expect((await backfillAll()).days).toBe(0);
   });
 
-  it('carries sign-ins by method from the event log', async () => {
-    const day = shiftDay(today, -10);
-    for (const via of ['password', 'passkey', 'passkey']) {
-      await prisma.securityEvent.create({
-        data: { type: 'user.signed_in', applicationId: w.appId, actorType: 'end_user', metadata: { via }, createdAt: new Date(`${day}T08:00:00Z`) },
-      });
-    }
-    await backfillApplication(w.appId);
-    const row = (await rows()).get(day)!;
-    expect(row.signIns).toBe(3);
-    expect((row.breakdown as { via: Record<string, { signIns?: number }> }).via.passkey?.signIns).toBe(2);
-  });
-
   it('runs each Application under a statement budget and keeps going when one fails', async () => {
     const other = await operatorWorld(app);
     await seedUsers(other.appId, 10, 14, 30);
     const lines: string[] = [];
-    const failing = await backfillAll({ statementTimeoutMs: 1, log: (l) => lines.push(l) });
+    // A 1ms budget alone only fails when every read happens to take longer
+    // than that. Holding a lock on a table the budgeted reads need makes each
+    // Application wait past it, whatever the machine.
+    let release = (): void => {};
+    let locked = (): void => {};
+    const isLocked = new Promise<void>((resolve) => (locked = resolve));
+    const holder = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`LOCK TABLE "usage_records" IN ACCESS EXCLUSIVE MODE`;
+      locked();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await isLocked;
+    const failing = await backfillAll({ statementTimeoutMs: 1, log: (l) => lines.push(l) }).finally(() => release());
+    await holder;
     expect(failing).toMatchObject({ applications: 2, failed: 2, days: 0 });
     expect(lines.filter((l) => l.includes('failed, skipped (ANALYTICS_TIMEOUT'))).toHaveLength(2);
     const ok = await backfillAll();

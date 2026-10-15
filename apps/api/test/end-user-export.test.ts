@@ -14,6 +14,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { recordSecurityEvent } from '../src/lib/security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -116,9 +120,7 @@ describe('end-user data export (GDPR/DSAR)', () => {
     await prisma.organizationMembership.create({
       data: { organizationId: org.id, endUserId: euid, role: 'OWNER' },
     });
-    const plan = await prisma.plan.create({
-      data: { applicationId: b.applicationId, slug: 'dsar-pro', name: 'Pro', amount: 999 },
-    });
+    const plan = await seedPlan({ applicationId: b.applicationId, slug: 'dsar-pro', name: 'Pro' }, { currency: 'USD', amount: 999 });
     const sub = await prisma.subscription.create({
       data: { applicationId: b.applicationId, endUserId: euid, planId: plan.id, status: 'ACTIVE' },
     });

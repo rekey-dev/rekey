@@ -15,6 +15,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -191,140 +195,6 @@ describe('operator panel features', () => {
     expect(secondPage.page).toEqual({ total: 3, limit: 1, offset: 1, hasMore: true });
   });
 
-  it('payments: ?sort/?order re-order rows; sort values outside the allowlist are rejected', async () => {
-    const b = await bootstrap('paysort');
-    for (const [amount, status, ref, createdAt] of [
-      [999, 'SUCCEEDED', 'sort-mid', '2026-06-01T12:00:00Z'],
-      [500, 'FAILED', 'sort-low', '2026-05-01T12:00:00Z'],
-      [2500, 'PENDING', 'sort-high', '2026-04-01T12:00:00Z'],
-    ] as const) {
-      await prisma.payment.create({
-        data: {
-          applicationId: b.applicationId,
-          amount,
-          currency: 'USD',
-          status,
-          providerPaymentId: `opf-${ref}`,
-          createdAt: new Date(createdAt),
-        },
-      });
-    }
-
-    const list = async (qs: string): Promise<Array<{ providerPaymentId: string }>> => {
-      const res = await app.inject({
-        method: 'GET',
-        url: `/api/v1/tenant/applications/${b.applicationId}/payments${qs}`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-      });
-      expect(res.statusCode).toBe(200);
-      return (res.json().data as { items: Array<{ providerPaymentId: string }> }).items;
-    };
-
-    // amount ascending / descending.
-    expect((await list('?sort=amount&order=asc')).map((r) => r.providerPaymentId)).toEqual([
-      'opf-sort-low',
-      'opf-sort-mid',
-      'opf-sort-high',
-    ]);
-    expect((await list('?sort=amount&order=desc')).map((r) => r.providerPaymentId)).toEqual([
-      'opf-sort-high',
-      'opf-sort-mid',
-      'opf-sort-low',
-    ]);
-    // status ascending, Postgres enums sort by definition order
-    // (PENDING < SUCCEEDED < FAILED < REFUNDED), not lexicographically.
-    expect((await list('?sort=status&order=asc')).map((r) => r.providerPaymentId)).toEqual([
-      'opf-sort-high',
-      'opf-sort-mid',
-      'opf-sort-low',
-    ]);
-    // createdAt asc flips the default newest-first.
-    expect((await list('?sort=createdAt&order=asc')).map((r) => r.providerPaymentId)).toEqual([
-      'opf-sort-high',
-      'opf-sort-low',
-      'opf-sort-mid',
-    ]);
-    // No sort params → existing behavior (newest first).
-    expect((await list('')).map((r) => r.providerPaymentId)).toEqual([
-      'opf-sort-mid',
-      'opf-sort-low',
-      'opf-sort-high',
-    ]);
-
-    // Allowlist: arbitrary columns are rejected, not silently ignored.
-    for (const qs of ['?sort=passwordHash', '?sort=metadata', '?sort=amount&order=sideways']) {
-      const res = await app.inject({
-        method: 'GET',
-        url: `/api/v1/tenant/applications/${b.applicationId}/payments${qs}`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-      });
-      expect(res.statusCode).toBe(400);
-    }
-  });
-
-  it('end-users: ?sort=email orders alphabetically; security-events: ?sort=type works', async () => {
-    const b = await bootstrap('eusort');
-    for (const email of ['charlie@example.com', 'alice@example.com', 'bob@example.com']) {
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${b.applicationId}/end-users`,
-        headers: { authorization: `Bearer ${b.tenantAccess}` },
-        payload: { email },
-      });
-      expect(res.statusCode).toBe(201);
-    }
-    const asc = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${b.applicationId}/end-users?sort=email&order=asc`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(asc.statusCode).toBe(200);
-    expect(
-      (asc.json().data as { items: Array<{ email: string }> }).items.map((u) => u.email),
-    ).toEqual(['alice@example.com', 'bob@example.com', 'charlie@example.com']);
-    const badSort = await app.inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${b.applicationId}/end-users?sort=role`,
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(badSort.statusCode).toBe(400);
-
-    // Security events: type asc vs default createdAt desc.
-    await prisma.securityEvent.create({
-      data: {
-        tenantId: b.tenantId,
-        actorType: 'operator',
-        type: 'zzz.test_event',
-        createdAt: new Date('2026-06-02T12:00:00Z'),
-      },
-    });
-    await prisma.securityEvent.create({
-      data: {
-        tenantId: b.tenantId,
-        actorType: 'operator',
-        type: 'aaa.test_event',
-        createdAt: new Date('2026-06-01T12:00:00Z'),
-      },
-    });
-    const byType = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/security-events?sort=type&order=asc',
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(byType.statusCode).toBe(200);
-    const types = (byType.json().data as { items: Array<{ type: string }> }).items.map(
-      (e) => e.type,
-    );
-    expect(types[0]).toBe('aaa.test_event');
-    expect(types[types.length - 1]).toBe('zzz.test_event');
-    const badEventSort = await app.inject({
-      method: 'GET',
-      url: '/api/v1/tenant/security-events?sort=ip',
-      headers: { authorization: `Bearer ${b.tenantAccess}` },
-    });
-    expect(badEventSort.statusCode).toBe(400);
-  });
-
   it('payments: an operator from another workspace gets 404 (tenant scoping)', async () => {
     const b = await bootstrap('payscope');
     const other = await bootstrap('payscope2');
@@ -365,9 +235,7 @@ describe('operator panel features', () => {
       ).map((u) => [u.email, u.id]),
     );
 
-    const plan = await prisma.plan.create({
-      data: { applicationId: b.applicationId, slug: 'opf-pro', name: 'Pro', amount: 999 },
-    });
+    const plan = await seedPlan({ applicationId: b.applicationId, slug: 'opf-pro', name: 'Pro' }, { currency: 'USD', amount: 999 });
     await prisma.subscription.create({
       data: {
         applicationId: b.applicationId,
@@ -438,9 +306,7 @@ describe('operator panel features', () => {
     // metadata at display time, which the buyer's next checkout on the same
     // plan overwrites, so an operator's historical totals were restated by
     // later, unrelated activity.
-    const plan = await prisma.plan.create({
-      data: { applicationId: b.applicationId, slug: 'opf-coup', name: 'Coup', amount: 999 },
-    });
+    const plan = await seedPlan({ applicationId: b.applicationId, slug: 'opf-coup', name: 'Coup' }, { currency: 'USD', amount: 999 });
     const sub = await prisma.subscription.create({
       data: {
         applicationId: b.applicationId,

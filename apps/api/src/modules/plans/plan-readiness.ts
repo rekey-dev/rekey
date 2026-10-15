@@ -62,7 +62,7 @@ export interface PlanReadiness {
  * What readiness reads of a plan: the plan, and the currency of its default
  * price (null for a plan with no flat price).
  */
-export type ReadinessPlan = Omit<Plan, 'amount' | 'currency' | 'pricePerUnitCents'> & {
+export type ReadinessPlan = Plan & {
   defaultPrice: { currency: string } | null;
 };
 

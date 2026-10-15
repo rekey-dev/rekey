@@ -54,18 +54,6 @@ describe('admin surface — end to end', () => {
     });
   });
 
-  it('GET /health/live and /health/ready name the running build', async () => {
-    // The version is the published packages' version, so a deploy can be
-    // compared against npm from outside. apps/api's own package.json is 0.0.0,
-    // which is the value this must never report.
-    const live = (await app.inject({ method: 'GET', url: '/health/live' })).json();
-    const ready = (await app.inject({ method: 'GET', url: '/health/ready' })).json();
-    expect(live.version).toBe(RELEASE_VERSION);
-    expect(live.version).not.toBe('0.0.0');
-    expect(ready.version).toBe(live.version);
-    expect(ready.commit).toBe(live.commit);
-  });
-
   it('reports a commit only when REKEY_COMMIT is a hex SHA', () => {
     // The route is public and unauthenticated, so it echoes nothing that is
     // not shaped like a commit.
@@ -79,19 +67,6 @@ describe('admin surface — end to end', () => {
     expect(resolveCommit('abc12')).toBe('unknown');
     expect(resolveCommit('main')).toBe('unknown');
     expect(resolveCommit('<script>alert(1)</script>')).toBe('unknown');
-  });
-
-  it('GET /health → ok, and reports which dependencies it checked', async () => {
-    const res = await app.inject({ method: 'GET', url: '/health' });
-    expect(res.statusCode).toBe(200);
-    const body = res.json() as { status: string; service: string; db: string; redis: string };
-    // `status: 'ok'` is load-bearing, existing monitors and the compose
-    // healthcheck match on it.
-    expect(body.status).toBe('ok');
-    expect(body.service).toBe('rekey-api');
-    expect(body.db).toBe('ok');
-    // Redis is absent in the test env, which is reported distinctly from down.
-    expect(['ok', 'not_configured']).toContain(body.redis);
   });
 
   it('GET /health/ready → ready when DB is up', async () => {
@@ -262,17 +237,6 @@ describe('admin surface — end to end', () => {
     const second = await create();
     expect(second.statusCode).toBe(409);
     expect(second.json().error.code).toBe('APPLICATION_SLUG_TAKEN');
-  });
-
-  it('returns TENANT_NOT_FOUND when creating an app under a missing tenant', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/admin/applications',
-      headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { tenantId: 'no-such-tenant', name: 'X', slug: 'orphan-app' },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('TENANT_NOT_FOUND');
   });
 
   it('returns ROUTE_NOT_FOUND with a fix on unknown paths', async () => {

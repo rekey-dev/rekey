@@ -27,6 +27,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { Banner } from '@/components/Banner';
+import { EMAIL_NOT_VERIFIED_COPY } from '@/components/ConfirmEmailNotice';
 import type { Page } from '@/lib/paginate';
 
 interface OperatorTokenRow {
@@ -50,6 +51,7 @@ function scopeTone(scope: string): 'neutral' | 'brand' | 'warning' {
 }
 
 const ERR: Record<string, string> = {
+  EMAIL_NOT_VERIFIED: EMAIL_NOT_VERIFIED_COPY,
   TENANT_ROLE_INSUFFICIENT: 'Only workspace owners and admins can mint or revoke personal-access-tokens.',
   OPERATOR_SCOPE_UNKNOWN: 'Unknown scope. Allowed: read, applications:write, keys:mint.',
   OPERATOR_TOKEN_LIMIT_REACHED: 'You already have the maximum number of active tokens. Revoke one first.',

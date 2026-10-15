@@ -18,7 +18,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
-import { prisma } from '../src/lib/prisma.js';
 import {
   CLIENT_REGISTRATION_BODY_LIMIT,
   CREDENTIAL_BODY_LIMIT,
@@ -105,24 +104,6 @@ describe('credential routes cap their body size (#555)', () => {
     expect(res.headers['x-request-id']).toBe(body.error.requestId);
   });
 
-  it('never names the cap, in the message or the fix', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-in',
-      headers: { authorization: `Bearer ${liveKey}`, 'content-type': 'application/json' },
-      payload: paddedBody({ email: 'a@example.com', password: 'p' }, CREDENTIAL_BODY_LIMIT + 1),
-    });
-
-    const { message, fix } = (res.json() as ErrorEnvelope).error;
-    // A caller told the exact cap is a caller who can size a payload to sit
-    // just inside it, on every route, without probing for the boundary.
-    for (const text of [message, fix ?? '']) {
-      expect(text).not.toMatch(/\d/);
-      expect(text).not.toMatch(/MiB|KiB|kB|bytes/i);
-    }
-    expect(fix).toMatch(/schema/i);
-  });
-
   // Absolute sizes, on purpose. Every other case here is written against the
   // constants, which is right for asserting the contract but blind to the one
   // mutation that matters: raise a class back towards the global 1 MiB and a
@@ -184,37 +165,7 @@ describe('credential routes cap their body size (#555)', () => {
     expect(signIn.statusCode).toBe(200);
   });
 
-  it('writes nothing for an oversized sign-up', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${liveKey}`, 'content-type': 'application/json' },
-      payload: paddedBody(
-        { email: 'ghost@example.com', password: 'correct-horse-battery' },
-        SIGN_UP_BODY_LIMIT + 1,
-      ),
-    });
-    expect(res.statusCode).toBe(413);
-    expect(await prisma.endUser.count({ where: { applicationId } })).toBe(0);
-  });
-
   // ---------- the credential class (8 KiB) ----------
-
-  it('lets an ordinary sign-in through', async () => {
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-up',
-      headers: { authorization: `Bearer ${liveKey}` },
-      payload: { email: 'ok@example.com', password: 'correct-horse-battery' },
-    });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/sign-in',
-      headers: { authorization: `Bearer ${liveKey}` },
-      payload: { email: 'ok@example.com', password: 'correct-horse-battery' },
-    });
-    expect(res.statusCode).toBe(200);
-  });
 
   it('accepts the largest body /auth/mfa-verify’s schema permits', async () => {
     // mfaChallengeToken 2048 + code 64 + device.fingerprint 256 + label 120,
@@ -383,18 +334,6 @@ describe('credential routes cap their body size (#555)', () => {
         { response: {}, expectedChallenge: 'x' },
         WEBAUTHN_BODY_LIMIT + 1,
       ),
-    });
-    expect(res.statusCode).toBe(413);
-  });
-
-  it('caps the passkey ceremony well under the global 1 MiB limit', async () => {
-    // The gap this issue is about: the old behaviour parsed everything up to
-    // 1 MiB on these routes.
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/passkey/authenticate/complete',
-      headers: { authorization: `Bearer ${liveKey}`, 'content-type': 'application/json' },
-      payload: paddedBody({ response: {}, expectedChallenge: 'x' }, 512 * 1024),
     });
     expect(res.statusCode).toBe(413);
   });

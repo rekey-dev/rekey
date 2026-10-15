@@ -21,6 +21,10 @@ import { applicationsService } from '../src/modules/applications/applications.se
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { dunningService } from '../src/modules/billing/dunning.service.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const STRIPE_SECRET = 'whsec_renewal_lifecycle';
 const signer = new Stripe('sk_for_signing_only', { apiVersion: STRIPE_API_VERSION });
@@ -68,13 +72,11 @@ describe('Stripe renewal lifecycle', () => {
     );
     await applicationsService.updateBillingConfig({ applicationId: appId, patch: { dunningEnabled: true } });
     planId = (
-      await prisma.plan.create({
-        data: { applicationId: appId, slug: 'pro', name: 'Pro', amount: 999, currency: 'USD', kind: 'SUBSCRIPTION', interval: 'MONTH' },
-      })
+      await seedPlan({ applicationId: appId, slug: 'pro', name: 'Pro', kind: 'SUBSCRIPTION', interval: 'MONTH' }, { currency: 'USD', amount: 999 })
     ).id;
     endUserId = (await prisma.endUser.create({ data: { applicationId: appId, email: `buyer-${tag}@example.com` } })).id;
     endpointId = (
-      await webhookService.createEndpoint({ applicationId: appId, url: 'https://example.invalid/hook', events: ['*'] })
+      await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appId, url: 'https://example.invalid/hook', events: ['*'] })
     ).endpoint.id;
   });
 
@@ -239,11 +241,6 @@ describe('Stripe renewal lifecycle', () => {
         (await prisma.payment.findFirstOrThrow({ where: { applicationId: appId, providerPaymentId: 'in_old' } })).id,
       ).toBe(filed[0]!.paymentId);
     });
-
-    it('a renewal that matches nothing is still filed as unapplied, not deferred', async () => {
-      expect((await post('invoice.paid', invoice('in_orphan', 'sub_orphan'))).statusCode).toBe(200);
-      expect(await prisma.unappliedPayment.count({ where: { applicationId: appId } })).toBe(1);
-    });
   });
 
   describe('trials', () => {
@@ -257,9 +254,7 @@ describe('Stripe renewal lifecycle', () => {
     });
 
     it('a $0 renewal still refills credits each period', async () => {
-      const plan = await prisma.plan.create({
-        data: { applicationId: appId, slug: 'credits', name: 'Credits', amount: 999, currency: 'USD', kind: 'SUBSCRIPTION', interval: 'MONTH' },
-      });
+      const plan = await seedPlan({ applicationId: appId, slug: 'credits', name: 'Credits', kind: 'SUBSCRIPTION', interval: 'MONTH' }, { currency: 'USD', amount: 999 });
       await prisma.planEntitlement.create({ data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 } });
       const sub = await prisma.subscription.create({
         data: {
@@ -285,18 +280,14 @@ describe('Stripe renewal lifecycle', () => {
     });
 
     it('a $0 renewal still extends a TIMED licence', async () => {
-      const plan = await prisma.plan.create({
-        data: {
-          applicationId: appId,
-          slug: 'timed',
-          name: 'Timed',
-          amount: 999,
-          currency: 'USD',
-          kind: 'SUBSCRIPTION',
-          interval: 'MONTH',
-          licenseDurationDays: 30,
-        },
-      });
+      const plan = await seedPlan({
+        applicationId: appId,
+        slug: 'timed',
+        name: 'Timed',
+        kind: 'SUBSCRIPTION',
+        interval: 'MONTH',
+        licenseDurationDays: 30,
+      }, { currency: 'USD', amount: 999 });
       await prisma.planEntitlement.create({ data: { planId: plan.id, kind: 'LICENSE', key: '', licenseKind: 'TIMED' } });
       const sub = await prisma.subscription.create({
         data: {

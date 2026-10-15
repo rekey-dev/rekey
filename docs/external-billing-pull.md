@@ -195,7 +195,8 @@ not mistake the account for a broken registration.
 - **HTTPS, publicly reachable.** Rekey applies the same SSRF guard it applies to
   webhook targets; private and loopback addresses are refused unless the
   deployment sets `WEBHOOK_ALLOW_PRIVATE_TARGETS`, which is for local
-  development only.
+  development only. The URL is saved only as `https://`, and a production
+  deployment also refuses to call a plain http one (`URL_NOT_HTTPS`).
 
 ## 6. Errors Rekey will report
 

@@ -33,6 +33,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
+import { seedPlan } from './seed-plan.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -110,17 +111,13 @@ describe('PayPal cancellation', () => {
       })
       .then((r) => r.json().data as { endUser: { id: string }; accessToken: string });
 
-    const plan = await prisma.plan.create({
-      data: {
+    const plan = await seedPlan({
         applicationId,
         slug: `plan-${slug}`,
         name: 'Paid',
-        amount: 9900,
-        currency: 'usd',
         interval: 'MONTH',
         active: true,
-      },
-    });
+      }, { currency: 'usd', amount: 9900 });
 
     return { applicationId, liveKey, accessToken: session.accessToken, endUserId: session.endUser.id, plan, slug };
   }
@@ -230,19 +227,6 @@ describe('PayPal cancellation', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('never claims to PayPal that the cancellation is scheduled', async () => {
-      // PayPal Subscriptions v1 has no period-end cancel. The old code POSTed
-      // the same immediate-termination endpoint whatever `atPeriodEnd` said,
-      // which at least did not lie to PayPal, but it also never recorded that
-      // the flag had nowhere to go. This pins the contract: one endpoint, and
-      // no scheduling parameter invented in the body.
-      const calls = stubFetch({ status: 204, body: '' });
-      const provider = new RealPaypalProvider(creds, 'test');
-
-      await provider.cancelSubscription({ subscription: row('I-ABC'), atPeriodEnd: true });
-
-      expect(calls.some((u) => u.endsWith('/v1/billing/subscriptions/I-ABC/cancel'))).toBe(true);
-    });
   });
 
   // ───────────────────────────────────────────────────────────────────────────

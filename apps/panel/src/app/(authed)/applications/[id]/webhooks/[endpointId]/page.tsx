@@ -15,6 +15,7 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 interface EndpointRow {
   id: string;
@@ -249,7 +250,7 @@ export default async function WebhookDetailPage({
   const retriedAllOf = typeof sp.of === 'string' ? sp.of : null;
 
   const [endpointPage, deliveryPage] = await Promise.all([
-    api<Page<EndpointRow>>({
+    api<Page<EndpointRow> & { httpsRequired: boolean }>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks`,
     }),
@@ -297,6 +298,15 @@ export default async function WebhookDetailPage({
           </div>
         }
       />
+
+      {endpointPage.httpsRequired && endpoint.url.startsWith('http://') && (
+        <Banner tone="error">
+          Nothing is being sent to this endpoint. Its URL is plain http, and this deployment only
+          delivers over https. Each delivery below is recorded with the error URL_NOT_HTTPS. Change
+          the URL to https:// over the API (PATCH on this endpoint) and retry the deliveries, or add
+          a new https:// endpoint and delete this one.
+        </Banner>
+      )}
 
       {retried && <SavedBanner params={['retried']} message="Retry queued." />}
       {retriedAll !== null && (

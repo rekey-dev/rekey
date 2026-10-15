@@ -29,6 +29,12 @@ export type EmailEventKey =
   | 'welcome'
   | 'mfa_enabled'
   | 'password_changed'
+  | 'account_claimed'
+  | 'operator_account_claimed'
+  | 'operator_email_verification'
+  | 'operator_email_confirmed'
+  | 'signup_existing_account'
+  | 'signup_finish_setup'
   | 'billing_payment_failed_reminder'
   | 'billing_unapplied_payment';
 
@@ -133,6 +139,72 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       userEmail: 'sample@example.com',
       changedAtIso: now.iso,
       changedAt: now.plain,
+    },
+  },
+  account_claimed: {
+    key: 'account_claimed',
+    label: 'Earlier sign-in details removed',
+    variables: ['userEmail', 'claimedAtIso', 'claimedAt', 'appUrl'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      claimedAtIso: now.iso,
+      claimedAt: now.plain,
+      appUrl: 'https://your-app.example.com',
+    },
+  },
+  operator_account_claimed: {
+    key: 'operator_account_claimed',
+    label: 'Operator: earlier sign-in details removed',
+    variables: ['userEmail', 'claimedAtIso', 'claimedAt', 'appUrl', 'reviewSummary'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      claimedAtIso: now.iso,
+      claimedAt: now.plain,
+      appUrl: 'https://panel.example.com',
+      reviewSummary:
+        'Workspace "Acme" (you are OWNER): 1 other member (Sam Lee, sam@example.com, OWNER); 2 Applications; 2 live API keys, of which 1 has no recorded creator and was not revoked; 1 webhook endpoint switched on; 1 billing provider configured.',
+    },
+  },
+  operator_email_verification: {
+    key: 'operator_email_verification',
+    label: 'Operator: confirm your email',
+    variables: ['userEmail', 'verifyUrl', 'expiresAtIso', 'expiresAt'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      verifyUrl: 'https://panel.example.com/verify-email?token=…',
+      expiresAtIso: verify.iso,
+      expiresAt: verify.plain,
+    },
+  },
+  operator_email_confirmed: {
+    key: 'operator_email_confirmed',
+    label: 'Operator: email confirmed',
+    variables: ['userEmail', 'confirmedAtIso', 'confirmedAt', 'appUrl'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      confirmedAtIso: now.iso,
+      confirmedAt: now.plain,
+      appUrl: 'https://panel.example.com',
+    },
+  },
+  signup_existing_account: {
+    key: 'signup_existing_account',
+    label: 'Sign-up with an address that already has an account',
+    variables: ['userEmail', 'appUrl'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      appUrl: 'https://your-app.example.com',
+    },
+  },
+  signup_finish_setup: {
+    key: 'signup_finish_setup',
+    label: 'Sign-up with an address whose account was never confirmed',
+    variables: ['userEmail', 'resetUrl', 'expiresAtIso', 'expiresAt'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      resetUrl: 'https://your-app.example.com/reset?token=…',
+      expiresAtIso: reset.iso,
+      expiresAt: reset.plain,
     },
   },
   billing_payment_failed_reminder: {

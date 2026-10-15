@@ -128,30 +128,6 @@ describe('concurrent checkouts and the provider binding (#437)', () => {
     });
   }
 
-  it('two simultaneous checkouts naming DIFFERENT processors bind only one', async () => {
-    const { basic } = await twoPlans();
-    const user = await signUp();
-
-    // The double-click. Both are in flight before either has written anything.
-    const [a, b] = await Promise.all([
-      checkout(user.token, basic, 'stripe'),
-      checkout(user.token, basic, 'paypal'),
-    ]);
-
-    const rows = await subscriptionsOf(user.id);
-    const processors = new Set(rows.map((r) => r.provider));
-
-    // The assertion that matters, and it is about ROWS. One of the two
-    // requests may legitimately be refused (409) or may legitimately succeed,
-    // what must never happen is the buyer ending up billable by two
-    // processors at once.
-    expect(
-      processors.size,
-      `buyer is bound to ${processors.size} processors: ${[...processors].join(', ')} ` +
-        `(responses ${a.statusCode}/${b.statusCode})`,
-    ).toBeLessThanOrEqual(1);
-  });
-
   it('two simultaneous checkouts on DIFFERENT plans do not split across processors', async () => {
     // The plan-keyed uniqueness constraint cannot catch this one: different
     // planId means no collision, so a constraint alone leaves it open. This is

@@ -24,6 +24,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { enqueueEvent, webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { lockEmailCoupling } from '../src/modules/email/email.service.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 /** A promise plus the function that settles it. */
 function gate(): { wait: Promise<void>; open: () => void } {
@@ -107,7 +110,7 @@ describe('lock contention on the auth write path', () => {
 
   describe('a webhook endpoint deleted during sign-up', () => {
     it('a delete that commits while sign-up is mid-flight costs the event, not the sign-up', async () => {
-      const { endpoint } = await webhookService.createEndpoint({
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: appId,
         url: 'https://example.invalid/race-hook',
         events: ['*'],
@@ -141,7 +144,7 @@ describe('lock contention on the auth write path', () => {
     });
 
     it('a delete that starts after sign-up read the endpoints waits for it, then cascades the delivery', async () => {
-      const { endpoint } = await webhookService.createEndpoint({
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: appId,
         url: 'https://example.invalid/race-hook',
         events: ['*'],
@@ -175,7 +178,7 @@ describe('lock contention on the auth write path', () => {
     });
 
     it('editing an endpoint does not wait on an in-flight event write', async () => {
-      const { endpoint } = await webhookService.createEndpoint({
+      const { endpoint } = await webhookService.createEndpoint({ createdByTenantUserId: null,
         applicationId: appId,
         url: 'https://example.invalid/race-hook',
         events: ['*'],

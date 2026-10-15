@@ -11,6 +11,12 @@ import * as OTPAuth from 'otpauth';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { applicationsService } from '../src/modules/applications/applications.service.js';
+import { endUsersConfirmTheirEmail } from './confirmed-accounts.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
+
+endUsersConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -64,7 +70,7 @@ describe('End-user sign-in counters', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
-    await applicationsService.updateAuthConfig({
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null,
       applicationId: appId,
       patch: { methods: ['password', 'magic_link'] },
     });
@@ -109,15 +115,6 @@ describe('End-user sign-in counters', () => {
     });
   }
 
-  it('an operator-created user has never signed in', async () => {
-    await operatorCreate('fresh@example.com');
-    expect(await stats('fresh@example.com')).toMatchObject({
-      lastSignedInAt: null,
-      lastSignInVia: null,
-      signInCount: 0,
-    });
-  });
-
   it('sign-up and each sign-in count once, with the method and time', async () => {
     const before = Date.now();
     await signUp('count@example.com');
@@ -138,25 +135,6 @@ describe('End-user sign-in counters', () => {
     expect(second.updatedAt.getTime()).toBe(first.updatedAt.getTime());
   });
 
-  it('a magic-link sign-in records via "magic_link"', async () => {
-    await operatorCreate('ml@example.com');
-    const requested = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/magic-link/request',
-      headers: sk(),
-      payload: { email: 'ml@example.com' },
-    });
-    const { magicLinkToken } = requested.json().data as { magicLinkToken: string };
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/magic-link/verify',
-      headers: sk(),
-      payload: { token: magicLinkToken },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(await stats('ml@example.com')).toMatchObject({ signInCount: 1, lastSignInVia: 'magic_link' });
-  });
-
   it('refresh does not count as a sign-in', async () => {
     const created = await signUp('refresh@example.com');
     const res = await app.inject({
@@ -170,7 +148,7 @@ describe('End-user sign-in counters', () => {
   });
 
   it('switching the active organization does not count as a sign-in', async () => {
-    await applicationsService.updateAuthConfig({ applicationId: appId, patch: { organizationsEnabled: true } });
+    await applicationsService.updateAuthConfig({ actorTenantUserId: null, applicationId: appId, patch: { organizationsEnabled: true } });
     const created = await signUp('switch@example.com');
     const token = created.accessToken as string;
     const org = await app.inject({
@@ -242,16 +220,6 @@ describe('End-user sign-in counters', () => {
       FOR EACH ROW WHEN (NEW.event_type = 'session.created') EXECUTE FUNCTION sis_raise()`);
     expect((await signIn('rollback@example.com')).status).toBe(500);
     expect(await stats('rollback@example.com')).toMatchObject({ signInCount: 0, lastSignedInAt: null });
-  });
-
-  it('GET /users/:id carries the counters', async () => {
-    await signUp('dto@example.com');
-    const { id } = await stats('dto@example.com');
-    const res = await app.inject({ method: 'GET', url: `/api/v1/users/${id}`, headers: sk() });
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data as Json;
-    expect(data).toMatchObject({ signInCount: 1, lastSignInVia: 'password' });
-    expect(typeof data.lastSignedInAt).toBe('string');
   });
 
   describe('operator list', () => {

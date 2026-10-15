@@ -16,6 +16,10 @@ import { countQueries } from './query-counter.js';
 import { seedUsers } from './analytics-seed.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
 import { pricedAt } from './subscription-price-fixture.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const tool = (name: string) => allOperatorTools.find((t) => t.name === name)!;
 
@@ -38,9 +42,9 @@ describe('operator MCP workspace overview', () => {
 
   it('MRR counts every ACTIVE subscription past 10,000, excludes non-recurring plans, and equals Billing Overview', async () => {
     const w = await operatorWorld(app);
-    const monthly = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'm', name: 'M', amount: 100, currency: 'usd', interval: 'MONTH' } });
-    const yearly = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'y', name: 'Y', amount: 1200, currency: 'usd', interval: 'YEAR' } });
-    const usage = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'u', name: 'U', amount: 5000, currency: 'usd', interval: 'MONTH', kind: 'USAGE' } });
+    const monthly = await seedPlan({ applicationId: w.appId, slug: 'm', name: 'M', interval: 'MONTH' }, { currency: 'usd', amount: 100 });
+    const yearly = await seedPlan({ applicationId: w.appId, slug: 'y', name: 'Y', interval: 'YEAR' }, { currency: 'usd', amount: 1200 });
+    const usage = await seedPlan({ applicationId: w.appId, slug: 'u', name: 'U', interval: 'MONTH', kind: 'USAGE' }, { currency: 'usd', amount: 5000 });
     const n = 10_005;
     const monthlyPrice = await pricedAt(monthly.id, 'USD', 100);
     await prisma.$executeRaw`
@@ -54,7 +58,7 @@ describe('operator MCP workspace overview', () => {
     });
     await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: 'mrr_2', planId: usage.id, status: 'ACTIVE' } });
     // ACTIVE on a plan that costs 900 a month, with no price of its own: in no currency's MRR.
-    const unpricedPlan = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'n', name: 'N', amount: 900, currency: 'usd', interval: 'MONTH' } });
+    const unpricedPlan = await seedPlan({ applicationId: w.appId, slug: 'n', name: 'N', interval: 'MONTH' }, { currency: 'usd', amount: 900 });
     await prisma.subscription.create({ data: { applicationId: w.appId, endUserId: 'mrr_4', planId: unpricedPlan.id, status: 'ACTIVE' } });
 
     const overview = (await tool('get_workspace_overview').handler(await ctxFor(w, 'OWNER'), {})) as {
@@ -71,7 +75,7 @@ describe('operator MCP workspace overview', () => {
     expect(billing.json().data.mrr).toEqual([{ currency: 'USD', mrrCents: expected, activeSubscriptions: n + 1 }]);
 
     // A second currency is listed beside the first and never added to it.
-    const eur = await prisma.plan.create({ data: { applicationId: w.appId, slug: 'e', name: 'E', amount: 700, currency: 'EUR', interval: 'MONTH' } });
+    const eur = await seedPlan({ applicationId: w.appId, slug: 'e', name: 'E', interval: 'MONTH' }, { currency: 'EUR', amount: 700 });
     await prisma.subscription.create({
       data: { applicationId: w.appId, endUserId: 'mrr_3', planId: eur.id, status: 'ACTIVE', ...(await pricedAt(eur.id, 'EUR', 700)) },
     });

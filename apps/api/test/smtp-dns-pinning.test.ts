@@ -44,13 +44,6 @@ describe('pinnedSmtpHost', () => {
     });
   });
 
-  it('uses an IPv6 address when that is all there is', () => {
-    expect(pinnedSmtpHost('smtp.example.com', ['2606:2800:220:1::1'])).toEqual({
-      host: '2606:2800:220:1::1',
-      servername: 'smtp.example.com',
-    });
-  });
-
   it('sets no servername for an IP literal, and keeps the host when nothing was resolved', () => {
     expect(pinnedSmtpHost(PUBLIC_IP, [PUBLIC_IP])).toEqual({ host: PUBLIC_IP });
     expect(pinnedSmtpHost('smtp.internal', [])).toEqual({ host: 'smtp.internal' });

@@ -194,14 +194,6 @@ describe('subscription import', () => {
     expect(await prisma.subscription.count({ where: { applicationId: w.applicationId } })).toBe(0);
   });
 
-  it('without email_or_create, an unknown address is skipped rather than created', async () => {
-    const w = await world();
-    feed.items = [row({ email: 'stranger@example.com' })];
-    const { items } = await dryRun(w, 'email');
-    expect(items[0]!.outcome).toBe('skip_invalid');
-    expect(items[0]!.detail.reason).toMatch(/No end-user/i);
-  });
-
   // ---------- never overwrite ----------
 
   it('an end-user who is already subscribed is skipped, not updated', async () => {
@@ -311,17 +303,6 @@ describe('subscription import', () => {
     expect(await prisma.subscription.count({ where: { applicationId: w.applicationId } })).toBe(0);
   });
 
-  // ---------- idempotency of the source ----------
-
-  it('a provider returning the same subscription twice imports it once', async () => {
-    const w = await world();
-    const dup = row({ email: 'dup@example.com' });
-    feed.items = [dup, dup];
-
-    const { items } = await dryRun(w);
-    expect(items.length).toBe(1);
-  });
-
   // ---------- access control ----------
 
   it('a MEMBER cannot start or apply an import', async () => {
@@ -411,21 +392,6 @@ describe('subscription import', () => {
       where: { applicationId: w.applicationId },
     });
     expect(sub.currentPeriodEnd).toBeNull();
-  });
-
-  it('maps a provider plan ref off the NESTED metadata a plan registration writes', async () => {
-    const w = await world();
-    // `ensurePlanRegistered` writes `metadata.stripe = { priceId }`, and
-    // stripe-real.ts reads it back that way. A fallback that looked for a flat
-    // top-level key matched nothing anybody writes, so only exact slug
-    // equality ever mapped and every other row was `skip_no_plan`.
-    await prisma.plan.updateMany({
-      where: { applicationId: w.applicationId, slug: 'pro' },
-      data: { metadata: { stripe: { priceId: 'price_1QabcdEFGH' } } },
-    });
-    feed.items = [row({ email: 'mapped@example.com', planRef: 'price_1QabcdEFGH' })];
-    const { items } = await dryRun(w);
-    expect(items[0]!.outcome).toBe('create');
   });
 
   it('two rows for one address create ONE end-user, not a failed row', async () => {

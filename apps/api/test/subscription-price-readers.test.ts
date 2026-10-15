@@ -14,6 +14,9 @@ import { allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { priceLabel } from '../src/modules/billing/price-label.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface PricedRow {
   price: { amount: number; currency: string } | null;

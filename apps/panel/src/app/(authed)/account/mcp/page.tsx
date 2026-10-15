@@ -337,11 +337,12 @@ export default async function OperatorMcpPage(): Promise<React.JSX.Element> {
           ))}
         </ul>
         <p className="mt-3 text-xs text-[var(--color-faint-fg)]">
-          The tools above are read-only and available to every credential. Write tools (create /
-          update applications, plans, webhook endpoints, members) additionally require the{' '}
-          <code>mcp:operator:write</code> OAuth scope, or a PAT carrying{' '}
-          <code>applications:write</code>. Admin tools (billing-provider credentials, subscription
-          cancel) require <code>mcp:operator:admin</code>, grantable only via OAuth consent. A PAT
+          The tools above are read-only and available to every credential. Write tools (create
+          applications, edit plans, prices and coupons, invite and remove members) additionally
+          require the <code>mcp:operator:write</code> OAuth scope, or a PAT carrying{' '}
+          <code>applications:write</code>. Admin tools (sign-in settings, webhook endpoints,
+          owner and admin roles, API keys, billing-provider credentials, subscription cancel,
+          refunds) require <code>mcp:operator:admin</code>, grantable only via OAuth consent. A PAT
           never carries it. Workspace scoping is structural: the credential is bound to one
           workspace, so every tool sees only that workspace&apos;s data.
         </p>

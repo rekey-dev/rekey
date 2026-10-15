@@ -23,6 +23,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { clearOrganizationRoleCache } from '../src/lib/organization-role-cache.js';
 import { POOL_SQUEEZE_TEST_TIMEOUT_MS, withPoolOf } from './pool-squeeze.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const RACERS = 8;
 

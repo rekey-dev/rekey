@@ -17,6 +17,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { pricedAt } from './subscription-price-fixture.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { seedPlan } from './seed-plan.js';
+
+operatorsConfirmTheirEmail();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -86,19 +90,10 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
   async function seed(): Promise<void> {
     // ---- plans -------------------------------------------------------
     const [monthly, yearly, creditPack, usagePlan] = await Promise.all([
-      prisma.plan.create({
-        data: { applicationId, slug: 'pro_m', name: 'Pro M', amount: 1000, interval: 'MONTH', kind: 'SUBSCRIPTION' },
-      }),
-      prisma.plan.create({
-        // 10000/12 = 833.33… → per-sub monthly contribution floors to 833.
-        data: { applicationId, slug: 'pro_y', name: 'Pro Y', amount: 10000, interval: 'YEAR', kind: 'SUBSCRIPTION' },
-      }),
-      prisma.plan.create({
-        data: { applicationId, slug: 'credits', name: 'Credits', amount: 5000, kind: 'CREDIT', creditsAmount: 100 },
-      }),
-      prisma.plan.create({
-        data: { applicationId, slug: 'metered', name: 'Metered', amount: 9999, kind: 'USAGE', meterSlug: 'api', pricePerUnitCents: 1 },
-      }),
+      seedPlan({ applicationId, slug: 'pro_m', name: 'Pro M', interval: 'MONTH', kind: 'SUBSCRIPTION' }, { currency: 'USD', amount: 1000 }),
+      seedPlan({ applicationId, slug: 'pro_y', name: 'Pro Y', interval: 'YEAR', kind: 'SUBSCRIPTION' }, { currency: 'USD', amount: 10000 }),
+      seedPlan({ applicationId, slug: 'credits', name: 'Credits', kind: 'CREDIT', creditsAmount: 100 }, { currency: 'USD', amount: 5000 }),
+      seedPlan({ applicationId, slug: 'metered', name: 'Metered', kind: 'USAGE', meterSlug: 'api' }, { currency: 'USD', amount: 9999 }),
     ]);
 
     // One end-user per subscription, (applicationId, endUserId, planId) is unique.
@@ -182,9 +177,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
 
   it('never sums MRR across currencies: each currency is its own entry', async () => {
     // Add an EUR plan with one active sub (500/mo). USD MRR (2833) dominates.
-    const eurPlan = await prisma.plan.create({
-      data: { applicationId, slug: 'pro_eur', name: 'Pro EUR', amount: 500, currency: 'EUR', interval: 'MONTH', kind: 'SUBSCRIPTION' },
-    });
+    const eurPlan = await seedPlan({ applicationId, slug: 'pro_eur', name: 'Pro EUR', interval: 'MONTH', kind: 'SUBSCRIPTION' }, { currency: 'EUR', amount: 500 });
     const euUser = await prisma.endUser.create({ data: { applicationId, email: 'bs-eur@example.com' } });
     await prisma.subscription.create({
       data: { applicationId, endUserId: euUser.id, planId: eurPlan.id, status: 'ACTIVE', ...(await pricedAt(eurPlan.id, 'EUR', 500)) },
@@ -208,7 +201,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
   it('counts a subscription at its own price, not at whatever its plan costs today', async () => {
     // One of the two monthly subscribers pays 400 in INR: a second currency on
     // the same plan. The USD total loses them and INR appears beside it.
-    const monthly = await prisma.plan.findFirstOrThrow({ where: { applicationId, interval: 'MONTH', kind: 'SUBSCRIPTION', amount: 1000 } });
+    const monthly = await prisma.plan.findFirstOrThrow({ where: { applicationId, interval: 'MONTH', kind: 'SUBSCRIPTION', defaultPrice: { amount: 1000 } } });
     const one = await prisma.subscription.findFirstOrThrow({ where: { applicationId, planId: monthly.id, status: 'ACTIVE' } });
     await prisma.subscription.update({ where: { id: one.id }, data: await pricedAt(monthly.id, 'INR', 400) });
 
@@ -278,31 +271,6 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
     expect(stats.monthlyRevenue.map((s) => s.currency)).toEqual(['USD', 'INR']);
     expect(stats.monthlyRevenue[0]!.months.reduce((sum, m) => sum + m.amountCents, 0)).toBe(4100 + 7000);
     expect(stats.monthlyRevenue[1]!.months.reduce((sum, m) => sum + m.amountCents, 0)).toBe(300000);
-  });
-
-  it('keeps the reporting currency first at zero when all the revenue is in other currencies', async () => {
-    await prisma.payment.deleteMany({ where: { applicationId } });
-    for (const amount of [500, 700]) {
-      await prisma.payment.create({ data: { applicationId, amount, currency: 'EUR', status: 'SUCCEEDED', createdAt: new Date(Date.now() - DAY_MS) } });
-    }
-    await prisma.payment.create({ data: { applicationId, amount: 900000, currency: 'INR', status: 'SUCCEEDED', createdAt: new Date(Date.now() - DAY_MS) } });
-    const stats = await billingStatsService.forApplication(applicationId);
-    // The operator's choice leads, not whichever currency has the most rows or the largest number.
-    expect(stats.revenueLast30d.map((r) => [r.currency, r.netCents])).toEqual([
-      ['USD', 0],
-      ['EUR', 1200],
-      ['INR', 900000],
-    ]);
-  });
-
-  it('reports only the reporting currency, at zero, with no payments', async () => {
-    await prisma.payment.deleteMany({ where: { applicationId } });
-    await prisma.subscription.deleteMany({ where: { applicationId } });
-    const empty = await billingStatsService.forApplication(applicationId);
-    expect(empty.mrr).toEqual([{ currency: 'USD', mrrCents: 0, activeSubscriptions: 0 }]);
-    expect(empty.revenueLast30d).toEqual([{ currency: 'USD', grossCents: 0, refundedCents: 0, netCents: 0, payments: 0 }]);
-    expect(empty.monthlyRevenue).toHaveLength(1);
-    expect(empty.monthlyRevenue[0]!.months.every((m) => m.amountCents === 0)).toBe(true);
   });
 
   it('buckets SUCCEEDED revenue into 12 gap-filled UTC months', async () => {

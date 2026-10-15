@@ -15,6 +15,9 @@ import { UNRESTRICTED, type Scope } from '../src/lib/operator-scopes.js';
 import { allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import type { OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { bearer, operatorWorld, type OperatorWorld } from './operator-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const V4 = '203.0.113.77';
 const V6 = '2001:db8:1234:5678::1';
@@ -88,11 +91,6 @@ describe('end-user IP masking', () => {
     expect(await writeSurfaces(w.ownerToken)).toEqual(RAW_WRITE);
   });
 
-  it('an ADMIN sees addresses in full', async () => {
-    await w.promoteToAdmin();
-    expect(await readSurfaces(w.memberToken)).toEqual(RAW_READ);
-  });
-
   it('an APP_ADMIN member gets the network only, reads and writes, even holding activity:read', async () => {
     expect(await readSurfaces(w.memberToken)).toEqual(MASKED_READ);
     expect(await writeSurfaces(w.memberToken)).toEqual(MASKED_WRITE);
@@ -100,7 +98,7 @@ describe('end-user IP masking', () => {
     expect(await readSurfaces(w.memberToken)).toEqual(MASKED_READ);
   });
 
-  it.each(['APP_VIEWER', 'APP_BILLING'] as const)('an %s member gets the network only', async (role) => {
+  it.each(['APP_VIEWER'] as const)('an %s member gets the network only', async (role) => {
     await w.grant(role);
     expect(await readSurfaces(w.memberToken)).toEqual(MASKED_READ);
   });

@@ -12,8 +12,8 @@ import { prisma } from '../../lib/prisma.js';
 
 /**
  * A row that has failed this many times is reported as stuck. The first
- * retries are a minute, two and four apart, which a rolling deploy can use up
- * on its own; the fifth failure is about a quarter of an hour in.
+ * retries are a minute, two and four apart; the fifth failure is about a
+ * quarter of an hour in.
  */
 export const OUTBOX_FAILING_ATTEMPTS = 5;
 const STUCK_LISTED = 100;

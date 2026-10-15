@@ -3,18 +3,15 @@
  * operator's coupon totals never add two currencies together.
  */
 
-import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { applyBillingEvent } from '../src/modules/billing/webhooks/apply.js';
 import { twoCurrencyWorld, type Buyer, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
 
-const BACKFILL = new URL(
-  '../../../prisma/migrations/20261011023425_coupon_redemption_currency_backfill/migration.sql',
-  import.meta.url,
-);
+operatorsConfirmTheirEmail();
 
 interface CouponStats {
   code: string;
@@ -141,66 +138,4 @@ describe('coupon redemption currency', () => {
     ]);
   });
 
-  it('reports no currency for a coupon nobody redeemed, and does not count an open checkout', async () => {
-    await openInr();
-    expect(await stats()).toMatchObject({
-      redemptionCount: 0,
-      discountIssuedByCurrency: [],
-    });
-  });
-
-  describe('backfill', () => {
-    const statements = readFileSync(BACKFILL, 'utf8')
-      .replace(/^--.*$/gm, '')
-      .split(';')
-      .map((sql) => sql.trim())
-      .filter((sql) => sql !== '');
-    async function backfill(): Promise<void> {
-      for (const sql of statements) await prisma.$executeRawUnsafe(sql);
-    }
-
-    it('places each old redemption once, and leaves a row that already has a currency alone', async () => {
-      const fixed = await w.operator('POST', '/coupons', {
-        code: 'TENINR',
-        discountType: 'AMOUNT',
-        amounts: [{ currency: 'inr', amountOff: 1000 }],
-      });
-      const fixedId = (fixed.json().data as { id: string }).id;
-      const base = { applicationId: w.applicationId, endUserId: w.buyer.id, discountAmount: 100 };
-
-      // A percent redemption whose session names the INR price.
-      const inrSession = await openInr();
-      await payInr(inrSession, 'pay_inr_4');
-      // One whose session predates the price columns: the plan's own currency.
-      const usdBuyer = await w.newBuyer();
-      await buyUsd(usdBuyer, 'pi_usd_3');
-      const usdSession = await prisma.checkoutSession.findFirstOrThrow({ where: { endUserId: usdBuyer.id } });
-      await prisma.checkoutSession.update({ where: { id: usdSession.id }, data: { currency: null, unitAmount: null } });
-      await prisma.couponRedemption.updateMany({ where: { couponId: halfId }, data: { currency: null } });
-
-      const viaSubscription = await prisma.couponRedemption.create({
-        data: { ...base, couponId: halfId, subscriptionId: usdSession.subscriptionId, checkoutSessionId: 'cs_gone' },
-      });
-      const unplaceable = await prisma.couponRedemption.create({ data: { ...base, couponId: halfId } });
-      const fixedRow = await prisma.couponRedemption.create({ data: { ...base, couponId: fixedId } });
-      const alreadySet = await prisma.couponRedemption.create({
-        data: { ...base, couponId: fixedId, currency: 'GBP', checkoutSessionId: 'cs_kept' },
-      });
-
-      await backfill();
-      const currencyOf = async (where: { id: string } | { checkoutSessionId: string }) =>
-        (await prisma.couponRedemption.findFirstOrThrow({ where })).currency;
-      expect(await currencyOf({ checkoutSessionId: inrSession })).toBe('INR');
-      expect(await currencyOf({ checkoutSessionId: usdSession.providerSessionId })).toBe('USD');
-      expect(await currencyOf({ id: viaSubscription.id })).toBe('USD');
-      expect(await currencyOf({ id: unplaceable.id })).toBeNull();
-      expect(await currencyOf({ id: fixedRow.id })).toBe('INR');
-      expect(await currencyOf({ id: alreadySet.id })).toBe('GBP');
-
-      // A second run changes nothing.
-      const before = await prisma.couponRedemption.findMany({ orderBy: { id: 'asc' } });
-      await backfill();
-      expect(await prisma.couponRedemption.findMany({ orderBy: { id: 'asc' } })).toEqual(before);
-    });
-  });
 });

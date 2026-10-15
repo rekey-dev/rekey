@@ -14,6 +14,7 @@ import { ActionForm } from '@/components/ActionForm';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { FlashBanner } from '@/components/FlashBanner';
 import { Banner } from '@/components/Banner';
+import { EMAIL_NOT_VERIFIED_COPY } from '@/components/ConfirmEmailNotice';
 import { PasskeyRegisterButton } from '@/components/PasskeyRegisterButton';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
@@ -110,6 +111,7 @@ const ERRORS: Record<string, string> = {
   PASSKEY_ALREADY_REGISTERED:
     'That authenticator is already registered on this account.',
   PASSKEY_NOT_FOUND: 'That passkey is no longer registered.',
+  EMAIL_NOT_VERIFIED: EMAIL_NOT_VERIFIED_COPY,
   invalid_response: 'Browser returned an invalid registration response. Retry.',
 };
 

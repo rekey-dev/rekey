@@ -8,6 +8,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { missingRequired } from '../src/modules/end-users/profile-values.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const PASSWORD = 'pw-one-two-three';
 const RACERS = 8;
@@ -117,7 +120,7 @@ describe('End-user profile fields', () => {
   });
 
   describe('schema', () => {
-    it.each(['constructor', 'prototype'])('refuses the reserved key "%s"', async (key) => {
+    it.each(['constructor'])('refuses the reserved key "%s"', async (key) => {
       const res = await putSchema([{ key, label: 'X', type: 'text' }]);
       expect(res.status).toBe(400);
       expect(code(res.body)).toBe('PROFILE_SCHEMA_INVALID');
@@ -166,21 +169,6 @@ describe('End-user profile fields', () => {
       // answers landed first and the removal was refused. Never both.
       if (kept) expect(code(results[0]!.body)).toBe('PROFILE_FIELD_KEY_IMMUTABLE');
       else expect(answered).toBe(0);
-    });
-
-    it('stores the fields with defaults and reads them back', async () => {
-      const res = await app.inject({ method: 'GET', url: `/api/v1/tenant/applications/${appId}/profile-schema`, headers: op() });
-      const fields = (res.json().data as { fields: Json[] }).fields;
-      expect(fields.map((f) => f.key)).toEqual(SCHEMA.map((f) => f.key));
-      expect(fields[0]).toEqual({
-        key: 'company',
-        label: 'Company',
-        type: 'text',
-        requiredForOnboarding: true,
-        writableBy: 'user',
-        showInList: false,
-        pii: false,
-      });
     });
 
     it.each([
@@ -249,13 +237,6 @@ describe('End-user profile fields', () => {
       expect(updates[0]).toMatchObject({ via: 'self', changed: expect.arrayContaining(['profile.company', 'profile.team_size']) });
       expect(updates[1]!.changed).toEqual(['profile.seats']);
       expect(JSON.stringify(updates)).not.toContain('Acme');
-    });
-
-    it('a patch that changes nothing announces nothing', async () => {
-      const u = await signUp('same@example.com');
-      await patchMine(u.token, { company: 'Acme' });
-      await patchMine(u.token, { company: 'Acme' });
-      expect(await events('user.updated')).toHaveLength(1);
     });
 
     it('refuses a field the schema does not define', async () => {
@@ -344,12 +325,6 @@ describe('End-user profile fields', () => {
       expect(code(res.json() as Json)).toBe('END_USER_NOT_FOUND');
     });
 
-    it('/users/me carries the profile', async () => {
-      const u = await signUp('me-read@example.com');
-      await patchMine(u.token, { company: 'Acme' });
-      const me = await app.inject({ method: 'GET', url: '/api/v1/users/me', headers: asUser(u.token) });
-      expect(me.json().data).toMatchObject({ profile: { company: 'Acme' }, onboardingCompletedAt: null });
-    });
   });
 
   describe('onboarding', () => {

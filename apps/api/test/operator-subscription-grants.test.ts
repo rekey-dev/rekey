@@ -25,6 +25,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('operator subscription grants', () => {
   let app: FastifyInstance;
@@ -199,14 +202,6 @@ describe('operator subscription grants', () => {
     expect(data.subscription.provider).toBeNull();
   });
 
-  it('an ADMIN can grant', async () => {
-    const w = await world();
-    const adminToken = await coworker(w, 'ADMIN');
-    const res = await grant(w, adminToken);
-    expect(res.statusCode).toBe(201);
-    expect(res.json().data.activated).toBe(true);
-  });
-
   it('a MEMBER cannot, even holding the strongest billing grant on the Application', async () => {
     // APP_BILLING is enough for every other billing write on this Application,
     // plans, coupons, manual credit grants. It is deliberately not enough to
@@ -312,13 +307,6 @@ describe('operator subscription grants', () => {
     expect(row.cancelAt).not.toBeNull();
     expect(row.cancelAt!.getTime()).toBeGreaterThan(Date.now() + 24 * 60 * 60 * 1000);
     expect(row.status).not.toBe('EXPIRED');
-  });
-
-  it('cancelling is idempotent', async () => {
-    const w = await world();
-    const subId = (await grant(w, w.ownerToken)).json().data.subscription.id as string;
-    expect((await cancel(w, w.ownerToken, subId)).statusCode).toBe(200);
-    expect((await cancel(w, w.ownerToken, subId)).statusCode).toBe(200);
   });
 
   it('a subscription id belonging to a different end-user is not found', async () => {

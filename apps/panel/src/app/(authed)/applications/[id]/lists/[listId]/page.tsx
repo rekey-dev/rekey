@@ -81,7 +81,7 @@ export default async function ListMembersPage({
     ).catch(unlessBusy(() => null)),
   ]);
   const base = `/applications/${id}/lists/${listId}`;
-  const canExport = application.access?.level === 'workspace-admin';
+  const canExport = application.access.level === 'workspace-admin';
   const filterParams: Record<string, string> = {
     ...(status ? { status } : {}),
     ...(search ? { search } : {}),

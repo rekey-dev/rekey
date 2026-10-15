@@ -1,7 +1,5 @@
 # `@rekey.dev/node`
 
-> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
-
 The server SDK for [Rekey](https://rekey.dev) — auth, billing, usage, credits, licenses, and teams for your application, from any server-side TypeScript runtime (Node, Bun, Deno, Express, Fastify, Nest, Hono).
 
 > **For AI coding agents:** start at [AGENTS.md](../../AGENTS.md) — it has the do-this-first rules.
@@ -97,7 +95,7 @@ Everything hangs off namespaces on the client. Every amount is an integer in the
 ### `rekey.auth`
 | Method | Description |
 | --- | --- |
-| `signUp({ email, password, metadata? })` | Create an end-user; returns user + token pair. |
+| `signUp({ email, password, metadata?, emailVerified? })` | Create an end-user; returns user + token pair. Pass `emailVerified: true` only when your server has already confirmed the address. An account left unverified cannot register a passkey, enrol MFA or link a provider, and loses this password the first time someone proves the mailbox by magic link, social sign-in or reset. See [docs/auth.md](https://github.com/rekey-dev/rekey/blob/main/docs/auth.md#an-unverified-account-belongs-to-whoever-proves-the-mailbox). |
 | `signIn({ email, password })` | Authenticate. Returns a `SignInOutcome` — **branch on `mfaRequired`** before reading `accessToken`. |
 | `mfaVerify({ mfaChallengeToken, code })` | Exchange an MFA challenge for a real session. |
 | `getCurrentUser(accessToken, { include? })` | Resolve the end-user behind a token (+ `activeOrganizationId`, `activeOrganizationRole`, `activeOrganizationBaseRole`). `include: ['entitlements', 'device', 'subscription', 'organization', 'licenses']` adds any of those in the same call, typed to what you asked for. |

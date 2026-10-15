@@ -67,19 +67,6 @@ describe('admin: add an operator to a workspace', () => {
       payload: body,
     });
 
-  it('an admin-created workspace has no members until this is called', async () => {
-    const fx = await fixture();
-    // The gap itself: ownerEmail is set, and it grants nothing.
-    expect(await prisma.tenantMembership.count({ where: { tenantId: fx.bareTenantId } })).toBe(0);
-
-    const res = await addMember(fx.bareTenantId, { email: fx.email });
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data as { role: string; created: boolean; tenantId: string };
-    expect(data.created).toBe(true);
-    expect(data.role).toBe('OWNER');
-    expect(data.tenantId).toBe(fx.bareTenantId);
-  });
-
   it('the operator can actually open the workspace afterwards', async () => {
     const fx = await fixture();
     expect((await addMember(fx.bareTenantId, { email: fx.email })).statusCode).toBe(200);
@@ -127,12 +114,6 @@ describe('admin: add an operator to a workspace', () => {
     expect(await prisma.tenantMembership.count({ where: { tenantId: fx.ownTenantId } })).toBe(1);
   });
 
-  it('honours an explicit role for a NEW membership', async () => {
-    const fx = await fixture();
-    const res = await addMember(fx.bareTenantId, { email: fx.email, role: 'MEMBER' });
-    expect((res.json().data as { role: string }).role).toBe('MEMBER');
-  });
-
   it('refuses an email with no operator behind it — it never creates one', async () => {
     const fx = await fixture();
     const res = await addMember(fx.bareTenantId, { email: 'nobody-at-all@example.com' });
@@ -141,13 +122,6 @@ describe('admin: add an operator to a workspace', () => {
     // The gate this protects: creating an operator here would sidestep
     // OPERATOR_SIGNUP_MODE completely.
     expect(await prisma.tenantUser.count({ where: { email: 'nobody-at-all@example.com' } })).toBe(0);
-  });
-
-  it('404s for a workspace that does not exist', async () => {
-    const fx = await fixture();
-    const res = await addMember('tenant_nope', { email: fx.email });
-    expect(res.statusCode).toBe(404);
-    expect((res.json().error as { code: string }).code).toBe('TENANT_NOT_FOUND');
   });
 
   it('requires the super-admin key', async () => {

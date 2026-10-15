@@ -29,7 +29,7 @@ import { RekeyError } from '../lib/error.js';
 import { verifyTenantAccessToken, type TenantSessionClaims } from '../lib/tenant-jwt.js';
 import { prisma } from '../lib/prisma.js';
 import type { PublicTenantUser } from '../modules/tenant-auth/tenant-auth.service.js';
-import { sessionEnded, sessionIssuedBefore } from '../lib/session-stamp.js';
+import { accessTokenEndedByStamp, sessionEnded } from '../lib/session-stamp.js';
 import { resolveMembershipScopes, type Scope } from '../lib/operator-scopes.js';
 import {
   getCachedAuth,
@@ -41,6 +41,12 @@ import {
 declare module 'fastify' {
   interface FastifyRequest {
     tenantUser?: PublicTenantUser;
+    /**
+     * `TenantUser.sessionsInvalidBefore` as read when this request's session
+     * was admitted. A route that mints a new session from the current one
+     * passes it on, so the mint is refused if every session was ended since.
+     */
+    tenantSessionStamp?: Date | null;
     tenantId?: string;
     tenantRole?: TenantRole;
     /** Membership row id for (tenantUser, tenant), used by per-app grant checks. */
@@ -91,12 +97,13 @@ export async function requireTenantSession(
   // The stamp is compared per token (each carries its own `iat`), so it is
   // checked on a hit as well: a cached row still refuses a token minted
   // before the stamp it holds.
-  if (sessionIssuedBefore(claims, resolved.user.sessionsInvalidBefore)) {
+  if (accessTokenEndedByStamp(claims, resolved.user.sessionsInvalidBefore)) {
     throw sessionEndedEverywhere();
   }
 
   const { membership, user } = resolved;
   request.tenantUser = user;
+  request.tenantSessionStamp = resolved.user.sessionsInvalidBefore;
   request.tenantId = claims.tid;
   // Use the LIVE role from DB, not the token, mirrors role downgrades.
   request.tenantRole = membership.role;
@@ -145,7 +152,7 @@ async function loadAuth(claims: TenantSessionClaims): Promise<AuthEntry> {
   }
   // Minted before the operator's last password change or sign-out
   // everywhere: refused now, whatever the configured access lifetime.
-  if (sessionIssuedBefore(claims, user.sessionsInvalidBefore)) {
+  if (accessTokenEndedByStamp(claims, user.sessionsInvalidBefore)) {
     throw sessionEndedEverywhere();
   }
   // Only this session was revoked (DELETE /tenant/auth/sessions/:id). The

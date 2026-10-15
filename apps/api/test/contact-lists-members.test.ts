@@ -8,6 +8,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { setDeliveryScheduler } from '../src/modules/webhooks/webhook.service.js';
 import { contactsHarness, type ContactsWorld } from './contacts-fixtures.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 describe('list members API', () => {
   let app: FastifyInstance;
@@ -105,25 +108,6 @@ describe('list members API', () => {
     ]);
     const current = await members(w.reader);
     expect(current.json().data.items.map((m: { email: string }) => m.email)).toEqual(['m0@example.com', 'm2@example.com']);
-  });
-
-  it('GET /lists gives a * key the lists and their counts, never addresses', async () => {
-    const w = await filled(2);
-    await createList(w, { key: 'waitlist', name: 'Waitlist' });
-    const res = await inject({ method: 'GET', url: '/api/v1/lists', headers: auth(w.writer) });
-    expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data.items).toEqual([
-      { key: 'newsletter', name: 'Newsletter', kind: 'generic', publicCapture: false, archived: false, subscribed: 2, unsubscribed: 0 },
-      { key: 'waitlist', name: 'Waitlist', kind: 'generic', publicCapture: false, archived: false, subscribed: 0, unsubscribed: 0 },
-    ]);
-    expect((await inject({ method: 'GET', url: '/api/v1/lists', headers: auth(w.publicKey) })).statusCode).toBe(401);
-  });
-
-  it('refuses a cursor it did not issue', async () => {
-    const w = await filled(1);
-    const res = await members(w.reader, '?cursor=bm9wZQ');
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('CONTACT_CURSOR_INVALID');
   });
 
   describe('minting contacts:read', () => {

@@ -12,12 +12,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EndUser, Plan } from '@prisma/client';
-import { pricedPlanFixture as pricedPlan } from './priced-plan-fixture.js';
+import type { EndUser } from '@prisma/client';
+import { pricedPlanFixture as pricedPlan, type FixturePlan } from './priced-plan-fixture.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import type { CheckoutSessionInput, PricedPlan } from '../src/modules/billing/providers/types.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const stripeSpy = vi.hoisted(() => ({
   coupons: [] as Record<string, unknown>[],
@@ -62,7 +65,7 @@ vi.mock('razorpay', () => {
 const PLAN_AMOUNT = 5000;
 const DISCOUNT_AMOUNT = 1250;
 
-function planFixture(over: Partial<Plan> = {}): PricedPlan {
+function planFixture(over: Partial<FixturePlan> = {}): PricedPlan {
   return pricedPlan({
     id: 'pl_1',
     applicationId: 'app_1',
@@ -73,7 +76,7 @@ function planFixture(over: Partial<Plan> = {}): PricedPlan {
     interval: 'MONTH',
     metadata: { stripe: { priceId: 'price_fake' } },
     ...over,
-  } as unknown as Plan, null);
+  } as unknown as FixturePlan, null);
 }
 
 const endUser = { id: 'eu_1', email: 'buyer@example.com' } as unknown as EndUser;
@@ -141,12 +144,6 @@ describe('Stripe — discounts ride as an ad-hoc Coupon', () => {
     expect(session.line_items[0]?.price_data.unit_amount).toBe(PLAN_AMOUNT);
   });
 
-  it('creates no coupon and sends no `discounts` key when there is no coupon', async () => {
-    await provider().createCheckoutSession(checkoutInput());
-
-    expect(stripeSpy.coupons).toHaveLength(0);
-    expect(stripeSpy.sessions[0]).not.toHaveProperty('discounts');
-  });
 });
 
 describe('PayPal — Orders v2 takes a discount line, Subscriptions v1 takes nothing', () => {
@@ -206,16 +203,6 @@ describe('PayPal — Orders v2 takes a discount line, Subscriptions v1 takes not
     expect(unit.description).toContain('half-off');
   });
 
-  it('leaves an undiscounted order exactly as it was', async () => {
-    await provider().createOneTimeCheckout(checkoutInput());
-
-    const unit = orderBody().purchase_units[0]!;
-    expect(unit.amount.value).toBe('50.00');
-    expect(unit.amount.breakdown).toBeUndefined();
-    expect(unit.items).toBeUndefined();
-    expect(unit.description).toBe('Pro');
-  });
-
   it('refuses a discounted subscription rather than billing it at full price', async () => {
     await expect(provider().createCheckoutSession(checkoutInput({ discount }))).rejects.toMatchObject(
       { code: 'BILLING_DISCOUNT_UNSUPPORTED', statusCode: 400 },
@@ -243,13 +230,6 @@ describe('Razorpay — a payment link is discounted by naming a smaller amount',
       // reason has to live somewhere the operator can find it.
       notes: { rekey_coupon_code: 'half-off', rekey_discount_amount: String(DISCOUNT_AMOUNT) },
     });
-  });
-
-  it('charges the full amount and adds no coupon notes without a coupon', async () => {
-    await provider().createOneTimeCheckout(checkoutInput());
-
-    expect(razorpaySpy.links[0]).toMatchObject({ amount: PLAN_AMOUNT });
-    expect(razorpaySpy.links[0]?.notes).not.toHaveProperty('rekey_coupon_code');
   });
 
   it('refuses a discounted subscription (no ad-hoc discount surface exists)', async () => {

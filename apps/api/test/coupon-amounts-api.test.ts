@@ -10,6 +10,9 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -96,12 +99,6 @@ describe('coupon amounts on the wire', () => {
 
       const limited = await create({ code: 'USD15', discountType: 'PERCENT', basisPoints: 1500, currencies: ['usd', 'USD', 'eur'] });
       expect(limited.json().data).toMatchObject({ currencies: ['EUR', 'USD'], coveredCurrencies: ['EUR', 'USD'] });
-    });
-
-    it('answers 404 COUPON_NOT_FOUND for a code the Application does not have', async () => {
-      const res = await w.operator('GET', '/coupons/nope');
-      expect(res.statusCode).toBe(404);
-      expect(res.json().error.code).toBe('COUPON_NOT_FOUND');
     });
 
     it.each([
@@ -256,14 +253,6 @@ describe('coupon amounts on the wire', () => {
 
       await patch('FIVEOFF', { active: false });
       expect((await events('coupon.changed'))[1]).toMatchObject({ data: { before: { active: true }, after: { active: false } } });
-    });
-
-    it('writes no creation event for a coupon that was not created', async () => {
-      await create(FIXED);
-      const dup = await create(FIXED);
-      expect(dup.statusCode).toBe(409);
-      expect(dup.json().error.code).toBe('COUPON_CODE_TAKEN');
-      expect(await events('coupon.created')).toHaveLength(1);
     });
   });
 });

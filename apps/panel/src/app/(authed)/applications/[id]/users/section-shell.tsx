@@ -76,8 +76,7 @@ export function SectionShell<T>({
   const ok = section !== undefined && isSection(section) && section.status === 'ok';
   const ignored = ok ? (section.ignoredFilters ?? []) : [];
   const stale = ok && section.cache?.stale;
-  // Older API builds send no `gaps`; read that as none.
-  const gaps: AnalyticsMetricGap[] = ok ? (section.gaps ?? []) : [];
+  const gaps: AnalyticsMetricGap[] = ok ? section.gaps : [];
   const header = (
     <SectionHeader
       title={title}

@@ -18,6 +18,7 @@ import { recordSecurityEvent, requestContext } from '../../lib/security-events.j
 import { ok, okPage, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { CREDENTIAL_BODY_LIMIT, SIGN_UP_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
+import { assertVerifiedForCredential } from './user-lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Shared error fragments
@@ -42,6 +43,21 @@ const RATE_LIMITED = 'RATE_LIMITED: too many requests for this window. Honour th
 
 /** Shared by every route in the public-bootstrap plugin (`authRoutes`). */
 const BOOTSTRAP_ERRORS = { 401: BOOTSTRAP_401, 403: BOOTSTRAP_403, 429: RATE_LIMITED } as const;
+
+/** The three routes that mail a link to an address the caller names. */
+const EMAIL_REQUEST_ERRORS = {
+  429:
+    RATE_LIMITED +
+    ' Or AUTH_EMAIL_RECIPIENT_CAPPED (secret key only): this address has been sent its hourly or ' +
+    'daily share of auth email; wait `Retry-After`. A publishable key gets the usual 200 body instead.',
+  503:
+    'DEPENDENCY_UNAVAILABLE: the per-recipient email counter (Redis) is unreachable, so nothing ' +
+    'was sent. Answered for every address alike.',
+} as const;
+
+const UNVERIFIED_403 =
+  ' Or EMAIL_NOT_VERIFIED: this account has not confirmed its email address, so it cannot add ' +
+  'a sign-in method yet.';
 
 const USER_SESSION_401 =
   BOOTSTRAP_401 +
@@ -164,6 +180,7 @@ const SignUpBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
+  emailVerified: z.boolean().optional(),
   device: DeviceBindingRequestSchema.optional(),
   client: ClientHintSchema.optional(),
 });
@@ -363,7 +380,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'alongside the welcome mail, both are best-effort and neither can fail the sign-up. ' +
           'With `authConfig.requireEmailVerification` on this returns 403 `EMAIL_NOT_VERIFIED` ' +
           'instead of a session: the account IS created and the link IS sent (that switch ' +
-          'overrides the send setting), but no token is issued until the address is confirmed.',
+          'overrides the send setting), but no token is issued until the address is confirmed. ' +
+          'A publishable-key sign-up for an address that already has an account gets that same ' +
+          '403, creates nothing, and the owner of the address is emailed instead.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -375,6 +394,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               type: 'object',
               additionalProperties: true,
               description: 'Free-form per-app metadata (display name, avatar, custom fields).',
+            },
+            emailVerified: {
+              type: 'boolean',
+              description:
+                'Secret key only. `true` says your server has already confirmed this person owns the ' +
+                'address: the account is created verified and no verification email is sent. Leave it ' +
+                'out otherwise. An account that stays unverified loses its password, passkeys and ' +
+                'linked providers the first time someone proves the mailbox by magic link, social ' +
+                'sign-in or password reset.',
             },
             device: DEVICE_BODY_SCHEMA,
             client: CLIENT_BODY_SCHEMA,
@@ -395,11 +423,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               BOOTSTRAP_403 +
               DEVICE_ERRORS_403 +
               ' Also: SIGNUP_DISABLED: public sign-up is off for this Application; or ' +
+              'EMAIL_VERIFIED_REQUIRES_SECRET_KEY: a publishable caller sent `emailVerified: true`; or ' +
               'SIGNUP_REQUIRES_SECRET_KEY: the Application only allows creating end-users with ' +
               "a secret key; or TENANT_QUOTA_EXCEEDED: the workspace's end-user limit is " +
               'reached; or EMAIL_NOT_VERIFIED: `authConfig.requireEmailVerification` is on, so ' +
-              'no session is issued (the account IS created and the verification email IS sent).',
-            409: 'EMAIL_ALREADY_EXISTS: another end-user in this Application already uses that email.',
+              'no session is issued (for a new address the account IS created and the ' +
+              'verification email IS sent; a publishable key gets the identical answer for an ' +
+              'address that already has an account).',
+            409:
+              'EMAIL_ALREADY_EXISTS: another end-user in this Application already uses that email. ' +
+              'A secret key always gets this. A publishable key gets it only while ' +
+              '`authConfig.requireEmailVerification` is off; with it on, a taken address answers ' +
+              'the same 403 EMAIL_NOT_VERIFIED as a new one and the owner is emailed instead.',
           }),
         },
       },
@@ -411,6 +446,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         email: body.email,
         password: body.password,
         ...(body.metadata !== undefined && { metadata: body.metadata }),
+        ...(body.emailVerified !== undefined && { emailVerified: body.emailVerified }),
         device: deviceContext(req, body.device, body.client),
         // Signup policy: a `secret_only` app refuses creation via a pub key.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
@@ -680,6 +716,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
+            ...EMAIL_REQUEST_ERRORS,
             400: 'AUTH_METHOD_DISABLED: password sign-in is disabled for this Application.',
           }),
         },
@@ -740,6 +777,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
+            ...EMAIL_REQUEST_ERRORS,
             400: 'AUTH_METHOD_DISABLED: magic-link sign-in is disabled for this Application.',
           }),
         },
@@ -1011,7 +1049,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             },
             'Always 200; see field semantics.',
           ),
-          ...errs({ ...BOOTSTRAP_ERRORS }),
+          ...errs({ ...BOOTSTRAP_ERRORS, ...EMAIL_REQUEST_ERRORS }),
         },
       },
     },
@@ -1117,7 +1155,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Checks a secret inside a session, so it gets the credential tier's
       // 10/min per (account, IP), not the 600/min identity budget. See
-      // test/rate-limit-hardening.test.ts.
+      // test/credential-guess-rate-limits.test.ts.
       config: { rateLimit: authRateLimit(10) },
       preHandler: refuseWhileImpersonating("change this account's password"),
       schema: {
@@ -1293,7 +1331,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
               USER_SESSION_401 +
               ' Or STEP_UP_REQUIRED: a publishable caller did not send a valid `password` or `code`.' +
               ' Or MFA_CODE_REUSED: the authenticator code was already accepted, wait for the next one.',
-            403: IMPERSONATION_403,
+            403: IMPERSONATION_403 + UNVERIFIED_403,
           }),
         },
       },
@@ -1305,6 +1343,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       },
     },
     async (req) => {
+      assertVerifiedForCredential(req.endUser!, 'register a passkey');
       if (req.authKind === 'publishable') {
         const proof = (req.body ?? {}) as { password?: unknown; code?: unknown };
         await assertStepUp({
@@ -1374,7 +1413,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           ...errs({
             ...AUTHENTICATED_ERRORS,
             401: USER_SESSION_401 + ' Or WEBAUTHN_REGISTRATION_FAILED: the ceremony did not verify.',
-            403: IMPERSONATION_403,
+            403: IMPERSONATION_403 + UNVERIFIED_403,
             409: 'WEBAUTHN_ALREADY_REGISTERED: this passkey is already registered.',
           }),
         },

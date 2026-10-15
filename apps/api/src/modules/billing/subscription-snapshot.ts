@@ -2,8 +2,9 @@
  * The one place a subscription's price is written.
  *
  * A subscription holds a snapshot of what it pays: `planPriceId`, `currency`
- * and `unitAmount`, all three or none. No database constraint holds that:
- * it is true because nothing else assigns those columns, and
+ * and `unitAmount`, all three or none, which the database holds with
+ * `subscriptions_price_snapshot`. That the currency and the row agree is true
+ * because nothing else assigns those columns:
  * `test/money-source-scan.test.ts` type-checks the source tree to keep it so.
  */
 

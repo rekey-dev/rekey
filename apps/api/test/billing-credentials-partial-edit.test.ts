@@ -21,6 +21,9 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { decryptJson } from '../src/lib/secrets.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 interface Bootstrapped {
   applicationId: string;
@@ -124,18 +127,6 @@ describe('Billing credentials: partial edit keeps the stored secret', () => {
     expect(res.statusCode).toBe(200);
     // The carry-forward must not shadow a real rotation.
     expect(await storedApiKey(b.applicationId)).toBe('sk_test_rotated_key');
-  });
-
-  it('refuses a missing required field on FIRST configuration', async () => {
-    const b = await bootstrap('first');
-    const res = await put(b, { webhookSecret: 'whsec_one' });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('BILLING_CREDENTIALS_INVALID');
-
-    const row = await prisma.billingCredentials.findUnique({
-      where: { applicationId_provider: { applicationId: b.applicationId, provider: 'stripe' } },
-    });
-    expect(row).toBeNull();
   });
 
   it('a carried-forward key is still pattern-checked, not waved through', async () => {

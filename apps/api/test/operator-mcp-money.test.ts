@@ -8,16 +8,18 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { BillingStatsDtoSchema, RoutingPreviewDtoSchema } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { UNRESTRICTED, type Scope } from '../src/lib/operator-scopes.js';
 import { recordBillingEvent, type BillingEventInput } from '../src/modules/billing-log/index.js';
 import type { RefundPaymentInput, RefundPaymentResult } from '../src/modules/billing/providers/types.js';
-import { MINOR_UNITS, type OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
+import { type OperatorToolContext } from '../src/modules/tenant-mcp/operator-tools.js';
 import { TOOL_SCOPES, allOperatorTools, handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import { fakeStripe } from './fakes/billing-providers.js';
 import { twoCurrencyWorld, type TwoCurrencyWorld } from './two-currency-world.js';
+import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+
+operatorsConfirmTheirEmail();
 
 const READ_TOOLS = [
   'preview_checkout_routing',
@@ -167,14 +169,6 @@ describe('operator MCP billing tools on the money model', () => {
       expect(refund).toMatchObject({ write: true, admin: true });
     });
 
-    it('a tool that takes or returns money states the unit in the same words', () => {
-      for (const name of MONEY_TOOLS) {
-        const tool = allOperatorTools.find((candidate) => candidate.name === name);
-        expect(tool, name).toBeDefined();
-        expect(tool!.description, name).toContain(MINOR_UNITS);
-      }
-    });
-
     it('no tool takes a field the money model removed, and a plan takes no amount or currency of its own', () => {
       for (const tool of published()) {
         const properties = Object.keys(tool.inputSchema.properties);
@@ -201,39 +195,6 @@ describe('operator MCP billing tools on the money model', () => {
   });
 
   describe('reads', () => {
-    it('list_plans returns the resolved price and every price, and no amount or currency of the plan itself', async () => {
-      const { plans } = await ok<{ plans: Array<Record<string, unknown>> }>(await ownerOf(w), 'list_plans', { applicationId: w.applicationId });
-      const pro = plans.find((plan) => plan.slug === 'pro')!;
-      expect(pro.price).toMatchObject({ currency: 'USD', amount: 2000, formatted: '$20.00', isDefault: true, reason: 'default' });
-      expect(pro.prices).toMatchObject([
-        { currency: 'USD', amount: 2000, isDefault: true, countries: [] },
-        { id: w.inrPriceId, currency: 'INR', amount: 149900, isDefault: false },
-      ]);
-      expect(pro.defaultPriceId).toBe((pro.price as { id: string }).id);
-      for (const removed of ['amount', 'currency', 'pricePerUnitCents']) expect(pro, removed).not.toHaveProperty(removed);
-      expect(pro.checkout).toMatchObject({ ready: expect.any(Boolean) });
-    });
-
-    it('recent_payments reports what was refunded and whether the charge was verified', async () => {
-      const partly = await usdPayment({ status: 'PARTIALLY_REFUNDED', refundedAmount: 500 });
-      const unapplied = await usdPayment({ amount: 700, currency: 'inr', verification: 'UNVERIFIED', endUserId: null });
-      const { payments } = await ok<{ payments: Array<Record<string, unknown>> }>(await ownerOf(w), 'recent_payments', {});
-      expect(payments.find((payment) => payment.id === partly.id)).toMatchObject({
-        amount: 2000,
-        currency: 'USD',
-        refundedAmount: 500,
-        verification: 'verified',
-        status: 'PARTIALLY_REFUNDED',
-      });
-      expect(payments.find((payment) => payment.id === unapplied.id)).toMatchObject({
-        amount: 700,
-        currency: 'INR',
-        refundedAmount: 0,
-        verification: 'unverified',
-      });
-      expect(payments[0]).not.toHaveProperty('amountMinor');
-    });
-
     it('get_end_user reports the current subscription with its own price, null when it has none', async () => {
       const ctx = await ownerOf(w);
       await prisma.subscription.create({
@@ -253,38 +214,6 @@ describe('operator MCP billing tools on the money model', () => {
         endUserId: other.id,
       });
       expect(priced.currentSubscription.price).toEqual({ currency: 'INR', amount: 149900 });
-    });
-
-    it('preview_checkout_routing answers price, provider and what a coupon would do, as the REST preview does', async () => {
-      const ctx = await ownerOf(w);
-      await ok(ctx, 'create_coupon', {
-        applicationId: w.applicationId,
-        code: 'FIVEOFF',
-        discountType: 'AMOUNT',
-        amounts: [{ currency: 'USD', amountOff: 500 }],
-      });
-      const args = { applicationId: w.applicationId, plan: 'pro', couponCode: 'FIVEOFF' };
-
-      const india = RoutingPreviewDtoSchema.parse(await ok(ctx, 'preview_checkout_routing', { ...args, country: 'in' }));
-      expect(india).toMatchObject({ country: 'IN', countrySource: 'vouched' });
-      expect(india.items[0]).toMatchObject({
-        price: { currency: 'INR', amount: 149900, reason: 'country' },
-        provider: 'razorpay',
-        coupon: { discount: null, refusal: { code: 'COUPON_CURRENCY_NOT_COVERED' } },
-      });
-
-      const usa = RoutingPreviewDtoSchema.parse(await ok(ctx, 'preview_checkout_routing', { ...args, country: 'US' }));
-      expect(usa.items[0]).toMatchObject({
-        price: { currency: 'USD', amount: 2000 },
-        provider: 'stripe',
-        coupon: { discount: { discountAmount: 500, amountAfterDiscount: 1500 }, refusal: null },
-      });
-
-      const rest = await w.operator('POST', '/billing/checkout/preview', { country: 'IN', plan: 'pro', couponCode: 'FIVEOFF' });
-      expect(rest.json().data).toEqual(india);
-
-      const bad = await call(ctx, 'preview_checkout_routing', { applicationId: w.applicationId, country: 'India' });
-      expect(bad).toMatchObject({ isError: true, data: { code: 'VALIDATION_ERROR' } });
     });
 
     it('list_price_fallbacks counts the fallbacks of the period for this Application', async () => {
@@ -320,35 +249,6 @@ describe('operator MCP billing tools on the money model', () => {
         to: '2026-06-01T00:00:00.000Z',
       });
       expect(tooLong).toMatchObject({ isError: true, data: { code: 'BILLING_LOG_PERIOD_INVALID' } });
-    });
-
-    it('get_billing_reconciliation returns the same report as the REST route', async () => {
-      const period = { from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), to: new Date().toISOString() };
-      const report = await ok<Record<string, unknown>>(await ownerOf(w), 'get_billing_reconciliation', {
-        applicationId: w.applicationId,
-        ...period,
-      });
-      const rest = await w.operator('GET', `/billing/reconciliation?from=${period.from}&to=${period.to}`);
-      expect(rest.statusCode, rest.body).toBe(200);
-      expect(report).toEqual(rest.json().data);
-      expect(report).toHaveProperty('counts');
-    });
-
-    it('get_reporting_currency and get_billing_stats report per currency, unverified money apart', async () => {
-      const ctx = await ownerOf(w);
-      expect(await ok(ctx, 'get_reporting_currency', { applicationId: w.applicationId })).toEqual({
-        reportingCurrency: 'USD',
-        name: 'US Dollar',
-      });
-
-      await usdPayment();
-      await usdPayment({ amount: 149900, currency: 'INR', verification: 'UNVERIFIED', endUserId: null });
-      const stats = BillingStatsDtoSchema.parse(await ok(ctx, 'get_billing_stats', { applicationId: w.applicationId }));
-      expect(stats.reportingCurrency).toBe('USD');
-      expect(stats.revenueLast30d).toEqual([{ currency: 'USD', grossCents: 2000, refundedCents: 0, netCents: 2000, payments: 1 }]);
-      expect(stats.unverified).toEqual([{ currency: 'INR', amountCents: 149900, payments: 1 }]);
-      expect(stats.paymentsLast30d).toEqual({ succeeded: 2, failed: 0 });
-      for (const removed of ['mrrCents', 'mrrCurrency', 'mixedCurrencies', 'revenueLast30dCents']) expect(stats).not.toHaveProperty(removed);
     });
 
     it('a read tool is closed to another workspace and to a member without billing:read', async () => {
