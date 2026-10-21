@@ -17,6 +17,8 @@ import { effectiveToolScopes, operatorTools, type OperatorTool, type OperatorToo
 import { operatorWriteTools } from './operator-write-tools.js';
 import { operatorOrganizationTools } from './operator-organization-tools.js';
 import { operatorContactTools } from './operator-contact-tools.js';
+import { operatorListTools } from './operator-list-tools.js';
+import { operatorProfileTools } from './operator-profile-tools.js';
 import { operatorAnalyticsTools } from './operator-analytics-tools.js';
 import { operatorPlanPriceTools } from './operator-plan-price-tools.js';
 import { operatorSupportTools } from './operator-support-tools.js';
@@ -36,6 +38,8 @@ export const allOperatorTools: readonly OperatorTool[] = [
   ...operatorWriteTools,
   ...operatorOrganizationTools,
   ...operatorContactTools,
+  ...operatorListTools,
+  ...operatorProfileTools,
   ...operatorAnalyticsTools,
   ...operatorPlanPriceTools,
   ...operatorSupportTools,
@@ -110,6 +114,18 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   update_auth_config: 'auth-config:write',
   list_contact_lists: 'audience:read',
   get_contact_list_stats: 'audience:read',
+  create_contact_list: 'audience:write',
+  update_contact_list: 'audience:write',
+  archive_contact_list: 'audience:write',
+  restore_contact_list: 'audience:write',
+  list_list_members: 'audience:read',
+  list_list_submissions: 'audience:read',
+  unsubscribe_list_member: 'audience:write',
+  get_profile_schema: 'end-users:read',
+  set_profile_schema: 'end-users:write',
+  update_end_user_profile: 'end-users:write',
+  complete_onboarding: 'end-users:write',
+  skip_onboarding: 'end-users:write',
 };
 
 /** Tools that are workspace-level floors: role-gated, scoped by nothing. */
@@ -185,7 +201,12 @@ function error(id: string | number | null, code: number, message: string): objec
 function toolError(id: string | number | null, e: unknown): object {
   const body =
     e instanceof RekeyError
-      ? { error: e.message, code: e.code, ...(e.fix !== undefined && { fix: e.fix }) }
+      ? {
+          error: e.message,
+          code: e.code,
+          ...(e.fix !== undefined && { fix: e.fix }),
+          ...(e.details !== undefined && { details: e.details }),
+        }
       : { error: (e as Error).message };
   return result(id, { content: [{ type: 'text', text: JSON.stringify(body) }], isError: true });
 }

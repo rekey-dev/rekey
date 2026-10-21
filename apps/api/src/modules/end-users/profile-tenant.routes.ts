@@ -11,7 +11,7 @@ import { ok, errs } from '../../lib/openapi.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { assertEndUserInApplication } from '../../lib/end-users.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { profileService } from './profile.service.js';
 import {
   ONBOARDING_NEVER_GATES,
@@ -23,10 +23,13 @@ import {
   profileState,
 } from './profile.routes.js';
 
+const SECURITY = [{ tenantSession: [] }, { operatorPat: [] }];
+
 const TENANT_ERRORS = {
   401:
     'TENANT_SESSION_MISSING: no `Authorization: Bearer` header; or TENANT_SESSION_INVALID: the token is ' +
-    'invalid, expired, or the operator account no longer exists.',
+    'invalid, expired, or the operator account no longer exists; or OPERATOR_TOKEN_INVALID: the personal ' +
+    'access token is unknown, revoked or expired.',
   403:
     'TENANT_MEMBERSHIP_REVOKED: the operator is no longer a member of this workspace; or ' +
     "TENANT_ROLE_INSUFFICIENT / APP_ACCESS_DENIED: the operator's grant on this Application does not permit " +
@@ -53,7 +56,7 @@ const FIELDS_RESPONSE = {
 } as const;
 
 export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/profile-schema',
@@ -61,7 +64,7 @@ export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'end-users:read' } },
       schema: {
         tags: ['Tenant · End-users'],
-        security: [{ tenantSession: [] }],
+        security: SECURITY,
         summary: "Read the Application's profile fields",
         description: 'Requires **read** access to this Application. The onboarding questions, in order.',
         params: APP_PARAMS_SCHEMA,
@@ -81,7 +84,7 @@ export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'end-users:write' } },
       schema: {
         tags: ['Tenant · End-users'],
-        security: [{ tenantSession: [] }],
+        security: SECURITY,
         summary: "Replace the Application's profile fields",
         description:
           'Requires **write** access to this Application. Replaces the whole list. A field that any user has ' +
@@ -140,7 +143,7 @@ export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'end-users:write' } },
       schema: {
         tags: ['Tenant · End-users'],
-        security: [{ tenantSession: [] }],
+        security: SECURITY,
         summary: "Set an end-user's profile answers",
         description:
           'Requires **write** access to this Application. Sets any field, including `writableBy: "server"` ones. ' +
@@ -179,7 +182,7 @@ export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'end-users:write' } },
       schema: {
         tags: ['Tenant · End-users'],
-        security: [{ tenantSession: [] }],
+        security: SECURITY,
         summary: "Mark an end-user's onboarding complete",
         description:
           'Requires **write** access to this Application. Same rule as the end-user route: every required field ' +
@@ -212,7 +215,7 @@ export async function profileTenantRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'end-users:write' } },
       schema: {
         tags: ['Tenant · End-users'],
-        security: [{ tenantSession: [] }],
+        security: SECURITY,
         summary: 'Record that an end-user skipped onboarding',
         description:
           'Requires **write** access to this Application. Records the first skip and emits ' +

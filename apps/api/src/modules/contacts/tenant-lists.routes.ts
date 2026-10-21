@@ -1,6 +1,6 @@
 /**
  * Operator routes for lists, under /api/v1/tenant/applications/:id/lists.
- * Tenant session plus `ensureAppAccess`, gated by the `audience` scope, which
+ * Operator session or personal access token, plus `ensureAppAccess`, gated by the `audience` scope, which
  * viewer and billing grants never hold.
  */
 
@@ -15,7 +15,7 @@ import {
   ContactFieldSchemaSchema,
   type SecurityEventType,
 } from '@rekey.dev/shared-types';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, okPage } from '../../lib/openapi.js';
 import { paged } from '../../lib/pagination.js';
@@ -25,7 +25,7 @@ import { listsService } from './lists.service.js';
 const AppParam = z.object({ id: z.string().min(1) });
 const ListParam = z.object({ id: z.string().min(1), listId: z.string().min(1) });
 
-const settingsShape = {
+export const listSettingsShape = {
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).nullable(),
   kind: z.enum(CONTACT_LIST_KINDS),
@@ -37,15 +37,15 @@ const settingsShape = {
 };
 
 const CreateBody = z
-  .object({ key: z.string().regex(CONTACT_LIST_KEY_RE), ...settingsShape })
+  .object({ key: z.string().regex(CONTACT_LIST_KEY_RE), ...listSettingsShape })
   .partial()
   .required({ key: true, name: true })
   .strict();
 
-const UpdateBody = z.object({ ...settingsShape, publicCapture: z.boolean() }).partial().strict();
+const UpdateBody = z.object({ ...listSettingsShape, publicCapture: z.boolean() }).partial().strict();
 
 const TENANT_SESSION_ERRORS = {
-  401: 'TENANT_SESSION_MISSING / TENANT_SESSION_INVALID: no valid operator session.',
+  401: 'TENANT_SESSION_MISSING / TENANT_SESSION_INVALID / OPERATOR_TOKEN_INVALID: no valid operator session or personal access token.',
   429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
 } as const;
 const READ_ERRORS = {
@@ -156,7 +156,7 @@ const SETTINGS_BODY_PROPERTIES = {
 } as const;
 
 const TAGS = ['Tenant · Lists'];
-const SECURITY = [{ tenantSession: [] }];
+const SECURITY = [{ tenantSession: [] }, { operatorPat: [] }];
 
 function audit(
   req: FastifyRequest,
@@ -176,7 +176,7 @@ function audit(
 }
 
 export async function tenantListsRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/lists',

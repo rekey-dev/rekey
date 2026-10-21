@@ -1,8 +1,8 @@
 /**
  * Operator routes for the people on one list, under
  * /api/v1/tenant/applications/:id/lists/:listId. Reads need `audience:read`;
- * the CSV export is a floor (OWNER or ADMIN), like the DSAR export, because
- * it hands every address on the list to whoever downloads it.
+ * the CSV export is a floor (OWNER or ADMIN) and session-only, like the DSAR
+ * export, because it hands every address on the list to whoever downloads it.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -12,7 +12,8 @@ import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, okPage, raw } from '../../lib/openapi.js';
 import { PaginationQuery, paginationJsonSchema, parsePagination } from '../../lib/pagination.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
-import { requireTenantRole, requireTenantSession } from '../../middleware/tenant-session.js';
+import { refuseOperatorToken, requireOperatorAuth } from '../../middleware/operator-auth.js';
+import { requireTenantRole } from '../../middleware/tenant-session.js';
 import { exportMembersCsv, operatorMembers, operatorSubmissions, operatorUnsubscribe } from './list-reads.service.js';
 
 const ListParam = z.object({ id: z.string().min(1), listId: z.string().min(1) });
@@ -23,10 +24,10 @@ const MembersQuery = PaginationQuery.extend({
 });
 
 const TAGS = ['Tenant · Lists'];
-const SECURITY = [{ tenantSession: [] }];
+const SECURITY = [{ tenantSession: [] }, { operatorPat: [] }];
 
 const SESSION_ERRORS = {
-  401: 'TENANT_SESSION_MISSING / TENANT_SESSION_INVALID: no valid operator session.',
+  401: 'TENANT_SESSION_MISSING / TENANT_SESSION_INVALID / OPERATOR_TOKEN_INVALID: no valid operator session or personal access token.',
   429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
 } as const;
 const NOT_FOUND =
@@ -70,7 +71,7 @@ const SUBMISSION = {
 } as const;
 
 export async function tenantListMembersRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/lists/:listId/members',
@@ -166,20 +167,23 @@ export async function tenantListMembersRoutes(app: FastifyInstance): Promise<voi
     '/:id/lists/:listId/export.csv',
     {
       config: { access: { floor: true } },
-      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
+      preHandler: [refuseOperatorToken, requireTenantRole(['OWNER', 'ADMIN'])],
       schema: {
         tags: TAGS,
-        security: SECURITY,
+        security: [{ tenantSession: [] }],
         summary: "Download a list's members as CSV",
         description:
-          'Requires the **OWNER or ADMIN** workspace role; no grant or scope unlocks it. Every member ' +
+          'Requires the **OWNER or ADMIN** workspace role and an operator session; no grant, scope or ' +
+          'personal access token unlocks it. Every member ' +
           'with their consent proof. Cells starting with `= + - @` are prefixed with `\'` so a ' +
           'spreadsheet never runs them. Records an `app.contacts_exported` security event.',
         response: {
           200: raw('CSV, one member per row, with a header row.', 'text/csv'),
           ...errs({
             ...SESSION_ERRORS,
-            403: 'TENANT_ROLE_INSUFFICIENT: requires the OWNER or ADMIN workspace role.',
+            403:
+              'TENANT_ROLE_INSUFFICIENT: requires the OWNER or ADMIN workspace role; or ' +
+              'OPERATOR_TOKEN_NOT_ACCEPTED: called with a personal access token.',
             404: NOT_FOUND,
           }),
         },

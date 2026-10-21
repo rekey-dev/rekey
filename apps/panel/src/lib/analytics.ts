@@ -45,6 +45,7 @@ export const AnalyticsEvent = {
   WebhookCreated: 'webhook_created',
   TeamMemberInvited: 'team_member_invited',
   CopyClicked: 'copy_clicked',
+  DiscordClicked: 'discord_clicked',
 } as const;
 
 export type AnalyticsEventName = (typeof AnalyticsEvent)[keyof typeof AnalyticsEvent];

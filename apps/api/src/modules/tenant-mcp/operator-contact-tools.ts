@@ -1,8 +1,9 @@
 /**
  * Operator MCP read tools for lists: which lists an Application has, and one
- * list's numbers. They return counts, never addresses, and there is no export
- * or erase tool: bulk personal data should not flow into an agent's context,
- * and erasure has no undo.
+ * list's numbers. They return counts, never addresses. Addresses come only a
+ * page at a time from `operator-list-tools.ts`, and there is no export or
+ * erase tool: bulk personal data should not flow into an agent's context, and
+ * erasure has no undo.
  *
  * Access is the REST routes' own: `audience:read` in TOOL_SCOPES for a
  * restricted member, and, per Application, the grant preset through

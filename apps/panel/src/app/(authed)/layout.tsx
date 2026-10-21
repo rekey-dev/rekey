@@ -213,6 +213,7 @@ export default async function AuthedLayout({
             switchAction={switchWorkspace}
             {...(canCreateWorkspace && { createWorkspaceAction: createWorkspace })}
             signOutAction={signOut}
+            discordUrl={process.env.NEXT_PUBLIC_DISCORD_INVITE_URL}
             buildVersion={
               <Suspense fallback={<BuildVersionPlaceholder />}>
                 <BuildVersion />

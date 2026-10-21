@@ -90,6 +90,6 @@ describe('operator MCP list tools', () => {
     expect(TOOL_SCOPES.list_contact_lists).toBe('audience:read');
     expect(TOOL_SCOPES.get_contact_list_stats).toBe('audience:read');
     const names = allOperatorTools.map((t) => t.name);
-    expect(names.filter((n) => /contact/.test(n)).sort()).toEqual(['get_contact_list_stats', 'list_contact_lists']);
+    expect(names.filter((n) => /export|erase/.test(n))).toEqual([]);
   });
 });

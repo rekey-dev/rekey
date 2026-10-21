@@ -54,6 +54,15 @@ const WRITE_TIER_RULINGS: Readonly<Record<string, Ruling>> = {
   create_coupon: { tier: 'write', why: 'Can cost money (a 100% coupon). Financial configuration, not escalation.' },
   update_coupon: { tier: 'write', why: 'Same as create_coupon.' },
   set_reporting_currency: { tier: 'write', why: 'Changes how reports are totalled.' },
+  set_profile_schema: { tier: 'write', why: 'Changes the onboarding questions. A field with answers keeps its key and type.' },
+  update_end_user_profile: { tier: 'write', why: 'Sets profile answers. Sign-in and OIDC claims never read them.' },
+  complete_onboarding: { tier: 'write', why: 'Records onboarding state, which never gates sign-in.' },
+  skip_onboarding: { tier: 'write', why: 'Records onboarding state, which never gates sign-in.' },
+  create_contact_list: { tier: 'write', why: 'List configuration. Grants nothing.' },
+  update_contact_list: { tier: 'write', why: 'List configuration. Public capture lets browsers subscribe, never read.' },
+  archive_contact_list: { tier: 'write', why: 'Stops subscribes. Keeps every member.' },
+  restore_contact_list: { tier: 'write', why: 'Undoes an archive.' },
+  unsubscribe_list_member: { tier: 'write', why: 'Takes someone off a list. Cannot add anyone back.' },
 };
 
 const ADMIN_TIER_TOOLS = [

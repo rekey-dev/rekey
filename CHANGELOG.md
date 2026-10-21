@@ -4,6 +4,36 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.1-rc.1
+
+The first release candidate for 2.2.1, a patch release on 2.2.0. No migration and no breaking change: deploy the API
+and panel together and upgrade the `@rekey.dev/*` packages with them.
+
+### Added
+
+- **Operator personal access tokens reach onboarding questions and lists.**
+  The profile-field routes (`/api/v1/tenant/applications/:id/profile-schema`,
+  an end user's profile answers, onboarding complete and skip) and the list
+  routes (create, update, archive, restore, members, submissions, unsubscribe)
+  now accept `Authorization: Bearer rp_op_…` as well as a panel session. A
+  token needs the route's own scope in its own scopes: `read` for reads,
+  `applications:write` for writes, even when the operator who minted it is an
+  owner. A list's CSV export stays session-only.
+- **Operator MCP tools for the same:** `get_profile_schema`,
+  `set_profile_schema`, `update_end_user_profile`, `complete_onboarding`,
+  `skip_onboarding`, `create_contact_list`, `update_contact_list`,
+  `archive_contact_list`, `restore_contact_list`, `list_list_members`,
+  `list_list_submissions` and `unsubscribe_list_member`. The write tools need
+  write access and the OWNER or ADMIN workspace role.
+
+### Changed
+
+- `list_list_members` and `list_list_submissions` return email addresses, so
+  over MCP they need the OWNER or ADMIN workspace role, whatever a member's
+  grant on the Application. In the panel nothing changes.
+- An MCP tool error now carries the API error's `details`, so an agent sees
+  which field or option a refusal is about.
+
 ## 2.2.0
 
 **Upgrading from 2.1, or from any 2.2 release candidate: follow

@@ -56,6 +56,8 @@ export interface ToolDefinition<Schema extends z.AnyZodObject, Output> {
   args: Schema;
   write?: boolean;
   admin?: boolean;
+  /** The lowest workspace role that may call it. See `OperatorTool.minRole`. */
+  minRole?: OperatorTool['minRole'];
   annotations?: OperatorToolAnnotations;
   /** Runs on the raw arguments before they are parsed, to refuse a removed field by name. */
   refuse?: (raw: Readonly<Record<string, unknown>>) => void;
@@ -80,6 +82,7 @@ export function defineTool<Schema extends z.AnyZodObject, Output>(definition: To
     inputSchema: inputSchemaOf(definition.args),
     ...(definition.write !== undefined && { write: definition.write }),
     ...(definition.admin !== undefined && { admin: definition.admin }),
+    ...(definition.minRole !== undefined && { minRole: definition.minRole }),
     ...(definition.annotations !== undefined && { annotations: definition.annotations }),
     handler: async (ctx, raw) => {
       definition.refuse?.(raw);
