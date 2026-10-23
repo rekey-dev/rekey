@@ -82,7 +82,7 @@ export default async function BillingStatusPage({
       )}
       {error && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} />
         </Banner>
       )}
       <ReturnUrlNotice

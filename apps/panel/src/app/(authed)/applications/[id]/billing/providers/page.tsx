@@ -94,7 +94,7 @@ export default async function BillingProvidersPage({
           error itself. Showing it here too would say it twice. */}
       {error && !edit && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} />
         </Banner>
       )}
 

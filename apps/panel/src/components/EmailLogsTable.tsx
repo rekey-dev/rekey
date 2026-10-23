@@ -5,6 +5,7 @@ import { formatDateTime } from '@/lib/date';
 import { Table, THead, TBody, TR, TH, TD } from './Table';
 import { Badge, type BadgeTone } from './Badge';
 import { EmptyState } from './EmptyState';
+import { statusLabel } from './StatusPill';
 import { DEFAULT_PAGE_SIZE } from './Pager';
 
 const VIA_LABEL: Record<string, string> = {
@@ -27,12 +28,14 @@ function StatusBadge({ status }: { status: string }): React.JSX.Element {
         : status === 'suppressed'
           ? 'neutral'
           : 'warning';
-  return <Badge tone={tone}>{status}</Badge>;
+  return <Badge tone={tone}>{status === 'no_transport' ? NO_PROVIDER_LABEL : statusLabel(status)}</Badge>;
 }
+
+const NO_PROVIDER_LABEL = 'No email provider';
 
 /** The built-in event, or the custom template and version, that produced a row. */
 function emailSource(r: EmailLogWithApp): string {
-  if (r.eventKey) return r.eventKey;
+  if (r.eventKey) return r.eventKey === 'mfa_enabled' ? 'MFA enabled' : statusLabel(r.eventKey);
   if (r.customTemplateKey) {
     return r.customTemplateVersion ? `${r.customTemplateKey} v${r.customTemplateVersion}` : r.customTemplateKey;
   }
@@ -93,7 +96,7 @@ export function EmailLogsTable({
             <TD className="max-w-[18rem] truncate" >
               <span title={r.subject}>{r.subject}</span>
             </TD>
-            <TD mono muted>{emailSource(r)}</TD>
+            <TD muted>{emailSource(r)}</TD>
             <TD muted className="whitespace-nowrap text-xs">
               {VIA_LABEL[r.via] ?? r.via}
             </TD>
@@ -146,7 +149,7 @@ export function EmailLogStatusFilter({
     { value: undefined, label: 'All' },
     { value: 'sent', label: 'Sent' },
     { value: 'error', label: 'Errors' },
-    { value: 'no_transport', label: 'No transport' },
+    { value: 'no_transport', label: NO_PROVIDER_LABEL },
     { value: 'suppressed', label: 'Suppressed' },
     { value: 'unknown', label: 'Unknown' },
   ];

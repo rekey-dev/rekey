@@ -160,7 +160,7 @@ export default async function OAuthClientsPage({
         {error ? (
           <div className="mt-3">
             <Banner tone="error">
-              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={OIDC_ERR} fallback={error} />
+              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={OIDC_ERR} />
             </Banner>
           </div>
         ) : null}

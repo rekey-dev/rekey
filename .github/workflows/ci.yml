@@ -118,6 +118,10 @@ jobs:
         run: |
           node .github/scripts/check-file-names.mjs --self-test
           node .github/scripts/check-file-names.mjs
+      # The API merge job relies on this to drop a re-run shard's stale report,
+      # and it only runs after every shard, so a bug in it would surface late.
+      - name: The shard report picker keeps the newest attempt
+        run: bash .github/scripts/latest-shard-reports.sh --self-test
 
   oss-strip:
     name: OSS strip
@@ -484,7 +488,10 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: api-blob-${{ matrix.shard }}
+          # The attempt is in the name because a re-run shard cannot replace
+          # its earlier artifact: upload-artifact's `overwrite` only sees the
+          # current job attempt. The merge job keeps the newest per shard.
+          name: api-blob-${{ matrix.shard }}-${{ github.run_attempt }}
           path: apps/api/.vitest-reports/*
           include-hidden-files: true
           if-no-files-found: error
@@ -515,8 +522,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: api-blob-*
-          path: apps/api/.vitest-reports
-          merge-multiple: true
+          path: apps/api/.vitest-shards
+
+      # "Re-run failed jobs" leaves the failed attempt's report on the run next
+      # to the new one. Merging both would keep a fixed failure red forever.
+      - name: Keep each shard's newest attempt
+        working-directory: apps/api
+        run: bash ../../.github/scripts/latest-shard-reports.sh .vitest-shards .vitest-reports
 
       # The merge reports whatever blobs it is given. A shard that never
       # uploaded one (cancelled, runner lost) would otherwise just be absent

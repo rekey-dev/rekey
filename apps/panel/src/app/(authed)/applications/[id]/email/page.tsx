@@ -208,7 +208,7 @@ export default async function EmailPage({
       )}
       {error && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
         </Banner>
       )}
 

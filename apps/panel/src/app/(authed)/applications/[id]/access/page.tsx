@@ -118,7 +118,7 @@ export default async function AccessPage({
       {saved && <SavedBanner message="Allowed origins and IPs saved." />}
       {error && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
         </Banner>
       )}
 

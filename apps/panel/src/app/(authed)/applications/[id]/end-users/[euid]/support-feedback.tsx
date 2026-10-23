@@ -5,7 +5,7 @@
  * page, which meant three of the six actions were silent: `unlockAccount`,
  * `revokeAllSessions` and `revokeSession` all redirect to the **Security** tab,
  * and nothing there read `support` or `supportError`. An operator clicking
- * "Clear lockout" on an account that was never locked saw the page re-render
+ * "Unlock account" on an account that was never locked saw the page re-render
  * unchanged, so they either concluded the button was broken or told the
  * customer to try again, which is exactly the outcome the "not locked" wording
  * exists to prevent. The error path was worse: a 410, a 403 and a 429 all

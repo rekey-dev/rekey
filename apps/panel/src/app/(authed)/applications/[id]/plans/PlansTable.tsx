@@ -69,7 +69,7 @@ export function PlansTable({
           <TH>Slug</TH>
           <TH>Name</TH>
           <TH>Kind</TH>
-          <TH>Entitlements</TH>
+          <TH>What&apos;s included</TH>
           <TH align="right">Price</TH>
           <TH>Interval</TH>
           <TH>Status</TH>
@@ -226,9 +226,9 @@ export function PlansTable({
                   <Modal
                     modalKey={`ent_${p.slug}`}
                     size="lg"
-                    title={`Entitlements: ${p.slug}`}
-                    description="The benefit bundle this plan grants on purchase (licenses, credits, feature flags, usage allowance). Materialized onto the buyer when the subscription activates."
-                    trigger="Entitlements"
+                    title={`What's included: ${p.name}`}
+                    description="What a buyer gets with this plan: licenses, credits, features and usage allowance. They receive it when their subscription starts."
+                    trigger="What's included"
                     triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   >
                     <div className="space-y-4">
@@ -250,7 +250,7 @@ export function PlansTable({
                         </ul>
                       ) : (
                         <p className="text-sm text-[var(--color-muted-fg)]">
-                          No entitlements yet. A plan with none falls back to its legacy kind on purchase.
+                          Nothing added yet. A plan with nothing here grants what its plan type gives by default.
                         </p>
                       )}
                       <EntitlementForm action={addEntitlement.bind(null, applicationId, p.slug)} />

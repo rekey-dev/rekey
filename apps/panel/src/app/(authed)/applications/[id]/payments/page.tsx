@@ -155,7 +155,7 @@ export default async function PaymentsPage({
               <TH align="right">Refunded</TH>
               <TH sort={sortTH('status')}>Status</TH>
               <TH>Description</TH>
-              <TH>Provider payment id</TH>
+              <TH align="right"> </TH>
             </TR>
           </THead>
           <TBody>
@@ -193,8 +193,13 @@ export default async function PaymentsPage({
                 <TD muted className="max-w-[16rem] truncate text-xs" title={p.description ?? undefined}>
                   {p.description ?? '—'}
                 </TD>
-                <TD mono muted className="max-w-[12rem] truncate text-[11px]" title={p.providerPaymentId ?? undefined}>
-                  {p.providerPaymentId ?? '—'}
+                <TD align="right">
+                  <Link
+                    href={`/applications/${id}/payments/${encodeURIComponent(p.id)}`}
+                    className="text-xs font-medium text-[var(--color-fg)] hover:underline"
+                  >
+                    View
+                  </Link>
                 </TD>
               </TR>
             ))}

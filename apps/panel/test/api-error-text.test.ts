@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import * as React from 'react';
 import { ApiErrorText } from '../src/components/api-error';
+import { GENERIC_ERROR_MESSAGE } from '../src/lib/error-message';
 
 /** The visible strings of whatever the component returned, in order. */
 function textOf(el: React.ReactElement): string[] {
@@ -57,9 +58,11 @@ describe('ApiErrorText', () => {
   });
 
   it('falls back only when there is genuinely nothing to say', () => {
-    expect(render({ code: 'MYSTERY', map: {} })).toEqual([
-      'Something went wrong. Please try again.',
-    ]);
+    expect(render({ code: 'MYSTERY', map: {} })).toEqual([GENERIC_ERROR_MESSAGE]);
+  });
+
+  it('never renders the code itself, even one named like an inherited property', () => {
+    expect(render({ code: 'constructor', map: {} })).toEqual([GENERIC_ERROR_MESSAGE]);
   });
 
   it('handles an absent map and an absent code', () => {

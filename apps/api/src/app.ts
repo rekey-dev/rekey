@@ -345,7 +345,11 @@ export async function buildApp(
     // believe), deleting it otherwise, along with any forwarded host or scheme
     // that did not come from our proxy. So `request.ip` and every log line see
     // the decided address and never a header a client chose.
-    trustProxy: 1,
+    //
+    // A function, not `1`: since Fastify 5.12 a numeric hop count trusts
+    // nobody, so `request.ip` would become the proxy's address for every
+    // client and every per-IP limit would collapse into one bucket.
+    trustProxy: (_address, hop) => hop === 0,
     // Not a URL rewrite: the one hook Fastify runs on the raw request before
     // routing and logging, for inject() as well as the server. Returns the URL
     // unchanged.

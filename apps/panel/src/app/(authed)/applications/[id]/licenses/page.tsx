@@ -253,7 +253,7 @@ export default async function LicensesPage({
                 {error && (
                   <WhileUrlHas param="error">
                     <Banner tone="error">
-                      <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+                      <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
                     </Banner>
                   </WhileUrlHas>
                 )}

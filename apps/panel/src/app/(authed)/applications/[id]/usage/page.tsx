@@ -137,7 +137,7 @@ export default async function UsagePage({
             <ActionForm action={createMeter.bind(null, id)} className="space-y-3">
               {error && (
                 <Banner tone="error">
-                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
                 </Banner>
               )}
               <Field label="Slug" hint="URL-safe identifier: what your SDK calls report against.">

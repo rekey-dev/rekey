@@ -159,7 +159,7 @@ export default async function OrganizationsPage({
         {created && <SavedBanner params={['created']} message={`Organization ${created} created.`} />}
         {error && !newOrgError && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
 
@@ -266,7 +266,7 @@ function NewOrgModal({
       <ActionForm action={createOrg.bind(null, applicationId)} className="space-y-3">
         {error && !slugError && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <label className="block space-y-1">

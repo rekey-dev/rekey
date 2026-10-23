@@ -193,7 +193,7 @@ export default async function UnappliedPaymentsPage({
 
       {errorCode && (
         <Banner tone="error">
-          <ApiErrorText code={errorCode} detail={errorDetail} fix={errorFix} map={ERR} fallback={errorCode} />
+          <ApiErrorText code={errorCode} detail={errorDetail} fix={errorFix} map={ERR} />
         </Banner>
       )}
       {sp.refunded && <SavedBanner message="Refund sent to the provider." />}

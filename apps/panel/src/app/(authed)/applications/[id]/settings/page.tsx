@@ -213,7 +213,6 @@ export default async function SettingsPage({
             detail={errorDetail}
             fix={errorFix}
             map={sp.card === 'signout' ? {} : ERR}
-            fallback={error}
           />
         </Banner>
       )}
@@ -301,7 +300,7 @@ export default async function SettingsPage({
             {promoteState.kind === 'available' && (
               <ActionForm action={promote.bind(null, id)}>
                 <TypedConfirmButton
-                  expected={app.slug}
+                  expected={app.name}
                   title="Promote to production?"
                   description={
                     'This application moves to the production environment permanently. There is ' +
@@ -340,7 +339,7 @@ export default async function SettingsPage({
           {canSignOutAll ? (
             <ActionForm action={signOutAllEndUsers.bind(null, id)} className="shrink-0">
               <TypedConfirmButton
-                expected={app.slug}
+                expected={app.name}
                 title="Sign out all end-users?"
                 description="Every live end-user access token for this application is invalidated and all refresh tokens are revoked, so every user must sign in again. This cannot be undone."
                 triggerLabel="Sign out all end-users"
@@ -423,7 +422,7 @@ export default async function SettingsPage({
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] placeholder:italic placeholder:text-[var(--color-faint-fg)] focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]"
               />
               <TypedConfirmButton
-                expected={app.slug}
+                expected={app.name}
                 title="Disable this application?"
                 description="Every end-user request will be refused until you enable it again. Sign-in, billing, the hosted portal and all outbound email and webhooks stop. No data is deleted and no session is revoked."
                 triggerLabel="Disable application"

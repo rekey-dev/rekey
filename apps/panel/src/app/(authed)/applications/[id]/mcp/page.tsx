@@ -108,7 +108,7 @@ export default async function McpPage({
       {saved && <SavedBanner message="MCP settings saved." />}
       {error && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
         </Banner>
       )}
 

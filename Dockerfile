@@ -24,7 +24,7 @@
 # The api image runs `prisma migrate deploy` on start (idempotent) before
 # booting the server, so a fresh database is migrated automatically.
 
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.22.1
 
 # ─── base ─────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-slim AS base

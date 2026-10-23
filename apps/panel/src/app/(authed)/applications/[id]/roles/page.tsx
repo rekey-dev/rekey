@@ -355,7 +355,7 @@ export default async function RolesPage({
         )}
         {error && !newAppRoleError && !newOrgRoleError && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
 
@@ -632,7 +632,7 @@ function NewAppRoleModal({
       <ActionForm action={createAppRole.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <label className="block space-y-1">
@@ -696,7 +696,7 @@ function NewOrgRoleModal({
       <ActionForm action={createOrgRole.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <label className="block space-y-1">

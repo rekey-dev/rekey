@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/shared-types",
-  "version": "2.2.1-rc.1",
+  "version": "2.2.1",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"

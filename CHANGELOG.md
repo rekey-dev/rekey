@@ -4,6 +4,37 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.1
+
+A security release on 2.2.0 that also ships everything in 2.2.1-rc.1 below.
+No migration and no breaking change. **Every self-hosted deployment should
+upgrade:** rebuild and redeploy the API, panel and portal images, and the admin
+app if you run it.
+
+### Security
+
+- **Next.js 15.5.28 in the panel, portal and admin app.** 15.5.18 had two
+  critical advisories in the image optimizer (`/_next/image`, on by default):
+  remote code execution through crafted AVIF or SVG input
+  (GHSA-2xp9-vwfh-vxw4, GHSA-2464-fhr4-w9xw), plus a Windows-only code
+  execution flaw (GHSA-p293-qw3h-jr36), Server Actions denial of service
+  (GHSA-m99w-x7hq-7vfj, GHSA-p3m5-59mp-jv5r) and server-side request forgery
+  (GHSA-p9j2-gv94-2wf4, GHSA-89xv-2m56-2m9x).
+- **sharp 0.35.5**, the image library behind the optimizer, for
+  GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w.
+- **Fastify 5.12.7 in the API**, for request body replacement
+  (GHSA-667r-xxjv-c9mm), a not-found handler reachable through malformed URLs
+  (GHSA-p68q-wchp-6fh7) and two validation bypasses (GHSA-hwr6-493r-vm6h,
+  GHSA-9q9j-q6p8-xq58). Its router and proxy-address dependencies move to
+  find-my-way 9.10 and proxy-addr 2.0.8.
+- **Node.js 24.22.1** in every Docker image, the current Node 24 LTS security
+  release.
+- Patched transitive dependencies of the API and the published packages:
+  undici 7.30, `@fastify/swagger-ui` 6 (with `@fastify/static` 10),
+  `@modelcontextprotocol/sdk` 1.32 in `@rekey.dev/mcp`, fast-uri, form-data,
+  axios, follow-redirects, ip-address, hono, qs, nanoid, js-yaml, devalue,
+  source-map-js, svgo, brace-expansion and smol-toml.
+
 ## 2.2.1-rc.1
 
 The first release candidate for 2.2.1, a patch release on 2.2.0. No migration and no breaking change: deploy the API

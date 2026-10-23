@@ -297,7 +297,7 @@ export default async function OrganizationDetailPage({
       {error && !addMemberError && !editOrgError && (
         <WhileUrlHas param="error">
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         </WhileUrlHas>
       )}
@@ -562,7 +562,7 @@ function AddMemberModal({
       <ActionForm action={addMember.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         {candidates.length === 0 ? (
@@ -624,7 +624,7 @@ function EditOrgModal({
       <ActionForm action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <label className="block space-y-1">

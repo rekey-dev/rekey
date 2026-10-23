@@ -18,6 +18,7 @@ import { formatDate, formatDateTime, formatRelative } from '@/lib/date';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { Badge } from '@/components/Badge';
+import { statusLabel } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 import { savedStateKey } from '@/lib/saved-state-key';
@@ -130,10 +131,17 @@ async function updateUser(applicationId: string, euid: string, formData: FormDat
 
 async function deleteUser(applicationId: string, euid: string): Promise<void> {
   'use server';
-  await api({
-    method: 'DELETE',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-users/${encodeURIComponent(euid)}`,
-  });
+  try {
+    await api({
+      method: 'DELETE',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-users/${encodeURIComponent(euid)}`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err)}`);
+    }
+    throw err;
+  }
   redirect(`/applications/${applicationId}/end-users`);
 }
 
@@ -213,6 +221,7 @@ export default async function EndUsersPage({
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const newUserError = sp.newUser === '1' ? error : undefined;
   const editUser = typeof sp.editUser === 'string' ? sp.editUser : undefined;
+  const listError = !newUserError && !editUser ? error : undefined;
   const orgError = typeof sp.orgError === 'string' ? sp.orgError : undefined;
   const createdEmail = typeof sp.created === 'string' ? sp.created : undefined;
 
@@ -326,6 +335,11 @@ export default async function EndUsersPage({
 
   return (
     <div className="space-y-8">
+      {listError && (
+        <Banner tone="error">
+          <ApiErrorText code={listError} detail={errorDetail} fix={errorFix} map={ERR} />
+        </Banner>
+      )}
       {listRefusal && (
         <Banner tone="error">
           These filters could not be applied: <strong className="font-medium">{listRefusal.message}</strong>
@@ -353,9 +367,9 @@ export default async function EndUsersPage({
           count={`(${users.length === 0 ? 0 : `${offset + 1}–${offset + users.length}`})`}
           description={
             <>
-              The people who sign up to your app. Manage roles, metadata, billing, and org
-              membership. Created via the SDK&apos;s sign-up endpoint or seeded manually here; role +
-              metadata are writable only by operators, so end-users can&apos;t elevate via the SDK.
+              The people who sign up to your app. People usually join through your app&apos;s sign-up
+              page, and you can also add someone by hand here. Only your team can change a
+              person&apos;s role or metadata; people cannot change their own.
             </>
           }
           action={
@@ -404,7 +418,7 @@ export default async function EndUsersPage({
             <option value="">Subscription: any</option>
             {SUB_STATUSES.map((s) => (
               <option key={s} value={s}>
-                {s}
+                {statusLabel(s)}
               </option>
             ))}
           </select>
@@ -450,8 +464,8 @@ export default async function EndUsersPage({
             }
             description={
               <>
-                End-users sign up via your application using the Rekey SDKs, or you can seed them
-                manually with the &quot;+ New end-user&quot; button.
+                People appear here when they sign up through your app. You can also add someone by
+                hand with the &quot;+ New end-user&quot; button.
               </>
             }
           />
@@ -462,7 +476,6 @@ export default async function EndUsersPage({
                 <TH sort={sortTH('email')}>Email</TH>
                 <TH>Role</TH>
                 <TH>Verified</TH>
-                <TH>User ID</TH>
                 <TH sort={sortTH('createdAt')}>Joined</TH>
                 <TH sort={sortTH('lastSignedInAt')}>Last sign-in</TH>
                 <TH sort={sortTH('lastActiveOn')}>Last active</TH>
@@ -497,7 +510,6 @@ export default async function EndUsersPage({
                       <Badge tone="warning" dot>pending</Badge>
                     )}
                   </TD>
-                  <TD mono muted className="max-w-[12rem] truncate" title={u.id}>{u.id}</TD>
                   <TD muted className="whitespace-nowrap text-xs">
                     {formatDate(u.createdAt)}
                   </TD>
@@ -593,13 +605,13 @@ function NewUserModal({
     <Modal
       modalKey="newUser"
       title="Create end-user"
-      description="Operator-driven creation. The SDK's auth.signUp() is the normal path; this is for support seeding / data migrations. Email is verified by default since you vouched."
+      description="Add someone by hand, for example when moving users over from another system. Most people sign up through your app instead. Their email is marked verified by default, since you are vouching for it."
       trigger="+ New end-user"
     >
       <ActionForm action={createUser.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <Field label="Email" required>
@@ -613,7 +625,7 @@ function NewUserModal({
         </Field>
         <Field
           label="Role"
-          hint="Pick from the catalog above. Default is pre-selected."
+          hint="The default role is already selected. Add or edit roles on the Roles tab."
         >
           <select name="role" defaultValue={defaultRoleName} className={inputCls}>
             {roles.map((r) => (
@@ -697,7 +709,7 @@ function EditUserModal({
       >
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <Field

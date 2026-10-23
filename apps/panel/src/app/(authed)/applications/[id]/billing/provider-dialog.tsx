@@ -300,7 +300,7 @@ export function ProviderEditModal({
       >
         {error && (
           <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </p>
         )}
 

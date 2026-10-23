@@ -134,13 +134,13 @@ export default async function EndUserSecurityPage({
               className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]"
               pendingLabel="Unlocking…"
             >
-              Clear lockout
+              Unlock account
             </SubmitButton>
           </ActionForm>
           <span className="text-[11px] text-[var(--color-muted-fg)]">
             {lockedNow
-              ? 'The lock also expires on its own; this just ends it now.'
-              : 'Nothing is locked. Clearing anyway also resets the failure counter, which is harmless.'}
+              ? 'The lock also ends on its own after a while; this ends it now.'
+              : 'Nothing is locked. Unlocking anyway resets the count of failed sign-ins, which is harmless.'}
           </span>
         </div>
       </Card>
@@ -300,10 +300,11 @@ export default async function EndUserSecurityPage({
 
       <Card className="space-y-3">
         <div>
-          <h3 className="text-sm font-semibold text-[var(--color-fg)]">Impersonate this user</h3>
+          <h3 className="text-sm font-semibold text-[var(--color-fg)]">Sign in as this user (support)</h3>
           <p className="text-xs text-[var(--color-muted-fg)]">
-            OWNER / ADMIN only. Mints a 5-minute access token that authenticates as this end-user
-            against your customer app. Every minting is audit-logged with your operator id.
+            Owners and admins only. Creates a token that lets you act as this user in your app for 5
+            minutes, so you can see what they see. Every use is recorded in the audit log under your
+            name.
           </p>
         </div>
         <RevealActionForm action={impersonate.bind(null, id, euid)} clearParams={['impError']} className="flex items-end gap-2">
@@ -319,7 +320,7 @@ export default async function EndUserSecurityPage({
               className={inputCls}
             />
           </label>
-          <SubmitButton pendingLabel="Minting…">Mint impersonation token</SubmitButton>
+          <SubmitButton pendingLabel="Creating…">Sign in as this user</SubmitButton>
         </RevealActionForm>
       </Card>
 

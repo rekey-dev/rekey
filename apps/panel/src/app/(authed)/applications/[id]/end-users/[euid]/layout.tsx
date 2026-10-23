@@ -29,6 +29,7 @@
 import * as React from 'react';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
+import { CopyButton } from '@/components/CopyButton';
 import { CopyLinkButton } from '@/components/CopyLinkButton';
 import { RecordHeader } from '@/components/RecordHeader';
 import { getEndUserDetail, hasOpenSupportCase } from './shared';
@@ -90,7 +91,7 @@ export default async function EndUserLayout({
             )}
           </>
         }
-        meta={<span className="font-mono">{detail.endUser.id}</span>}
+        meta={<CopyButton value={detail.endUser.id} label="Copy user ID" />}
         action={<CopyLinkButton />}
         segmentsLabel="End-user sections"
         // Subscriptions and Credits are billing reads. Without the scope they

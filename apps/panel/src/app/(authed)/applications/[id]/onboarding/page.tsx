@@ -100,7 +100,7 @@ export default async function OnboardingPage({
         {sp.saved === '1' && <SavedBanner message="Questions saved." />}
         {error && (
           <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         {!canWrite && (

@@ -17,7 +17,7 @@
     "@rekey.dev/nextjs": "workspace:*",
     "@rekey.dev/react": "workspace:*",
     "@rekey.dev/shared-types": "workspace:*",
-    "next": "^15.5.18",
+    "next": "^15.5.28",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

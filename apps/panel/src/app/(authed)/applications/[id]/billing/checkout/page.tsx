@@ -31,7 +31,7 @@ export default async function BillingCheckoutPage({
       {saved === 'checkout_checks' && <SavedBanner message="Checks ran. The results are under Readiness." />}
       {error && (
         <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} fallback={error} />
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} />
         </Banner>
       )}
       <CheckoutPageSection applicationId={id} />

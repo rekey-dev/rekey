@@ -1,3 +1,5 @@
+import { GENERIC_ERROR_MESSAGE } from '@/lib/error-message';
+
 /**
  * The text inside an error banner, when the failure came from the API.
  *
@@ -30,7 +32,7 @@ export function ApiErrorText({
   detail,
   fix,
   map,
-  fallback = 'Something went wrong. Please try again.',
+  fallback = GENERIC_ERROR_MESSAGE,
 }: {
   code: string | undefined;
   detail?: string | undefined;
@@ -38,7 +40,7 @@ export function ApiErrorText({
   map?: Record<string, string>;
   fallback?: string;
 }) {
-  const mapped = code ? map?.[code] : undefined;
+  const mapped = code && map && Object.hasOwn(map, code) ? map[code] : undefined;
   const text = mapped ?? detail ?? fallback;
 
   return (

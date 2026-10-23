@@ -232,25 +232,24 @@ export default async function EndUserSubscriptionsPage({
 
         {granted === '1' && (
           <Banner tone="success">
-            Subscription granted. The plan&apos;s entitlements are live and{' '}
-            <code className="font-mono">subscription.activated</code> has been announced to your
-            webhook endpoints.
+            Subscription granted. Everything the plan includes is available to them now, and your
+            app has been notified.
           </Banner>
         )}
         {granted === 'already' && (
           <Banner tone="info">
-            Nothing to do: this end-user was already entitled on that plan. Granting again does not
+            Nothing to do: this end-user already has that plan. Granting again does not
             extend a live period; to move it to a new term, cancel it and grant again.
           </Banner>
         )}
         {canceled === 'period-end' && (
           <Banner tone="success">
-            Cancellation scheduled. The subscription keeps entitling until the end of the paid
+            Cancellation scheduled. They keep everything the plan includes until the end of the paid
             period.
           </Banner>
         )}
         {canceled === 'now' && (
-          <Banner tone="success">Subscription cancelled immediately. Entitlements are gone.</Banner>
+          <Banner tone="success">Subscription cancelled immediately. They no longer have what the plan included.</Banner>
         )}
         {/* `grantError` renders inside the modal, which reopens on it, showing
             it here as well put the same message twice, one copy behind the

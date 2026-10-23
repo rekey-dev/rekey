@@ -280,12 +280,12 @@ export default async function ApiKeysPage({
           <CopyButton value={app.publicKey} label="Copy" />
           <ActionForm action={rotatePublicKey.bind(null, id, Boolean(graceUntil))}>
             <TypedConfirmButton
-              expected={app.slug}
+              expected={app.name}
               title="Rotate the publishable key?"
               description={
                 graceUntil
-                  ? `A previous key is still active until ${formatDateTime(graceUntil)}. Rotating again will drop that key immediately, and any client still on it stops working at once. Only do this if the previous key leaked. Type the app slug to confirm.`
-                  : 'Mints a new publishable key and keeps the current one valid for a 30-day grace window, so already-shipped clients keep working while you roll out the new key. After the window the old key stops working. Type the app slug to confirm.'
+                  ? `A previous key is still active until ${formatDateTime(graceUntil)}. Rotating again will drop that key immediately, and any client still on it stops working at once. Only do this if the previous key leaked. Type the app name to confirm.`
+                  : 'Mints a new publishable key and keeps the current one valid for a 30-day grace window, so already-shipped clients keep working while you roll out the new key. After the window the old key stops working. Type the app name to confirm.'
               }
               triggerLabel="Rotate"
               confirmLabel={graceUntil ? 'Drop previous + rotate' : 'Rotate key'}

@@ -7,6 +7,7 @@ import { Banner } from '@/components/Banner';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { BillingLogTable } from '@/components/BillingLogTable';
 import { Card, SectionHeader } from '@/components/Card';
+import { CopyButton } from '@/components/CopyButton';
 import { EmptyState } from '@/components/EmptyState';
 import { SavedBanner } from '@/components/SavedBanner';
 import { StatusPill } from '@/components/StatusPill';
@@ -91,7 +92,7 @@ export default async function PaymentPage({
       <section className="space-y-3">
         <SectionHeader
           title={payment ? `Payment of ${formatMoney(payment.amount, payment.currency)}` : 'Payment'}
-          description={<span className="font-mono text-xs">{paymentId}</span>}
+          action={<CopyButton value={paymentId} label="Copy payment ID" />}
         />
         {payment && verification ? (
           <Card>
@@ -164,8 +165,10 @@ export default async function PaymentPage({
               )}
               {payment.providerPaymentId && (
                 <>
-                  <dt className="text-xs text-[var(--color-muted-fg)]">Provider payment id</dt>
-                  <dd className="break-all font-mono text-xs">{payment.providerPaymentId}</dd>
+                  <dt className="text-xs text-[var(--color-muted-fg)]">Provider reference</dt>
+                  <dd>
+                    <CopyButton value={payment.providerPaymentId} label="Copy provider reference" />
+                  </dd>
                 </>
               )}
             </dl>
