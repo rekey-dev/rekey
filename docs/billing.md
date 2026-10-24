@@ -97,7 +97,7 @@ Publishable **or** secret key (`Authorization: Bearer rp_pub_…` / `rp_live_…
 GET   /api/v1/billing/plans?country=                         (Application key; add the user JWT for a signed-in buyer)
 GET   /api/v1/billing/subscription                           — Application key + user JWT
 GET   /api/v1/billing/subscriptions                          (Application key + user JWT)
-POST  /api/v1/billing/subscription/cancel { atPeriodEnd?, organizationId?, subscriptionId? }
+POST  /api/v1/billing/subscription/cancel { atPeriodEnd?, organizationId?, subscriptionId?, reason?, feedback? }
 GET   /api/v1/billing/entitlements/features/:key             (Application key + user JWT)
 GET   /api/v1/users/me/licenses                              (Application key + user JWT)
 POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl, country?, currency?, onUnavailableCurrency?, provider?, couponCode? }
@@ -117,11 +117,35 @@ operator routes. `entitlementOverrides` is not on this surface either; the effec
 an override shows in `GET /billing/entitlements`.
 
 A buyer can hold several live subscriptions, for instance two plans bought
-separately. `GET /billing/subscription` returns one: a paid plan before a plan that costs
-nothing, then the most recently created, ties broken by id. `GET /billing/subscriptions`
+separately. `GET /billing/subscription` returns one: a recurring paid plan first, then a
+one-time purchase (a credit pack or a perpetual licence), then a plan that costs nothing,
+the most recently created within each, ties broken by id. `GET /billing/subscriptions`
 returns all live ones in that order (at most 100, the newest), so `items[0]` is the same row. Read the list
 before offering a checkout, so nobody is offered a plan they already pay for, and
-pass `subscriptionId` to cancel to end one of several. A `subscriptionId` naming an unfinished checkout answers `409 SUBSCRIPTION_CHECKOUT_UNFINISHED`.
+pass `subscriptionId` to cancel to end one of several. A `subscriptionId` naming an unfinished checkout answers `409 SUBSCRIPTION_CHECKOUT_UNFINISHED`, and cancelling a one-time purchase answers `409 SUBSCRIPTION_NOT_CANCELABLE`, since it never renews.
+
+### Cancellation reasons
+
+`POST /billing/subscription/cancel` takes two optional fields from your cancel survey:
+
+| Field | Value |
+|---|---|
+| `reason` | One of `too_expensive`, `missing_features`, `switched_service`, `unused`, `too_complex`, `low_quality`, `customer_service`, `other` (`CANCEL_REASONS` in `@rekey.dev/shared-types`). Any other value answers `400`. |
+| `feedback` | The subscriber's own words, 1 to 1000 characters after trimming. Only accepted with a `reason`; send `other` when none fits. |
+
+<!-- snippet: no-check a fragment: no imports, and values from the surrounding code -->
+```ts
+await rekey.billing.cancelSubscription(userAccessToken, {
+  reason: 'missing_features',
+  feedback: 'No CSV export yet',
+});
+```
+
+Both are stored on the subscription. A cancel at period end keeps them on the row, so the `subscription.canceled` that ends it later carries them too. Once a reason is stored, every subscription webhook carries `data.subscription.cancellation`: `{ reason, feedback }`, with `feedback` null when none was given. The operator billing view (`GET /tenant/applications/:id/end-users/:euid/billing`) returns `cancelReason` and `cancelFeedback`, and the panel shows them on the end user's Subscriptions tab. The hosted portal's cancel dialog asks "Why are you cancelling?" with the same reasons, optional.
+
+When a subscription comes back from a scheduled cancel (the provider resumes it, or a renewal is paid after the cancel), the reason and feedback are cleared with `cancelAt`, so nothing keeps reporting a cancellation that did not happen.
+
+Erasing the end user nulls `cancelFeedback` on the row and `feedback` in stored webhook deliveries. The `reason` is kept: it is one of eight fixed values and says nothing about the person. See [data-erasure.md](data-erasure.md).
 
 ### Where checkout sends the buyer afterwards
 

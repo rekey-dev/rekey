@@ -87,6 +87,8 @@ export interface SubscriptionRow {
   providerSubId: string | null;
   currentPeriodEnd: string | null;
   cancelAt: string | null;
+  cancelReason: string | null;
+  cancelFeedback: string | null;
   canceledAt: string | null;
   beneficiaryOrgId: string | null;
   /** Sparse `KIND:key` → value map the operator has layered over the plan. Null when none. */

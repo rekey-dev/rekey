@@ -692,6 +692,26 @@ export const AuthConfigSchema = z.object({
    */
   deviceBinding: z.enum(['optional', 'required']).default('optional'),
   /**
+   * Who may release a device to free its slot. `self_service` (default) lets
+   * the signed-in end-user release their own from a browser or app
+   * (`DELETE /users/me/devices/:id`). `server_only` refuses that call from a
+   * publishable key (`DEVICE_SELF_RELEASE_DISABLED`), so a release goes
+   * through the operator panel or the customer's own backend with a secret
+   * key. Listing stays open to the end-user. Only meaningful with
+   * `deviceBinding: 'required'`; otherwise a user can sign in unbound.
+   * See docs/devices.md.
+   */
+  deviceRelease: z.enum(['self_service', 'server_only']).default('self_service'),
+  /**
+   * Who may erase an end user's account through `DELETE /users/me`.
+   * `self_service` (default): the signed-in user from a browser (confirming
+   * with a password or MFA code) or the customer's backend with a secret key.
+   * `server_only`: a publishable key is refused (`ACCOUNT_SELF_DELETION_DISABLED`),
+   * so the customer's backend decides and confirms in its own way. `off`: the
+   * route is refused for every key; only an operator erasure removes an account.
+   */
+  accountDeletion: z.enum(['self_service', 'server_only', 'off']).default('self_service'),
+  /**
    * WebAuthn / passkey configuration. Both fields are required when
    * `"passkey"` appears in `methods`, the registration ceremony needs
    * to bind credentials to a specific Relying Party. `rpId` is the
@@ -1872,6 +1892,25 @@ export interface CancellationTimingInput {
  * `expireIfDue` only runs from `getCurrentSubscription`, which an operator
  * action does not go through. That needs the expiry seam widened first.
  */
+/**
+ * Why a subscriber cancelled, as they may say on `POST /billing/subscription/cancel`.
+ * The same set Stripe's cancellation details use, so a cancel survey maps one to one.
+ */
+export const CANCEL_REASONS = [
+  'too_expensive',
+  'missing_features',
+  'switched_service',
+  'unused',
+  'too_complex',
+  'low_quality',
+  'customer_service',
+  'other',
+] as const;
+export type CancelReason = (typeof CANCEL_REASONS)[number];
+
+/** At most this many characters of free-text feedback are kept with a cancellation. */
+export const CANCEL_FEEDBACK_MAX = 1000;
+
 export function cancelEffect(sub: CancellationTimingInput): 'period-end' | 'immediate' {
   // ACTIVE or TRIALING, deliberately NOT the full entitling set. PAST_DUE
   // entitles (a card not yet retried to exhaustion should not cut access) but
@@ -2803,6 +2842,12 @@ export type EndUserDeviceDto = z.infer<typeof EndUserDeviceDtoSchema>;
  * `auth.service.ts` puts on the envelope, enough to render a chooser.
  */
 export const DeviceLimitDetailsSchema = z.object({
+  /**
+   * False when the Application sets `deviceRelease: 'server_only'`: offer
+   * "contact support" rather than a release. Absent on APIs older than the
+   * setting, which always allowed self-release.
+   */
+  selfRelease: z.boolean().optional(),
   /** The `max_devices` entitlement that was reached. */
   limit: z.number().int(),
   devices: z.array(
@@ -3467,6 +3512,11 @@ export const WEBHOOK_EVENTS = [
     name: 'contact.submission.created',
     description:
       'A subscribe carried `fields` and they were stored, for example a contact form message. Payload: `data.contact` (id, email), `data.list` (id, key), `data.submission` (id, fields, createdAt). Erasing the contact scrubs stored deliveries of this event.',
+  },
+  {
+    name: 'email.unsubscribed',
+    description:
+      'A recipient left notification email: a one-click unsubscribe, or PATCH /users/:id/email-preferences set a topic to unsubscribed. Sent once per change. Payload: `data.address`, `data.endUserId` (when the address belongs to an end user), `data.category` (`notification`) and `data.topic` (absent when they left every notification email).',
   },
   {
     name: 'support.opened',

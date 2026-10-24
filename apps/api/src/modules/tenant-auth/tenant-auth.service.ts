@@ -602,6 +602,7 @@ export const tenantAuthService = {
         userAgent: input.device?.userAgent ?? null,
         metadata: {
           inviteId: invite.inviteId,
+          inviteKind: invite.kind,
           via: 'password',
           ...(invite.workspace && { joinedAs: invite.workspace.role }),
         },
@@ -840,6 +841,7 @@ export const tenantAuthService = {
         userAgent: input.device?.userAgent ?? null,
         metadata: {
           inviteId: invite.inviteId,
+          inviteKind: invite.kind,
           via: 'oauth',
           ...(invite.workspace && { joinedAs: invite.workspace.role }),
         },

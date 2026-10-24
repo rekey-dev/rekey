@@ -30,6 +30,7 @@ import type { CheckoutPrice } from './checkout-price.js';
 import { findBindingSubscription } from './checkout-binding.js';
 import { assertBindingAllowsCheckout, assertSubjectUnchanged } from './checkout-binding-refusals.js';
 import { claimCheckout } from './checkout-claim.js';
+import { TERMINAL_STATUSES } from './webhooks/apply-shared.js';
 import { assertCheckoutSubject } from './checkout-subject.js';
 import { ensurePlanPriceRegistered } from './plan-price-registration.js';
 /**
@@ -248,6 +249,10 @@ export async function createCheckoutSession(input: {
 
   assertSubjectUnchanged(existing, { planSlug: plan.slug, beneficiaryOrgId: input.beneficiaryOrgId });
 
+  // Resolved before the coupon slot is taken: a missing credential refuses
+  // the checkout, and a slot taken first would sit out its 24-hour expiry.
+  const provider = await getProviderForApplication(input.application, providerName);
+
   // Take the coupon's slot BEFORE the provider mints the discount, and hold
   // it until the payment settles. `validate` above is advisory only: it
   // counts rows that the payment webhook writes, and that webhook is up to a
@@ -268,7 +273,6 @@ export async function createCheckoutSession(input: {
         })
       : null;
 
-  const provider = await getProviderForApplication(input.application, providerName);
   // Serialised per buyer, see checkout-claim.ts. A one-time purchase binds
   // nobody and carries no trial, so it claims nothing.
   const { effectiveTrial, trialReservationId, claimCreatedRow } = isOneTime
@@ -283,6 +287,11 @@ export async function createCheckoutSession(input: {
         providerName,
         trial,
         billingConfig,
+      }).catch(async (e: unknown) => {
+        // A refused claim (trial already used, a concurrent checkout) minted
+        // nothing, so the coupon slot goes back now rather than in 24 hours.
+        if (reservation) await couponsService.releaseReservation(reservation.reservationId);
+        throw e;
       });
 
   const checkoutInput = {
@@ -439,9 +448,20 @@ export async function createCheckoutSession(input: {
       // the cancel endpoint into a 200-OK no-op while the provider keeps
       // charging. An ENTITLED row keeps its dates: someone pressing Upgrade
       // mid-period has not withdrawn a cancellation they scheduled.
+      //
+      // A row coming back from CANCELED or EXPIRED also sheds the ended
+      // provider subscription's id. Kept, it let a late
+      // `customer.subscription.deleted` for that old subscription match the
+      // new checkout's row and cancel it before its completion landed, so the
+      // buyer paid and was granted nothing.
       ...(isEntitlingStatus(existing?.status)
         ? {}
-        : { status: 'PENDING' as const, cancelAt: null, canceledAt: null }),
+        : {
+            status: 'PENDING' as const,
+            cancelAt: null,
+            canceledAt: null,
+            ...(existing !== null && TERMINAL_STATUSES.has(existing.status) && { providerSubId: null }),
+          }),
       ...(input.beneficiaryOrgId !== undefined && { beneficiaryOrgId: input.beneficiaryOrgId }),
       metadata: subscriptionMetadata as never,
     },

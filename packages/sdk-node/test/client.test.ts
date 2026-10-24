@@ -529,6 +529,7 @@ describe('WEBHOOK_EVENTS registry', () => {
       'contact.subscribed',
       'contact.unsubscribed',
       'contact.submission.created',
+      'email.unsubscribed',
       'support.opened',
       'support.updated',
       'support.closed',

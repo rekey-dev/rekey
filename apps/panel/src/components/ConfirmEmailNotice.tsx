@@ -26,10 +26,8 @@ export function ConfirmEmailNotice({
     <Banner tone="warning" className="m-4 mb-0">
       <p className="font-medium">Confirm {email} to finish setting up your account.</p>
       <p className="mt-1">
-        Until this address is confirmed you can create Applications and plans and look around, but you cannot invite
-        people, change what members can do, create API keys or tokens, add webhooks, store billing, sign-in provider
-        or email credentials, change where sign-in links point, add a passkey or two-factor authentication, connect
-        an MCP client, or create another workspace.
+        You can look around and set up apps and plans now. Inviting people, creating keys and connecting payment or
+        email providers unlock once your email is confirmed.
       </p>
       {sendAction ? (
         <ActionForm action={sendAction} className="mt-2 flex flex-wrap items-center gap-3">
@@ -39,7 +37,7 @@ export function ConfirmEmailNotice({
           >
             Send confirmation email
           </SubmitButton>
-          <span>Open the link in it in this browser, while signed in. Your password and everything else stay as they are.</span>
+          <span>Then open the link in this browser.</span>
         </ActionForm>
       ) : (
         <p className="mt-1">

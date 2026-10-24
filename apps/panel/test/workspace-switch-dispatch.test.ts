@@ -54,7 +54,7 @@ describe('WorkspaceSwitcher', () => {
       (container.querySelector('button[title="One"]') as HTMLButtonElement).click();
     });
     const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"], button, li')].find(
-      (el) => el.textContent?.includes('Two') && el.textContent.includes('ADMIN'),
+      (el) => el.textContent?.includes('Two') && el.textContent.includes('Admin'),
     );
     expect(item, 'the dropdown did not render the second workspace').toBeDefined();
     await act(async () => {

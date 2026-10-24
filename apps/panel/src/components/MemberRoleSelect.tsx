@@ -10,15 +10,23 @@
  */
 
 import * as React from 'react';
+import { ROLE_SUMMARY, roleLabel, type WorkspaceRole } from '@/lib/workspace-roles';
 
-const ROLES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
+const CONSEQUENCE: Record<WorkspaceRole, string> = {
+  OWNER: 'Owners control billing, other owners and can delete the workspace. Only choose this for people you fully trust.',
+  ADMIN: 'Admins can see and change every app and invite members.',
+  MEMBER: 'Members only see the apps you give them on the App access tab, so check that after this change.',
+};
 
 export function MemberRoleSelect({
   email,
   currentRole,
+  roles,
 }: {
   email: string;
   currentRole: string;
+  /** The roles the signed-in operator may hand out. */
+  roles: readonly WorkspaceRole[];
 }): React.JSX.Element {
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const selectRef = React.useRef<HTMLSelectElement | null>(null);
@@ -57,9 +65,9 @@ export function MemberRoleSelect({
         onChange={onChange}
         className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]"
       >
-        {ROLES.map((r) => (
-          <option key={r} value={r}>
-            {r}
+        {roles.map((r) => (
+          <option key={r} value={r} title={ROLE_SUMMARY[r]}>
+            {roleLabel(r)}
           </option>
         ))}
       </select>
@@ -73,13 +81,10 @@ export function MemberRoleSelect({
         }}
       >
         <h2 id={`${baseId}-title`} className="text-base font-semibold">
-          Change role to {next}?
+          Make {email} {next === 'MEMBER' ? 'a member' : `an ${roleLabel(next ?? '').toLowerCase()}`}?
         </h2>
         <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
-          {email} will have <strong>{next}</strong> access to this workspace.
-          {next === 'OWNER'
-            ? ' Owners can manage billing, members, and every application. Grant this only to people you fully trust.'
-            : ''}
+          {next ? CONSEQUENCE[next as WorkspaceRole] : ''}
         </p>
         <div className="mt-4 flex items-center justify-end gap-2">
           <button

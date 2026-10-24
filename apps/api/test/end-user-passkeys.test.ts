@@ -4,6 +4,7 @@
  * Covered: registration options bind to the Application's rpId, a registration
  * persists the credential, a passkey sign-in mints a session without an MFA
  * challenge, a credential from Application A is refused on Application B,
+ * email-first sign-in start does not reveal whether an address has an account,
  * WEBAUTHN_NOT_CONFIGURED when the application has not opted in, and list and
  * delete are scoped to the calling user.
  *
@@ -258,6 +259,27 @@ describe('end-user passkeys', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('WEBAUTHN_AUTH_INVALID');
+  });
+
+  it('email-first start answers a known address without passkeys like an unknown one', async () => {
+    const b = await bootstrap('enum-shape');
+    const startFor = (email: string) =>
+      app
+        .inject({
+          method: 'POST',
+          url: '/api/v1/auth/passkey/authenticate/start',
+          headers: { authorization: `Bearer ${b.liveKey}` },
+          payload: { email },
+        })
+        .then((r) => {
+          expect(r.statusCode).toBe(200);
+          const data = r.json().data as { options: Record<string, unknown> };
+          return Object.keys(data.options).sort();
+        });
+    const known = await startFor('eu-a4-enum-shape@example.com');
+    const unknown = await startFor('nobody-enum-shape@example.com');
+    expect(known).not.toContain('allowCredentials');
+    expect(known).toEqual(unknown);
   });
 
   it('WEBAUTHN_NOT_CONFIGURED when authConfig.webauthn is absent', async () => {

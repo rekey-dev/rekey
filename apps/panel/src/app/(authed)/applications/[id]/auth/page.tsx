@@ -550,6 +550,55 @@ export default async function AuthMethodsPage({
               </select>
             </Field>
 
+            <Field
+              label="Device release"
+              hint={
+                <>
+                  Who may free a device slot. <strong>End-users</strong> can release their own
+                  devices from your app. <strong>Operators only</strong> refuses that from the
+                  browser, so a user at the limit asks your support team, who release it here
+                  under End-users (or your backend does, with a secret key). A release button
+                  your own backend offers keeps working; remove it if release should go through
+                  support. It only holds when device binding is <strong>Required</strong>;
+                  otherwise a user at the limit signs in without a fingerprint and is not held
+                  by it.
+                </>
+              }
+            >
+              <select
+                name="deviceRelease"
+                defaultValue={app.authConfig.deviceRelease ?? 'self_service'}
+                className={`${inputCls} w-full sm:w-72`}
+              >
+                <option value="self_service">End-users release their own devices</option>
+                <option value="server_only">Operators only: release through support</option>
+              </select>
+            </Field>
+
+            <Field
+              label="Account deletion"
+              hint={
+                <>
+                  Who may delete an account through <code>DELETE /users/me</code>.{' '}
+                  <strong>End-users</strong> can delete their own from your app after confirming
+                  with their password or authenticator code, and your backend can too.{' '}
+                  <strong>Your backend only</strong> refuses the browser, so your server decides and
+                  confirms in its own way. <strong>Off</strong> refuses it everywhere; accounts are
+                  then removed only by an erasure here under End-users.
+                </>
+              }
+            >
+              <select
+                name="accountDeletion"
+                defaultValue={app.authConfig.accountDeletion ?? 'self_service'}
+                className={`${inputCls} w-full sm:w-72`}
+              >
+                <option value="self_service">End-users delete their own account</option>
+                <option value="server_only">Your backend only (secret key)</option>
+                <option value="off">Off: operators erase accounts</option>
+              </select>
+            </Field>
+
           </Card>
         </section>
 

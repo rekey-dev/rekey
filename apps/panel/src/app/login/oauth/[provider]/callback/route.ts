@@ -14,6 +14,7 @@ import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookie
 import { cookieSecure } from '@/lib/cookie-secure';
 import { clearMfaChallenge, mfaVerifyPath, writeMfaChallenge } from '@/lib/mfa-challenge';
 import { safeNext } from '@/lib/safe-next';
+import { invitationTokenIn } from '@/lib/invitation-next';
 import { normalizeErrorCode } from '@/lib/error-code';
 import { LOGIN_ERROR_MESSAGES } from '../../../error-messages';
 
@@ -81,6 +82,7 @@ export async function GET(
   if (state !== cookieState) return fail('oauth_state_mismatch');
   if (cookieProvider !== provider) return fail('oauth_provider_mismatch');
 
+  const inviteKey = invitationTokenIn(next);
   let result: CallbackResult;
   try {
     result = await publicPost<CallbackResult>(
@@ -88,7 +90,10 @@ export async function GET(
       // `state` goes with the code: it has already served its CSRF purpose
       // above, and the API uses it to retrieve the PKCE verifier it stored when
       // this flow started. The verifier itself never touches the browser.
-      { code, state },
+      // A sign-in that started on an invitation presents it, so a first
+      // sign-in by the invited person creates their account inside that
+      // workspace. An existing operator ignores it and accepts on the page.
+      { code, state, ...(inviteKey && { inviteKey }) },
     );
   } catch (err) {
     if (err instanceof PanelApiError) return fail(normalizeErrorCode(err.code, LOGIN_ERROR_MESSAGES));

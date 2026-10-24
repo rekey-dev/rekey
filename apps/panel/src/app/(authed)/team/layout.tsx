@@ -1,21 +1,19 @@
 /**
- * Team shell: header and a tab strip over three jobs.
+ * Team shell: header and a tab strip over two jobs.
  *
- *   Members             who is in this workspace, and their workspace role
- *   Application access  which applications each member reaches, and what they may do there
- *   Invitations         inviting someone, and the invitations still open
+ *   People      who is in this workspace or invited to it, and their role
+ *   App access  which apps each member can use, and what they may do there
  *
- * One page used to stack all three, so the invite form sat below every
- * member's scope editor. The tabs are route segments, as on the end-user
- * screen, and each action redirects back to its own tab. Only static chrome
- * lives here; anything an action changes is rendered by the tab.
+ * Inviting happens from People, in a dialog, and pending invitations sit in
+ * the same list as the people already in, so one screen answers "who has
+ * access". Only static chrome lives here; anything an action changes is
+ * rendered by the tab.
  */
 
 import * as React from 'react';
 import { getMe } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { SegmentedNav } from '@/components/SegmentedNav';
-import { InviteAction } from './invite-action';
 
 export default async function TeamLayout({
   children,
@@ -23,7 +21,6 @@ export default async function TeamLayout({
   children: React.ReactNode;
 }): Promise<React.JSX.Element> {
   const me = await getMe();
-  const canManage = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   const workspaceName = me.memberships.find((m) => m.tenantId === me.activeTenantId)?.tenantName;
 
   return (
@@ -33,20 +30,17 @@ export default async function TeamLayout({
           title="Team"
           description={
             <>
-              People who can sign in to{' '}
+              Who can sign in to{' '}
               <strong className="font-medium text-[var(--color-fg)]">{workspaceName}</strong>, and
-              what each of them can reach.
+              what each of them can do.
             </>
           }
-          action={canManage ? <InviteAction /> : undefined}
         />
         <SegmentedNav
           label="Team sections"
           segments={[
-            { href: '/team', label: 'Members', exact: true },
-            { href: '/team/access', label: 'Application access' },
-            // Invitations are OWNER/ADMIN data; the API refuses a MEMBER.
-            ...(canManage ? [{ href: '/team/invitations', label: 'Invitations' }] : []),
+            { href: '/team', label: 'People', exact: true },
+            { href: '/team/access', label: 'App access' },
           ]}
         />
       </div>

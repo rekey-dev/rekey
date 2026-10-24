@@ -490,8 +490,20 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
         enum: ['pending', 'accepted', 'expired', 'revoked'],
         description: 'Derived at read time. Precedence: revoked > accepted > expired > pending.',
       },
+      appGrants: {
+        type: 'array',
+        description: 'The app grants a MEMBER gets on joining. Always empty for OWNER and ADMIN.',
+        items: {
+          type: 'object',
+          properties: {
+            applicationId: { type: 'string' },
+            role: { type: 'string', enum: ['APP_ADMIN', 'APP_BILLING', 'APP_VIEWER'] },
+          },
+          required: ['applicationId', 'role'],
+        },
+      },
     },
-    required: ['id', 'email', 'role', 'expiresAt', 'createdAt', 'invitedById', 'status'],
+    required: ['id', 'email', 'role', 'expiresAt', 'createdAt', 'invitedById', 'status', 'appGrants'],
   },
 
   /**
@@ -768,10 +780,11 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       via: { type: 'string', description: 'The transport that carried it (e.g. `resend`, `smtp`).' },
       status: {
         type: 'string',
-        enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown'],
+        enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled'],
         description:
           '`pending`: a custom template send that has not finished. `unknown`: a pending send that ' +
-          'recorded no outcome within five minutes, so delivery is not known.',
+          'recorded no outcome within five minutes, so delivery is not known. `scheduled`: waiting for ' +
+          '`sendAt`. `canceled`: a scheduled send canceled before it fired.',
       },
       messageId: { type: 'string', nullable: true },
       error: { type: 'string', nullable: true },
@@ -781,7 +794,17 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
         description: 'The custom template sent, for mail from `POST /api/v1/email/send` or a custom test send.',
       },
       customTemplateVersion: { type: 'integer', nullable: true },
-      createdAt: { type: 'string', format: 'date-time' },
+      sendAt: {
+        type: 'string',
+        format: 'date-time',
+        nullable: true,
+        description: 'When a scheduled send is due. Null for a send made at once.',
+      },
+      createdAt: {
+        type: 'string',
+        format: 'date-time',
+        description: 'When the send was made; for a scheduled send, when it was scheduled until it fires.',
+      },
     },
     required: ['id', 'toAddress', 'subject', 'via', 'status', 'createdAt'],
   },

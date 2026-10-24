@@ -1,9 +1,9 @@
 /**
  * AES-256-GCM JSON encryption used to store provider credentials at rest.
  *
- * Key comes from `ENCRYPTION_KEY` (32 bytes hex, validated by env.ts in
- * production). Each ciphertext carries its own random IV, we never reuse
- * IVs across writes, even for the same plaintext.
+ * Key comes from `ENCRYPTION_KEY`: 64 hex characters (32 bytes), which env.ts
+ * checks at boot in every environment. Each ciphertext carries its own random
+ * IV, we never reuse IVs across writes, even for the same plaintext.
  *
  * Format on disk: `v1.<iv-hex>.<authTag-hex>.<ciphertext-hex>`. The version
  * prefix lets us rotate the algorithm later without breaking old rows.

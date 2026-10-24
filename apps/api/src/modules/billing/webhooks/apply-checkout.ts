@@ -214,7 +214,13 @@ export async function applyCheckoutCompleted(ev: CheckoutCompletedEvent, ctx: Ap
     ev.providerSubscriptionId === null
       ? null
       : await prisma.trialRedemption.findFirst({
-          where: { applicationId: ev.applicationId, checkoutSessionId: ev.checkoutSessionId, status: { in: ['RESERVED', 'RELEASED'] } },
+          // CONSUMED too: the first attempt consumes the slot after its
+          // commit, so a retried completion still has to see this trial.
+          where: {
+            applicationId: ev.applicationId,
+            checkoutSessionId: ev.checkoutSessionId,
+            status: { in: ['RESERVED', 'RELEASED', 'CONSUMED'] },
+          },
           select: { trialDays: true },
         });
   const trialEndsAt =
@@ -222,7 +228,12 @@ export async function applyCheckoutCompleted(ev: CheckoutCompletedEvent, ctx: Ap
       ? new Date(Date.now() + trialForSession.trialDays * 86_400_000)
       : null;
 
-  const activatedFrom = before && before.status !== 'ACTIVE' ? before : null;
+  // A retry that lands after the trial converted must not put it back.
+  const trialing = trialEndsAt !== null && before?.status !== 'ACTIVE';
+  const completedStatus = trialing ? 'TRIALING' : 'ACTIVE';
+  // A retried completion finds the row already in the status it writes, and
+  // that is not a second activation.
+  const activatedFrom = before && before.status !== completedStatus ? before : null;
   const { matched, deliveryIds, paymentId } = await prisma.$transaction(async (tx) => {
     const result = await tx.subscription.updateMany({
       where: {
@@ -243,8 +254,8 @@ export async function applyCheckoutCompleted(ev: CheckoutCompletedEvent, ctx: Ap
       data: {
         // TRIALING while the provider runs a trial clock: both entitle, but
         // unpaid revenue is not reported as MRR.
-        status: trialEndsAt !== null ? 'TRIALING' : 'ACTIVE',
-        ...(trialEndsAt !== null && { trialEndsAt }),
+        status: completedStatus,
+        ...(trialing && { trialEndsAt }),
         ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
         ...(completingProvider !== null && { provider: completingProvider }),
         ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
@@ -300,12 +311,11 @@ export async function applyCheckoutCompleted(ev: CheckoutCompletedEvent, ctx: Ap
       await logSubscriptionActivated(
         tx,
         activatedFrom.id,
-        { via: 'checkout', trial: trialEndsAt !== null, checkoutSessionId: completed?.id },
+        { via: 'checkout', trial: trialing, checkoutSessionId: completed?.id },
         origin,
       );
       ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', activatedFrom.id)));
-      // A replay that finds the row already TRIALING started nothing new.
-      if (trialEndsAt !== null && activatedFrom.status !== 'TRIALING') {
+      if (trialing) {
         ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.trial_started', activatedFrom.id)));
       }
     }

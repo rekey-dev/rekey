@@ -113,6 +113,8 @@ export function SecretDialog({ secret, onDone }: { secret: OneTimeSecret; onDone
   const [copied, setCopied] = React.useState(false);
   const titleId = React.useId();
   const descId = React.useId();
+  const mayClose = (): boolean =>
+    copied || secret.reissuable === true || window.confirm('Close without copying? This is the only time it is shown.');
 
   React.useEffect(() => {
     const dialog = ref.current;
@@ -138,20 +140,26 @@ export function SecretDialog({ secret, onDone }: { secret: OneTimeSecret; onDone
       data-one-time-secret=""
       onCancel={(e) => {
         e.preventDefault();
-        if (copied || window.confirm('Close without copying? This is the only time it is shown.')) close();
+        if (mayClose()) close();
       }}
     >
       <ModalHeader titleId={titleId} title={secret.title} onClose={() => {
-        if (copied || window.confirm('Close without copying? This is the only time it is shown.')) close();
+        if (mayClose()) close();
       }} />
       <div className="space-y-4 p-6">
-        <p
-          id={descId}
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/60 dark:bg-amber-950/60 dark:text-amber-200"
-        >
-          <strong>Shown once.</strong> Copy it now and keep it somewhere safe. Once this dialog is
-          closed it cannot be shown again.
-        </p>
+        {secret.reissuable ? (
+          <p id={descId} className="text-sm text-[var(--color-muted-fg)]">
+            If this gets lost, you can send a fresh one from the Team page at any time.
+          </p>
+        ) : (
+          <p
+            id={descId}
+            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/60 dark:bg-amber-950/60 dark:text-amber-200"
+          >
+            <strong>Shown once.</strong> Copy it now and keep it somewhere safe. Once this dialog is
+            closed it cannot be shown again.
+          </p>
+        )}
         <div className="flex items-start gap-2">
           <code className="block min-w-0 flex-1 break-all rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-xs">
             {secret.value}
@@ -169,7 +177,7 @@ export function SecretDialog({ secret, onDone }: { secret: OneTimeSecret; onDone
             onClick={close}
             className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)]"
           >
-            {copied ? 'Done' : "I've stored it"}
+            {copied || secret.reissuable ? 'Done' : "I've stored it"}
           </button>
         </div>
       </div>

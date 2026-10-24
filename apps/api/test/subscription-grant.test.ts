@@ -655,6 +655,39 @@ describe('Granting a subscription without a payment provider', () => {
     expect(free.status).toBe('ACTIVE');
   });
 
+  it('a credit pack bought after subscribing does not become the current subscription, and cannot be cancelled', async () => {
+    await makePlan('free', { price: undefined });
+    const paidId = await makePlan('paid');
+    const packId = await makePlan('pack', { kind: 'CREDIT', interval: undefined, creditsAmount: 100 });
+    const euId = await makeEndUser('pack-buyer@example.com');
+    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
+    const paid = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId: paidId, status: 'ACTIVE', provider: 'paypal', providerSubId: 'I-PAID' },
+    });
+    const pack = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId: packId, status: 'ACTIVE' },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+
+    expect((await billingService.getCurrentSubscription(application, endUser))?.id).toBe(paid.id);
+    const live = await billingService.listLiveSubscriptions(application, endUser);
+    expect(live.map((row) => row.id).slice(0, 2)).toEqual([paid.id, pack.id]);
+
+    await expect(
+      billingService.cancelCurrentSubscription(application, endUser, { subscriptionId: pack.id }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SUBSCRIPTION_NOT_CANCELABLE' });
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: pack.id } })).status).toBe('ACTIVE');
+
+    await prisma.subscription.update({ where: { id: paid.id }, data: { status: 'CANCELED' } });
+    expect((await billingService.getCurrentSubscription(application, endUser))?.id).toBe(pack.id);
+    await expect(billingService.cancelCurrentSubscription(application, endUser)).rejects.toMatchObject({
+      code: 'SUBSCRIPTION_NOT_CANCELABLE',
+    });
+  });
+
   it('a paid plan that lapses on read falls back to the live free tier on that same read', async () => {
     await makePlan('free', { price: undefined });
     const paidId = await makePlan('paid');

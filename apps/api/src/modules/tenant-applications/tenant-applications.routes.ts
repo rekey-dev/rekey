@@ -431,6 +431,25 @@ export const AUTH_CONFIG_PATCH_BODY_JSON_SCHEMA = {
         'magic-link, passkey and MFA sign-in without one (DEVICE_FINGERPRINT_REQUIRED). ' +
         'Refresh is never gated. See docs/devices.md.',
     },
+    deviceRelease: {
+      type: 'string',
+      enum: ['self_service', 'server_only'],
+      description:
+        'Who may release a device to free its slot. `self_service` (default) lets the ' +
+        'end-user release their own with DELETE /users/me/devices/:id. `server_only` refuses ' +
+        'that call from a publishable key (DEVICE_SELF_RELEASE_DISABLED), so a release goes ' +
+        'through the operator panel or a secret key. Only meaningful with deviceBinding ' +
+        '`required`. See docs/devices.md.',
+    },
+    accountDeletion: {
+      type: 'string',
+      enum: ['self_service', 'server_only', 'off'],
+      description:
+        'Who may erase an account with DELETE /users/me. `self_service` (default): the end-user ' +
+        'from a browser (with a password or MFA code) or your backend with a secret key. ' +
+        '`server_only`: only a secret key, so your backend confirms in its own way. `off`: refused ' +
+        'for every key (ACCOUNT_SELF_DELETION_DISABLED); only an operator erasure removes an account.',
+    },
   },
 } as const;
 
@@ -483,6 +502,8 @@ export const AUTH_CONFIG_PATCH_BODY = z
     dynamicClientRegistration: z.boolean().optional(),
     tokenAlg: z.enum(['HS256', 'RS256']).optional(),
     deviceBinding: z.enum(['optional', 'required']).optional(),
+    deviceRelease: z.enum(['self_service', 'server_only']).optional(),
+    accountDeletion: z.enum(['self_service', 'server_only', 'off']).optional(),
   })
   .strict();
 
@@ -1684,7 +1705,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: id,
         ...requestContext(req),
-        metadata: { changed: Object.keys(body), ...(body.tokenAlg !== undefined && { tokenAlg: body.tokenAlg }) },
+        metadata: {
+          changed: Object.keys(body),
+          ...(body.tokenAlg !== undefined && { tokenAlg: body.tokenAlg }),
+          ...(body.deviceRelease !== undefined && { deviceRelease: body.deviceRelease }),
+          ...(body.accountDeletion !== undefined && { accountDeletion: body.accountDeletion }),
+        },
       });
       return { success: true, data: { authConfig: updated.authConfig } };
     },
@@ -4377,6 +4403,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                       currentPeriodEnd: { type: 'string', format: 'date-time', nullable: true },
                       cancelAt: { type: 'string', format: 'date-time', nullable: true },
                       canceledAt: { type: 'string', format: 'date-time', nullable: true },
+                      cancelReason: { type: 'string', nullable: true, description: 'Why the subscriber cancelled, when they said.' },
+                      cancelFeedback: { type: 'string', nullable: true, description: "The subscriber's own words on cancel." },
                       beneficiaryOrgId: { type: 'string', nullable: true },
                       entitlementOverrides: {
                         type: 'object',
@@ -4492,6 +4520,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             currentPeriodEnd: true,
             cancelAt: true,
             canceledAt: true,
+            cancelReason: true,
+            cancelFeedback: true,
             beneficiaryOrgId: true,
             // What the operator has deviated from the plan for this one
             // customer. The panel edits it through the overrides route and
@@ -4840,7 +4870,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         const result = await eraseEndUser({
           applicationId: params.id,
           endUserId: params.euid,
-          operatorUserId: req.tenantUser!.id,
+          actor: { type: 'operator', id: req.tenantUser!.id },
         });
         // Audit the erasure (no-op repeats are still logged for completeness).
         void recordSecurityEvent({

@@ -6,7 +6,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { CUSTOM_EMAIL_CATEGORIES } from '@rekey.dev/shared-types';
+import { CUSTOM_EMAIL_CATEGORIES, CUSTOM_EMAIL_TOPIC_RE } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../lib/error.js';
 import { requireTenantSession } from '../../../middleware/tenant-session.js';
 import { ensureAppAccess } from '../../../lib/app-access.js';
@@ -22,6 +22,7 @@ const KeyParam = z.object({ id: z.string().min(1), key: z.string().min(1).max(64
 const draftShape = {
   name: z.string().trim().min(1).max(120),
   category: z.enum(CUSTOM_EMAIL_CATEGORIES),
+  topic: z.string().regex(CUSTOM_EMAIL_TOPIC_RE).nullable(),
   fromName: FromNameSchema.nullable(),
   subject: z.string().min(1).max(998),
   designJson: z.unknown(),
@@ -35,6 +36,7 @@ const CreateBody = z
   .object({
     key: TemplateKeySchema,
     ...draftShape,
+    topic: draftShape.topic.default(null),
     fromName: draftShape.fromName.default(null),
     bodyText: draftShape.bodyText.default(null),
     designJson: z.unknown().optional(),
@@ -90,6 +92,7 @@ const TEMPLATE = {
     key: { type: 'string' },
     name: { type: 'string' },
     category: { type: 'string', enum: ['critical', 'notification'] },
+    topic: { type: 'string', description: 'What a recipient unsubscribes from. The key unless set.' },
     fromName: { type: 'string', nullable: true },
     subject: { type: 'string' },
     designJson: { nullable: true, description: 'Opaque Unlayer design document, stored for the editor.' },
@@ -110,6 +113,14 @@ const TEMPLATE = {
 const DRAFT_BODY_PROPERTIES = {
   name: { type: 'string', maxLength: 120 },
   category: { type: 'string', enum: ['critical', 'notification'] },
+  topic: {
+    type: 'string',
+    nullable: true,
+    pattern: '^[a-z][a-z0-9_]{2,63}$',
+    description:
+      'Notification mail only: what a recipient leaves when they unsubscribe from this email. Templates that share ' +
+      'a topic are left together. Null: the template key. Copied onto each version at publish.',
+  },
   fromName: { type: 'string', nullable: true, maxLength: 120 },
   subject: { type: 'string', maxLength: 998 },
   designJson: { description: 'Opaque Unlayer design document.' },

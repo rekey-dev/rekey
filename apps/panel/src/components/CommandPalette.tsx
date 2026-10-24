@@ -65,9 +65,9 @@ interface PaletteItem {
 /** Mirrors Sidebar's NAV, keep in sync when nav entries change. */
 const NAV_DESTINATIONS: Array<{ label: string; href: string; keywords?: string }> = [
   { label: 'Applications', href: '/applications', keywords: 'apps' },
-  { label: 'Team', href: '/team', keywords: 'members roles' },
-  { label: 'Team: application access', href: '/team/access', keywords: 'grants scopes permissions' },
-  { label: 'Team: invitations', href: '/team/invitations', keywords: 'invite teammate' },
+  { label: 'Team', href: '/team', keywords: 'members people roles' },
+  { label: 'Team: app access', href: '/team/access', keywords: 'grants scopes permissions' },
+  { label: 'Team: invite people', href: '/team?newInvite=1', keywords: 'invite teammate invitations' },
   { label: 'Workspace settings', href: '/workspace', keywords: 'settings tenant workspace' },
   { label: 'Audit log', href: '/audit-log', keywords: 'security events export' },
   { label: 'Email delivery', href: '/email-logs', keywords: 'mail logs sent bounced' },

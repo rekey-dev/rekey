@@ -110,6 +110,52 @@ export function recipientNotEndUser(): RekeyError {
   });
 }
 
+/** One code for unknown and erased, so a send never reveals that an erased person existed. */
+export function recipientNotFound(endUserId: string): RekeyError {
+  return new RekeyError({
+    statusCode: 404,
+    code: 'EMAIL_RECIPIENT_NOT_FOUND',
+    message: `No end user "${endUserId}" to send to in this application.`,
+    fix: 'Check the id belongs to the application this secret key represents. An erased end user cannot be mailed. Nothing was sent.',
+  });
+}
+
+export function recipientBanned(endUserId: string): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'EMAIL_RECIPIENT_BANNED',
+    message: `End user "${endUserId}" is banned, so they are not sent custom email by id.`,
+    fix: 'Stop this send. If the ban was a mistake, unban them in Panel → Users first. Nothing was sent.',
+  });
+}
+
+export function recipientUnverified(endUserId: string): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'EMAIL_RECIPIENT_UNVERIFIED',
+    message: `End user "${endUserId}" has not verified their email address.`,
+    fix: 'Send again once they verify (the email.verified webhook says when), or send to their address with `to` as a string. Nothing was sent.',
+  });
+}
+
+export function topicUnknown(topics: string[]): RekeyError {
+  return new RekeyError({
+    statusCode: 400,
+    code: 'EMAIL_TOPIC_UNKNOWN',
+    message: `No notification template of this application was ever published with topic ${topics.map((t) => `"${t}"`).join(', ')}.`,
+    fix: 'Use a topic from GET /api/v1/users/:id/email-preferences. A topic exists once a notification template that uses it is published.',
+  });
+}
+
+export function sendNotFound(): RekeyError {
+  return new RekeyError({
+    statusCode: 404,
+    code: 'EMAIL_SEND_NOT_FOUND',
+    message: 'No send with that id or idempotency key in this application.',
+    fix: 'Use the `id` a send returned, or the idempotency key it was sent with. Log rows older than the retention window are deleted.',
+  });
+}
+
 export function templateKeyTaken(key: string): RekeyError {
   return new RekeyError({
     statusCode: 409,

@@ -4,6 +4,83 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.3.0
+
+Lifecycle email, cancellation reasons, self-service account deletion and team
+invites under invite-only sign-up, plus money-path, privacy and session fixes.
+Four migrations, all additive (`20261023202912_email_topic_opt_outs`,
+`20261023220638_subscription_cancel_reason`, `20261024043609_scheduled_email_sends`,
+`20261024094131_invitation_app_grants`):
+run `prisma migrate deploy`, then deploy the API, panel and portal together and
+upgrade the `@rekey.dev/*` packages with them.
+
+### Before you upgrade
+
+- **One-click unsubscribe leaves a topic, not every notification email.** The
+  link in a notification email sent by 2.3 unsubscribes from that template's
+  topic; the confirm page offers a second button to leave every notification
+  email. Links in emails sent before 2.3 keep their old meaning.
+- **One-time purchases rank after recurring plans.** `GET /billing/subscription`
+  returns a recurring paid plan before a credit pack or perpetual licence, and
+  an end-user cancel of a one-time purchase answers `409 SUBSCRIPTION_NOT_CANCELABLE`.
+
+### Added
+
+- **Notification topics and email preferences.** Custom templates take an
+  optional `topic` (default: the key). `GET` and `PATCH
+  /api/v1/users/:id/email-preferences` read and change a user's topics, and the
+  `email.unsubscribed` webhook reports each change.
+- **Send by end-user id, dry run, read a send back.** `POST /api/v1/email/send`
+  takes `to: { endUserId }` (refusing unknown, erased, banned and unverified
+  users) and `dryRun: true`; `GET /api/v1/email/sends/:id` and
+  `?idempotencyKey=` read the outcome with a secret key. The operator email log
+  filters by template, recipient and time.
+- **Scheduled sends with cancel.** `sendAt` (up to 30 days ahead) records a
+  scheduled send that runs every check again when it fires;
+  `DELETE /api/v1/email/sends/:id` cancels it. Caps met at fire time are waited
+  out. SDK: `email.send({ sendAt })`, `email.cancelSend(id)`, `email.dryRun`,
+  `email.getSend`.
+- **Cancellation reasons.** `POST /billing/subscription/cancel` takes `reason`
+  (`CANCEL_REASONS`) and `feedback`; they show in the panel, are asked in the
+  hosted portal's cancel dialog, and travel on subscription webhooks as
+  `data.subscription.cancellation`.
+- **Self-service account deletion.** `DELETE /api/v1/users/me` erases the
+  caller's account, with step-up from a browser, refused while a subscription
+  still bills or from an impersonation session. Each Application chooses
+  `authConfig.accountDeletion`: `self_service` (default), `server_only` or `off`.
+  SDK: `auth.deleteCurrentUser` (node), `deleteAccount` (react).
+- **Team invites under invite-only sign-up**, a simpler Team page, and a
+  per-Application setting to keep device release with operators
+  (`authConfig.deviceRelease`).
+- **Choose a member's apps when you invite them.** The invite dialog takes the
+  per-Application grants for a MEMBER, and they apply when the invitation is
+  accepted.
+- **Panel sidebar** with the running Rekey version beside the logo.
+
+### Fixed
+
+- A resubscribe survives a late deletion of the old provider subscription; a
+  Stripe renewal paid before the period update still refills credits; a late
+  invoice never moves the period end back; a refused checkout releases its
+  coupon slot; a retried trial completion is not announced twice.
+- Erasure removes the person's address from organization invitations and the
+  webhook deliveries about them, and deletes their scheduled sends and topic
+  opt-outs.
+- The billing outbox drain reads the database clock, so an event queued a
+  moment ago is never skipped.
+- Subscription period credits are labelled "Subscription credits" in the ledger.
+
+### Security
+
+- Starting a passkey sign-in no longer reveals whether an address has an account.
+- The panel refreshes an operator token inside a Route Handler only when the
+  request may rotate it, and the admin login runs the malformed-Origin guard.
+- The API refuses a non-hex `ENCRYPTION_KEY` at boot.
+- nodemailer 10.2.1 in the API, up from 6.10.1, for sixteen advisories
+  including five high (GHSA-rcmh-qjqh-p98v, GHSA-p6gq-j5cr-w38f,
+  GHSA-2x7j-588g-ccc2, GHSA-v53p-9fqp-m79j, GHSA-r7g4-qg5f-qqm2). It only
+  affects operators who send through their own SMTP server.
+
 ## 2.2.1
 
 A security release on 2.2.0 that also ships everything in 2.2.1-rc.1 below.

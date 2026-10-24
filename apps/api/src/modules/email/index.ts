@@ -4,3 +4,4 @@ export { tenantEmailRoutes } from './email.routes.js';
 export { EMAIL_EVENTS, isKnownEvent } from './events.js';
 export { customEmailTemplateRoutes } from './custom/custom-templates.routes.js';
 export { emailSendRoutes, emailUnsubscribeRoutes } from './custom/email-send.routes.js';
+export { emailPreferencesRoutes } from './custom/email-preferences.js';

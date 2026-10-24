@@ -110,7 +110,10 @@ const LogQuery = z.object({
   // (application off, event off, or the address on the suppression list). It
   // has to be filterable: the Settings and Templates copy sends an operator
   // here to find out WHY a mail did not go, and without it the query 400s.
-  status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown']).optional(),
+  status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled']).optional(),
+  customTemplateKey: z.string().min(1).max(64).optional(),
+  toAddress: z.string().min(1).max(254).optional(),
+  since: z.coerce.date().optional(),
 });
 
 const UpsertTemplateBody = z.object({
@@ -814,7 +817,10 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 200 },
             offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
-            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown'] },
+            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled'] },
+            customTemplateKey: { type: 'string', description: 'Only sends of this custom template key.' },
+            toAddress: { type: 'string', description: 'Only sends to this address, exact and case-insensitive.' },
+            since: { type: 'string', format: 'date-time', description: 'Only rows created at or after this instant.' },
           },
         },
         response: {
@@ -833,17 +839,16 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
       // `page.limit` describes the window that was served.
       const limit = q.limit ?? 100;
       const offset = q.offset ?? 0;
+      const filter = {
+        applicationId: id,
+        status: q.status,
+        customTemplateKey: q.customTemplateKey,
+        toAddress: q.toAddress,
+        since: q.since,
+      };
       const [rows, total] = await Promise.all([
-        emailService.listAppLogs({
-          applicationId: id,
-          limit,
-          offset,
-          ...(q.status !== undefined && { status: q.status }),
-        }),
-        emailService.countAppLogs({
-          applicationId: id,
-          ...(q.status !== undefined && { status: q.status }),
-        }),
+        emailService.listAppLogs({ ...filter, limit, offset }),
+        emailService.countAppLogs(filter),
       ]);
       return {
         success: true,

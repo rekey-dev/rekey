@@ -5,6 +5,8 @@
  *     The end-user's own devices. Publishable key + user JWT, like the rest
  *     of `/users/me`: a desktop app listing "your signed-in machines" and
  *     releasing one is the whole use case, and the JWT is the authorizer.
+ *     An Application with `authConfig.deviceRelease = 'server_only'` refuses
+ *     the release from a publishable key; listing stays open.
  *
  *   devicesServerRoutes    /api/v1/devices
  *     Secret-key-only. For the customer's OWN backend, which holds a secret
@@ -21,7 +23,7 @@
  * another application or another user is indistinguishable from a typo.
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
@@ -37,6 +39,8 @@ import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { devicesService, forEndUser } from './devices.service.js';
 import { assertEndUserInApplication } from '../../lib/end-users.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import { RekeyError } from '../../lib/error.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 
 const DeviceIdParam = z.object({ id: z.string().min(1) });
 const StatusQuery = z.object({
@@ -49,6 +53,27 @@ const STATUS_QUERY_SCHEMA = {
 // ---------------------------------------------------------------------------
 // End-user surface
 // ---------------------------------------------------------------------------
+
+/**
+ * Refuses a browser-side release when the Application keeps releases on the
+ * server. A secret key is let through: its holder can already release any
+ * device through `/api/v1/devices`, so refusing it here would protect nothing.
+ * Any other credential is refused, so a future key type cannot reopen it.
+ * Runs before the device lookup, so it is no existence oracle.
+ */
+function assertSelfReleaseAllowed(req: FastifyRequest): void {
+  if (req.authKind === 'secret') return;
+  const { deviceRelease } = AuthConfigSchema.parse(req.application!.authConfig);
+  if (deviceRelease === 'self_service') return;
+  throw new RekeyError({
+    statusCode: 403,
+    code: 'DEVICE_SELF_RELEASE_DISABLED',
+    message: 'This Application does not let end-users release their own devices.',
+    fix:
+      "Ask the application's support to release the device, or release it from your backend " +
+      'with a secret key (POST /api/v1/devices/:id/release).',
+  });
+}
 
 const USER_ERRORS = {
   401:
@@ -123,6 +148,10 @@ export async function devicesUserRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...USER_ERRORS,
+            403:
+              USER_ERRORS[403] +
+              ' Or DEVICE_SELF_RELEASE_DISABLED: the Application sets `authConfig.deviceRelease` ' +
+              'to `server_only` and the call came with a publishable key.',
             404: 'DEVICE_NOT_FOUND: no device with that id belongs to this end-user.',
             409: 'DEVICE_BLOCKED: the device is blocked; only an operator can unblock it.',
           }),
@@ -130,6 +159,7 @@ export async function devicesUserRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
+      assertSelfReleaseAllowed(req);
       const { id } = DeviceIdParam.parse(req.params);
       const result = await devicesService.release({
         applicationId: req.application!.id,

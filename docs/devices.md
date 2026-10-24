@@ -185,8 +185,9 @@ sign-in re-registers a released device.
 
 | Code | Status | When | `details` |
 |---|---|---|---|
-| `DEVICE_LIMIT_REACHED` | 403 | A new (or released) device would exceed `max_devices`. | `{ limit, devices: [{ id, label, firstSeenAt, lastSeenAt }] }` — the active devices to release. |
+| `DEVICE_LIMIT_REACHED` | 403 | A new (or released) device would exceed `max_devices`. | `{ selfRelease, limit, devices: [{ id, label, firstSeenAt, lastSeenAt }] }` — the active devices to release, and whether the user may release one themselves. |
 | `DEVICE_BLOCKED` | 403 | An operator blocked this fingerprint. | — |
+| `DEVICE_SELF_RELEASE_DISABLED` | 403 | `deviceRelease` is `server_only` and the end-user tried to release a device with a publishable key. | — |
 | `DEVICE_FINGERPRINT_REQUIRED` | 400 | `deviceBinding` is `required` and the body had no `device`. | — |
 | `SESSION_DEVICE_RELEASED` | 401 | A refresh or organization switch on a session whose device was released since. | — |
 | `REFRESH_TOKEN_DEVICE_MISMATCH` | 401 | A bound chain was refreshed from a different fingerprint. All sessions revoked. | — |
@@ -213,6 +214,35 @@ locally verified token stays valid until it expires. It is idempotent. A blocked
 not its owner's to release. `data.releasedBy` on the webhook and the
 security-events trail say who asked: `end_user`, `operator`, or `server`
 for the secret-key route.
+
+### Keeping release with your support team
+
+`authConfig.deviceRelease` is `self_service` by default. Set it to
+`server_only` (panel: Methods, Verification & sessions, Device release) and
+`DELETE /api/v1/users/me/devices/:id` from a publishable key answers `403
+DEVICE_SELF_RELEASE_DISABLED`, whatever the device id, so the refusal says
+nothing about which devices exist. A user at the limit then asks your support
+team, who release the device under End-users, or your backend releases it
+with a secret key. Both of those, and the same `/users/me` call made with a
+secret key, keep working. The end-user can still list their devices, so they
+can tell support which one to free. `DEVICE_LIMIT_REACHED` carries
+`details.selfRelease: false` and a `fix` without the self-service route, so a
+client knows to show "contact support" instead of a release button. A
+signed-in devices screen learns the policy only from that 403, so render the
+release button from your own configuration, or catch
+`DEVICE_SELF_RELEASE_DISABLED` and swap in the support copy. Releasing from
+your backend on a visitor's request undoes the setting; keep that route to
+your support tooling.
+
+It only holds with `deviceBinding: required`. With binding optional, a user
+at the limit can sign in without a fingerprint and holds no slot at all. Like
+`max_devices` itself, it is a policy for your own clients, not a lock: the
+fingerprint is computed by the client, so someone who can run a modified one
+can present a fingerprint already registered to them and share that slot. Two
+things free a device regardless of this setting: proving the mailbox of an
+unverified account releases every device on it, so a squatter cannot keep a
+slot, and `POST /licenses/deactivate` frees a licence seat for anyone holding
+the licence key.
 
 **Block** and **unblock** are operator decisions and exist on the operator
 surface only. The `reason` never reaches the end-user, who sees

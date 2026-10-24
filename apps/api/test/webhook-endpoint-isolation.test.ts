@@ -166,8 +166,13 @@ describe('webhook endpoint isolation (delivery path)', () => {
 
   it('a hung endpoint is capped and another tenant is delivered promptly from the same poll', async () => {
     // Deferred attempts would otherwise be retried by the test timer; the poll
-    // is what is under test here.
-    setDeliveryScheduler(() => undefined);
+    // is what is under test here. Recording the put-off ones (the only calls
+    // with a wait key; a failed send schedules without one) tells the test
+    // when the poll has put off every hung row it is going to.
+    const putOff = new Set<string>();
+    setDeliveryScheduler((id, _delayMs, _attempts, waitKey) => {
+      if (waitKey !== undefined) putOff.add(id);
+    });
     const hung = await receiver();
     const healthy = await receiver();
     healthy.setHandler(ok);
@@ -178,10 +183,10 @@ describe('webhook endpoint isolation (delivery path)', () => {
       const { endpoint: epB } = await webhookService.createEndpoint({ createdByTenantUserId: null, applicationId: appB, url: healthy.url, events: ['*'] });
       // The hung endpoint's rows are OLDER, so they come first in the poll's
       // order, the worst case for the healthy tenant.
-      await dueRows(appA, epA.id, 20, 120_000);
+      const hungIds = await dueRows(appA, epA.id, 20, 120_000);
       // No more than the healthy endpoint's own cap. One row over it can reach
       // the gate while the others are still being sent, be put off by that
-      // cap, and never be retried here because the scheduler is a no-op.
+      // cap, and never be retried here because the scheduler only records it.
       const healthyRows = ENDPOINT_MAX_IN_FLIGHT;
       const healthyIds = await dueRows(appB, epB.id, healthyRows, 60_000);
 
@@ -195,6 +200,13 @@ describe('webhook endpoint isolation (delivery path)', () => {
       expect(healthy.hits).toBe(healthyRows);
       expect(healthyDoneMs).toBeLessThan(2_000);
       expect(hung.open).toBe(ENDPOINT_MAX_IN_FLIGHT);
+
+      // Closing the hung receiver frees its slots, so a lane that has not yet
+      // reached its hung row would then send it. Wait until every row past the
+      // cap has been put off.
+      const hungPutOff = (): number => hungIds.filter((id) => putOff.has(id)).length;
+      await waitFor(() => hungPutOff() === 20 - ENDPOINT_MAX_IN_FLIGHT, 4_000);
+      expect(hungPutOff()).toBe(20 - ENDPOINT_MAX_IN_FLIGHT);
 
       await hung.close();
       await poll;

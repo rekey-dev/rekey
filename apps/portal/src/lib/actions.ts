@@ -8,6 +8,7 @@
 
 import { redirect } from 'next/navigation';
 import { RekeyError } from '@rekey.dev/react';
+import { CANCEL_REASONS } from '@rekey.dev/shared-types';
 import {
   portalClientFor,
   setSession,
@@ -172,14 +173,17 @@ export async function cancelSubscriptionAction(
   slug: string,
   organizationId: string | null,
   subscriptionId: string,
+  formData: FormData,
 ): Promise<void> {
   const client = await portalClientFor(slug);
   const access = await getAccessToken();
   if (!client || !access) redirect(`/${slug}/login?reason=expired`);
+  const reason = CANCEL_REASONS.find((r) => r === formData.get('reason'));
   try {
     await client.cancelSubscription(access, {
       atPeriodEnd: true,
       subscriptionId,
+      ...(reason && { reason }),
       ...(organizationId && { organizationId }),
     });
   } catch (err) {

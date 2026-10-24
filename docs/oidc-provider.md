@@ -31,6 +31,97 @@ decision before you point a relying party at this:
   not from anything the end-user can set. See
   [Where `profile` claims come from](#where-profile-claims-come-from).
 
+## Set it up
+
+1. Turn on `oidcEnabled` and `requireEmailVerification`, in the panel or with
+   the `PATCH …/auth-config` call above.
+2. Check discovery. It should answer `200` with `openid`, `profile` and `email`
+   in `scopes_supported`. A `404 OIDC_NOT_FOUND` means the switch is off or the
+   slug is wrong.
+
+   ```bash
+   curl "$REKEY_URL/api/v1/mcp/$SLUG/.well-known/openid-configuration"
+   ```
+
+3. Register the relying party. Each redirect URI must be `https:`, `http:`
+   on `localhost` / `127.0.0.1`, or a custom app scheme such as
+   `myapp://callback`, and the one sent at sign-in must match a
+   registered one exactly. The answer (`201`) carries a `client_id` and no
+   secret.
+
+   ```bash
+   curl -X POST "$REKEY_URL/api/v1/mcp/$SLUG/oauth/register" \
+     -H "Content-Type: application/json" \
+     -d '{ "client_name": "Acme Dashboard",
+           "redirect_uris": ["https://dashboard.acme.example/auth/callback"] }'
+   ```
+
+4. Once every relying party has a `client_id`, set
+   `dynamicClientRegistration` to `false`. See
+   [Client registration](#client-registration).
+5. Optional: give users `profile` claims by writing `metadata.oidc` with a
+   secret key or the operator API. See
+   [Where `profile` claims come from](#where-profile-claims-come-from).
+
+## Sign in from a relying party
+
+Any OpenID Connect client library works. Give it the issuer, not the discovery
+URL: it appends `/.well-known/openid-configuration` itself. This fragment uses
+[`openid-client`](https://github.com/panva/openid-client) v6 with Express, as
+a public client with PKCE.
+
+```js
+import express from 'express';
+import * as oidc from 'openid-client';
+
+const ISSUER = 'https://api.rekey.dev/api/v1/mcp/acme';
+const CLIENT_ID = process.env.CLIENT_ID;
+const REDIRECT_URI = 'http://localhost:3000/auth/callback';
+
+const config = await oidc.discovery(new URL(ISSUER), CLIENT_ID, undefined, oidc.None());
+const pending = new Map(); // state -> { verifier, nonce }; use your session store
+
+const app = express();
+
+app.get('/login', async (req, res) => {
+  const verifier = oidc.randomPKCECodeVerifier();
+  const state = oidc.randomState();
+  const nonce = oidc.randomNonce();
+  pending.set(state, { verifier, nonce });
+  const url = oidc.buildAuthorizationUrl(config, {
+    redirect_uri: REDIRECT_URI,
+    scope: 'openid email profile',
+    code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
+    code_challenge_method: 'S256',
+    state,
+    nonce,
+  });
+  res.redirect(url.href);
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const state = String(req.query.state ?? '');
+  const checks = pending.get(state);
+  pending.delete(state);
+  if (!checks) return res.status(400).send('Unknown sign-in attempt');
+  const tokens = await oidc.authorizationCodeGrant(config, new URL(req.originalUrl, REDIRECT_URI), {
+    pkceCodeVerifier: checks.verifier,
+    expectedState: state,
+    expectedNonce: checks.nonce,
+    idTokenExpected: true,
+  });
+  const claims = tokens.claims(); // sub, plus email / name when granted
+  res.json(claims);
+});
+
+app.listen(3000);
+```
+
+The authorization code lives for 60 seconds and works once. `sub` is the
+end-user id and is the value to key local accounts on. To check the ID Token
+signature yourself, verify it against `jwks_uri` with `RS256`, `iss` equal to
+the issuer and `aud` equal to your `client_id` (see [The ID Token](#the-id-token)).
+
 ## What it is built on
 
 There is no separate OIDC server. The per-Application OAuth 2.1 authorization

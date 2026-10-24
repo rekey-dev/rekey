@@ -7,8 +7,9 @@ guarantees. Pick the right one:
 |---|---|---|
 | **Plain delete** (back-compat) | `DELETE …/end-users/:euid` | Cascade-deletes the EndUser row **and every dependent row**, including financial records, via the schema's `onDelete: Cascade` FKs. Use only when you genuinely want everything gone (e.g. test data). Support cases have no foreign key to the row and are kept: an open one is closed with cause `erased`, the operator's `reason` is set to null on all of them, and their notes are deleted. |
 | **Erasure** (GDPR Art. 17) | `DELETE …/end-users/:euid?erasure=true` | **Tombstones** the user: hard-deletes PII/auth material, **retains anonymized** financial records. The GDPR-correct default for a data-subject erasure request. |
+| **Self-service erasure** | `DELETE /api/v1/users/me` (user token) | The same erasure, asked for by the end user. See [Account deletion](#account-deletion). |
 
-Both require the **workspace OWNER** role. No per-application grant unlocks
+The two operator routes require the **workspace OWNER** role. No per-application grant unlocks
 either, and neither does ADMIN.
 
 That is a change. Erasure used to be OWNER/ADMIN, and the plain delete used to
@@ -55,7 +56,7 @@ For an erasure of end-user `E` in application `A`:
 | `PasswordResetToken` | **delete** | Any outstanding reset tokens removed. |
 | `EmailVerificationToken` | **delete** | Any outstanding verification tokens removed. |
 | `OAuthAuthCode` | **delete** | Any unredeemed per-Application OAuth/OIDC authorization codes removed. 60-second TTL, so usually none — but a code minted moments earlier is a live credential. |
-| `Subscription` | **retain + scrub** | Rows kept (FK to tombstone). `metadata` JSON cleared (`{}`). Status/plan/amounts untouched. |
+| `Subscription` | **retain + scrub** | Rows kept (FK to tombstone). `metadata` JSON cleared (`{}`) and `cancelFeedback` nulled; `cancelReason` kept. Status/plan/amounts untouched. Stored webhook deliveries lose `cancellation.feedback`. |
 | `Payment` | **retain + scrub** | Rows kept. `metadata` cleared, `description` → null. Amount/currency/status/provider ref untouched. |
 | `License` | **retain + scrub** | Rows kept. `metadata` cleared. Key hash/prefix/status untouched. |
 | `LicenseActivation` | **retain + scrub** | Rows kept for seat accounting. `machineFingerprint` tombstoned to `erased:<id>`, `label` and `deviceId` cleared, and the seat released. Scoped to the subject's own activations: every activation on a licence they hold, plus those on an org-pooled licence of an organization they belong to that name one of their devices. Another user's activation that happens to carry the same fingerprint is not touched; devices are unique per user, so a shared fingerprint is not evidence of a shared person. |
@@ -63,11 +64,13 @@ For an erasure of end-user `E` in application `A`:
 | `CreditLedger` | **retain + scrub** | Append-only journal kept. `metadata` cleared, `description` → null. Deltas/balances untouched. |
 | `CreditBalance` | **retain** | Numeric balance only — no free-form PII to scrub. Kept via FK. |
 | `UsageRecord` | **retain + scrub** | Kept (scalar `endUserId`, scoped by meter). `metadata` cleared. Quantities/timestamps untouched. |
+| `OrganizationInvitation` | **delete / retain + scrub** | Invitations in A's organizations sent to one of E's addresses, or accepted by E. A pending one is deleted, so nobody can accept it after the erasure. An accepted or revoked one is kept as the record of who joined, with `email` set to the tombstone address. Counted as `organizationInvitationsErased` in the `end_user.erased` metadata. |
 | `OrganizationMembership` | **retain** | Not PII about the subject; left intact (team rosters). The tombstone keeps the FK valid. |
 | `SecurityEvent` | **retain, bounded** | Security audit trail (including the erasure event itself) is retained for forensics indefinitely by default, or for `LOG_RETENTION_DAYS` when that is set, then pruned. Erasure does not scrub these rows, so their `ip` and `user_agent` go to the log archive when one is configured. See "The log archive" below. |
-| `EmailLog` | **retain + scrub** | Rows kept: send counts and outcomes are operational data. On every row of A sent to one of E's addresses, `to_address` becomes the tombstone address, `subject` becomes `[erased]` (templates interpolate variables into it, so it can hold a name), and any copy of the address inside `error` is replaced with the tombstone. `event_key`, `via`, `status`, `message_id` and timestamps untouched. |
+| `EmailLog` | **retain + scrub** (scheduled sends: **delete**) | Rows kept: send counts and outcomes are operational data. On every row of A sent to one of E's addresses, `to_address` becomes the tombstone address, `subject` becomes `[erased]` (templates interpolate variables into it, so it can hold a name), and any copy of the address inside `error` is replaced with the tombstone. `event_key`, `via`, `status`, `message_id` and timestamps untouched. |
 | `EmailSuppression` | **delete** | Suppression rows for E's addresses in A are deleted. See "Suppressions" below for why they are not kept as a hash. |
-| `WebhookDelivery` | **retain + scrub** | Rows, status, attempts and response kept. Deliveries are matched by E's **id** at the places Rekey's own events put it (`data.user.id`, `data.userId`, `data.endUserId`, and `endUserId` under `data.device`, `data.subscription`, `data.payment`, `data.dunningCase`, `data.license`, `data.credit`), never by searching payloads for text. In a matched payload: `email` becomes the tombstone address, a device `fingerprint` becomes `erased`, `metadata` / `label` / `description` / `country` become null, and any other copy of the address is replaced. `updated_at` is not bumped, so the retention clock is unchanged. |
+| `EmailTopicOptOut` | **delete** | Topic opt-outs for E's addresses in A are deleted, for the same reason as suppressions. |
+| `WebhookDelivery` | **retain + scrub** | Rows, status, attempts and response kept. Deliveries are matched by E's **id** at the places Rekey's own events put it (`data.user.id`, `data.userId`, `data.endUserId`, and `endUserId` under `data.device`, `data.subscription`, `data.payment`, `data.dunningCase`, `data.license`, `data.credit`). In a matched payload: `email` becomes the tombstone address, a device `fingerprint` becomes `erased`, `metadata` / `label` / `description` / `country` become null, and any other copy of the address is replaced. Events that name E only by address, such as `organization.invitation.*` (`data.invitation.email`), are matched by E's address within A, and there only whole occurrences of the address are replaced, so another user's payload containing the string keeps its fields. `updated_at` is not bumped, so the retention clock is unchanged. |
 | `WebhookEvent` | **retain + scrub** | Inbound billing receipts (the provider's own event body). They carry no Rekey end-user id, so they are matched by E's address within A, and only occurrences of that address are replaced with the tombstone; other fields the provider sent (a billing name or postal address) are not interpreted. Set `WEBHOOK_EVENT_RETENTION_DAYS` to bound how long those survive. Nothing replays a stored receipt, so the rewrite changes no billing state. |
 | `ImpersonationAudit` | **retain** | Operator-accountability trail — retained. |
 | `SupportCase` | **retain + scrub** | Operator-accountability trail, retained with its capabilities, operators and dates. An open case is closed in the erasure transaction with cause `erased`, and `reason` is set to null on every case of E's, since it is free text an operator wrote about the person. |
@@ -195,3 +198,45 @@ End-user detail page → danger zone → **"Erase (GDPR)"**. A typed confirmatio
 (type the user's email) guards the action, with a note that financial records
 are retained anonymized. An **"erased"** badge + an "Already erased" disabled
 state appear once the user is tombstoned.
+
+## Account deletion
+
+`DELETE /api/v1/users/me` lets the signed-in end user erase their own account.
+It runs the same erasure as the operator route above, so everything in this
+document applies, and it cannot be undone. The caller sends an Application key
+in `Authorization` and the user's access token in `X-Rekey-User-Token`. On
+success it answers `200` with `{ erased: true, erasedAt }`. The tombstone's
+`erasedBy` is the end user's own id, and the `end_user.erased` security event
+records the end user as the actor.
+
+SDKs: `client.deleteAccount(accessToken, { password })` or
+`{ code }` in `@rekey.dev/react`, and `rekey.auth.deleteCurrentUser(accessToken)`
+in `@rekey.dev/node`.
+
+### Who may call it
+
+Each Application chooses with `authConfig.accountDeletion` (panel: Authentication,
+Methods, Account deletion):
+
+| Value | Publishable key (browser) | Secret key (server) |
+|---|---|---|
+| `self_service` (default) | Allowed, with `password`, or `code` when MFA is enrolled | Allowed, no proof needed |
+| `server_only` | `403 ACCOUNT_SELF_DELETION_DISABLED` | Allowed, no proof needed |
+| `off` | `403 ACCOUNT_SELF_DELETION_DISABLED` | `403 ACCOUNT_SELF_DELETION_DISABLED` |
+
+With `off`, an account is removed only by an operator erasure. The setting is
+checked before any password, so a disabled Application is no password oracle.
+
+### Errors
+
+| Code | Status | When |
+|---|---|---|
+| `ACCOUNT_SELF_DELETION_DISABLED` | 403 | The setting refuses this key, as in the table above. |
+| `STEP_UP_REQUIRED` | 401 | A publishable-key call sent no valid `password` or `code`. Password attempts count toward the sign-in lockout. |
+| `STEP_UP_UNAVAILABLE` | 400 | A publishable-key call for an account with no password and no MFA, so there is nothing to confirm with. Delete it with a secret key instead. |
+| `IMPERSONATION_ACTION_FORBIDDEN` | 403 | The token is an operator impersonation session. |
+| `ACCOUNT_HAS_ACTIVE_SUBSCRIPTION` | 409 | A subscription is `ACTIVE`, `TRIALING` or `PAST_DUE`, bills through a payment provider and is not set to cancel. Cancel it (`POST /api/v1/billing/subscription/cancel`, at period end is enough), then retry. Rekey does not cancel it for the user. |
+| `END_USER_ERASED` | 410 | The account is already erased. |
+
+A secret key needs the `auth:write` scope (`403 API_KEY_SCOPE_INSUFFICIENT`
+without it).

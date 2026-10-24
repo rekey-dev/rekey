@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ApplicationGrantRole, TenantRole } from '@prisma/client';
+import { resendInvitation } from './invitation-resend.js';
 import { tenantWorkspacesService, workspaceCreationMode } from './tenant-workspaces.service.js';
 import { tenantsService } from '../tenants/tenants.service.js';
 import {
@@ -136,13 +137,42 @@ const WorkspaceLogQuery = z.object({
   // (application off, event off, or the address on the suppression list). It
   // has to be filterable: the Settings and Templates copy sends an operator
   // here to find out WHY a mail did not go, and without it the query 400s.
-  status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown']).optional(),
+  status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled']).optional(),
 });
 
+const InviteAppGrants = z
+  .array(
+    z.object({
+      applicationId: z.string().min(1),
+      role: z.enum(['APP_ADMIN', 'APP_BILLING', 'APP_VIEWER']),
+    }),
+  )
+  .max(100)
+  .refine((gs) => new Set(gs.map((g) => g.applicationId)).size === gs.length, {
+    message: 'Each application may appear once in appGrants.',
+  });
 const InviteBody = z.object({
   email: z.string().email().max(254),
   role: z.enum(['OWNER', 'ADMIN', 'MEMBER']),
+  appGrants: InviteAppGrants.optional(),
 });
+const ResendBody = z.object({ appGrants: InviteAppGrants.optional() }).optional();
+// The JSON schema twin of InviteAppGrants for the OpenAPI document.
+const appGrantsJsonSchema = {
+  type: 'array',
+  maxItems: 100,
+  description:
+    'MEMBER invitations only: the apps they get on joining, applied with the membership. ' +
+    'Refused with APP_GRANT_MEMBER_ONLY on an OWNER or ADMIN invitation.',
+  items: {
+    type: 'object',
+    required: ['applicationId', 'role'],
+    properties: {
+      applicationId: { type: 'string' },
+      role: { type: 'string', enum: ['APP_ADMIN', 'APP_BILLING', 'APP_VIEWER'] },
+    },
+  },
+} as const;
 // Name and the MCP switch on one route: both are "what this workspace is",
 // and both are OWNER/ADMIN. Either may be omitted; at least one must be present.
 const WorkspacePatchBody = z
@@ -854,6 +884,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           properties: {
             email: { type: 'string', format: 'email' },
             role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+            appGrants: appGrantsJsonSchema,
           },
         },
         response: {
@@ -878,6 +909,8 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
             403:
               `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT: an ADMIN caller ` +
               'tried to invite an ADMIN or OWNER (ADMIN may only invite MEMBER).',
+            400: 'APP_GRANT_MEMBER_ONLY: appGrants were sent on an OWNER or ADMIN invitation.',
+            404: 'APPLICATION_NOT_FOUND: an appGrants entry names an application outside this workspace.',
             409: 'INVITE_TARGET_ALREADY_MEMBER: that email is already a member of this workspace.',
           }),
         },
@@ -891,6 +924,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         invitedByRole: req.tenantRole!,
         email: body.email,
         role: body.role as TenantRole,
+        ...(body.appGrants !== undefined && { appGrants: body.appGrants }),
       });
       return reply.status(201).send({
         success: true,
@@ -906,6 +940,74 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
               '<panelUrl>/accept-invite?token=' + result.rawToken,
         },
       });
+    },
+  );
+
+  app.post(
+    '/invitations/:id/resend',
+    {
+      config: { access: { floor: true } },
+      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
+      schema: {
+        tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
+        summary: 'Send a pending or expired invitation again, with a fresh link',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role. Issues a new link and a new 7-day expiry for ' +
+          'the same email and role, and emails it where this deployment can send mail. The previous link ' +
+          'stops working. Sending `appGrants` replaces the apps a MEMBER gets on joining; leaving it out ' +
+          'keeps them.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        body: { type: 'object', nullable: true, properties: { appGrants: appGrantsJsonSchema } },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                token: { type: 'string', description: 'Raw invitation token for the new link.' },
+                emailSent: { type: 'boolean' },
+                expiresAt: { type: 'string', format: 'date-time' },
+                appGrants: appGrantsJsonSchema,
+              },
+              required: ['token', 'emailSent', 'expiresAt', 'appGrants'],
+            },
+            'The new link token, and whether it was emailed.',
+          ),
+          ...errs({
+            ...TENANT_SESSION_ERRORS,
+            403:
+              `${TENANT_SESSION_ERRORS[403]} Or TENANT_ROLE_INSUFFICIENT: an ADMIN caller ` +
+              "tried to resend an ADMIN's or OWNER's invitation.",
+            404:
+              'INVITATION_NOT_FOUND: no invitation with that id in this workspace; or APPLICATION_NOT_FOUND: ' +
+              'an appGrants entry names an application outside this workspace.',
+            400:
+              'INVITATION_NOT_USABLE: already accepted or revoked; or APP_GRANT_MEMBER_ONLY: appGrants ' +
+              'were sent on an OWNER or ADMIN invitation.',
+            409: 'INVITE_TARGET_ALREADY_MEMBER: that email has joined the workspace another way.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = InvIdParam.parse(req.params);
+      const appGrants = ResendBody.parse(req.body)?.appGrants;
+      const result = await resendInvitation({
+        tenantId: req.tenantId!,
+        invitationId: id,
+        actorId: req.tenantUser!.id,
+        actorRole: req.tenantRole!,
+        ...(appGrants !== undefined && { appGrants }),
+      });
+      return {
+        success: true,
+        data: {
+          token: result.rawToken,
+          emailSent: result.emailSent,
+          expiresAt: result.expiresAt.toISOString(),
+          appGrants: result.appGrants,
+        },
+      };
     },
   );
 
@@ -973,7 +1075,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 200 },
             offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
-            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown'] },
+            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled'] },
           },
         },
         response: {

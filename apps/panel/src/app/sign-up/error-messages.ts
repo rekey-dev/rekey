@@ -7,6 +7,8 @@ import { API_URL_MISSING_MESSAGES, normalizeErrorCode } from '@/lib/error-code';
 export const SIGN_UP_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   ...API_URL_MISSING_MESSAGES,
   missing: 'All fields are required.',
+  WORKSPACE_NAME_REQUIRED:
+    'This invite link is no longer valid, probably because a newer one was sent. Open the newest invitation email, or ask whoever invited you to send it again.',
   EMAIL_ALREADY_EXISTS: 'That email is already registered. Sign in instead.',
   PASSWORD_TOO_SHORT: 'Password must be at least 8 characters.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',

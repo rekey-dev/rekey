@@ -246,7 +246,8 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Gated by OPERATOR_SIGNUP_MODE: open (anyone), invite (requires a single-use `inviteKey`), ' +
           'or closed (rejected). Mode is advertised at GET /signup-mode. An `inviteKey` bound to an ' +
-          'existing workspace (minted with `tenantId`, e.g. by `rekey init --owner-email`) is honoured in ' +
+          'existing workspace (minted with `tenantId`, e.g. by `rekey init --owner-email`), or the token from a ' +
+          'teammate\'s workspace invitation link, is honoured in ' +
           'open and invite mode: the new operator joins that workspace at the key\'s role instead of ' +
           'creating one, `workspaceName` is ignored, and `email` must be the address the key was minted for.',
         body: {

@@ -25,6 +25,7 @@
  */
 
 import type {
+  CancelReason,
   CurrentUserDto,
   EndUserDto,
   EndUserLicenseDto,
@@ -615,11 +616,18 @@ export class RekeyBrowserClient {
    * Cancel the current subscription (default: at period end). Pass
    * `opts.organizationId` to cancel an org's subscription (caller must be
    * OWNER/ADMIN of that org), and `opts.subscriptionId` to cancel one of
-   * several live subscriptions ({@link listSubscriptions}).
+   * several live subscriptions ({@link listSubscriptions}). `reason` and
+   * `feedback` are kept with the cancellation and carried on its webhooks.
    */
   cancelSubscription(
     accessToken: string,
-    opts?: { atPeriodEnd?: boolean; organizationId?: string; subscriptionId?: string },
+    opts?: {
+      atPeriodEnd?: boolean;
+      organizationId?: string;
+      subscriptionId?: string;
+      reason?: CancelReason;
+      feedback?: string;
+    },
   ): Promise<SelfSubscriptionDto> {
     return this.selfService<SelfSubscriptionDto>(
       'POST',
@@ -628,6 +636,8 @@ export class RekeyBrowserClient {
         ...(opts?.atPeriodEnd !== undefined && { atPeriodEnd: opts.atPeriodEnd }),
         ...(opts?.organizationId && { organizationId: opts.organizationId }),
         ...(opts?.subscriptionId && { subscriptionId: opts.subscriptionId }),
+        ...(opts?.reason && { reason: opts.reason }),
+        ...(opts?.feedback && { feedback: opts.feedback }),
       },
       accessToken,
     );
@@ -762,7 +772,12 @@ export class RekeyBrowserClient {
    * Revokes every session minted on that device, INCLUDING the current one when
    * it is the same device, so treat releasing the token's own `dev` as a sign
    * out. Idempotent for an already-released device; a BLOCKED device refuses
-   * with `DEVICE_BLOCKED`, which only an operator can lift.
+   * with `DEVICE_BLOCKED`, which only an operator can lift. An Application that
+   * sets `deviceRelease: 'server_only'` refuses this call with
+   * `DEVICE_SELF_RELEASE_DISABLED` (and its `DEVICE_LIMIT_REACHED` carries
+   * `details.selfRelease: false`): point the user at support instead. There is
+   * no read of the policy ahead of time; your own app set it, so render the
+   * release button from that, or catch the code and swap in support copy.
    */
   releaseMyDevice(
     accessToken: string,
@@ -801,6 +816,21 @@ export class RekeyBrowserClient {
    */
   skipOnboarding(accessToken: string): Promise<ProfileStateDto> {
     return this.selfService<ProfileStateDto>('POST', '/api/v1/users/me/onboarding/skip', undefined, accessToken);
+  }
+
+  /**
+   * Erase the signed-in user's own account. It cannot be undone. From the
+   * browser the user confirms with their `password`, or `code` when MFA is on.
+   * Throws STEP_UP_REQUIRED (401) without a valid one,
+   * ACCOUNT_HAS_ACTIVE_SUBSCRIPTION (409) while a subscription still bills, and
+   * ACCOUNT_SELF_DELETION_DISABLED (403) when the Application keeps deletion on
+   * its server (`authConfig.accountDeletion` `server_only` or `off`).
+   *
+   * @example
+   *   await client.deleteAccount(accessToken, { password });
+   */
+  deleteAccount(accessToken: string, proof: { password?: string; code?: string }): Promise<{ erased: true; erasedAt: string }> {
+    return this.selfService<{ erased: true; erasedAt: string }>('DELETE', '/api/v1/users/me/', proof, accessToken);
   }
 
   // ---------- internals ----------

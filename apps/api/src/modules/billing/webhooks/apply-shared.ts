@@ -99,7 +99,8 @@ export function transitionAllowed(from: Subscription['status'], to: Subscription
  * and clearing unconditionally would let a re-delivery silently un-cancel a
  * cancellation the buyer had scheduled, the same defect pointed the other way.
  */
-export const clearedOnReactivation = { cancelAt: null, canceledAt: null } as const;
+// The reason for a cancellation that did not happen would read as current.
+export const clearedOnReactivation = { cancelAt: null, canceledAt: null, cancelReason: null, cancelFeedback: null } as const;
 
 export function safeAmount(
   raw: number | null | undefined,

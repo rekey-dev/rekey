@@ -335,6 +335,12 @@ export default async function EndUserSubscriptionsPage({
                       : s.currentPeriodEnd
                         ? formatDate(s.currentPeriodEnd)
                         : '—'}
+                    {s.cancelReason !== null && (
+                      <div className="text-[11px]" title={s.cancelFeedback ?? undefined}>
+                        Reason: {s.cancelReason.replaceAll('_', ' ')}
+                        {s.cancelFeedback !== null && <span className="block italic">“{s.cancelFeedback}”</span>}
+                      </div>
+                    )}
                   </TD>
                   <TD muted className="text-xs">
                     {formatDate(s.createdAt)}

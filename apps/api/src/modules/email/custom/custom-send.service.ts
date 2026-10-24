@@ -4,8 +4,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Application, CustomEmailTemplateVersion, EmailLog } from '@prisma/client';
-import type { EmailSendResult } from '@rekey.dev/shared-types';
+import { Prisma, type Application, type CustomEmailTemplateVersion, type EmailLog } from '@prisma/client';
+import type { EmailDryRunResult, EmailSendResult } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
 import { sendEmail, type SendOutcome } from '../../../lib/email-transport.js';
@@ -14,7 +14,10 @@ import {
   deliveryFailed,
   idempotencyKeyReused,
   noFromAddress,
+  recipientBanned,
   recipientNotEndUser,
+  recipientNotFound,
+  recipientUnverified,
   sendInFlight,
   sendOutcomeUnknown,
   senderDomainMismatch,
@@ -32,10 +35,13 @@ import { unsubscribeUrl } from './unsubscribe-token.js';
 
 export interface SendRequest {
   template: string;
-  to: string;
+  /** An address, or an end user whose verified address Rekey looks up. */
+  to: string | { endUserId: string };
   variables: Record<string, unknown>;
   version?: number | undefined;
   idempotencyKey?: string | undefined;
+  /** Send at this instant instead of now. */
+  sendAt?: Date | undefined;
 }
 
 /**
@@ -56,9 +62,11 @@ function fingerprintOf(req: SendRequest): string {
     .update(
       JSON.stringify({
         template: req.template,
-        to: req.to.toLowerCase(),
+        // By id, the id is what was asked for: a replay after the user changes address is the same send.
+        to: typeof req.to === 'string' ? req.to.toLowerCase() : { endUserId: req.to.endUserId },
         version: req.version ?? null,
         variables,
+        ...(req.sendAt !== undefined && { sendAt: req.sendAt.toISOString() }),
       }),
     )
     .digest('hex');
@@ -68,14 +76,15 @@ function isUniqueViolation(e: unknown): boolean {
   return (e as { code?: string }).code === 'P2002';
 }
 
-/** Headers for `notification` mail: RFC 8058 one-click unsubscribe. `critical` mail has none. */
+/** Headers for `notification` mail: RFC 8058 one-click unsubscribe from its topic. `critical` mail has none. */
 export function unsubscribeHeaders(
   category: string,
   applicationId: string,
   to: string,
+  topic: string,
 ): Record<string, string> | undefined {
   if (category !== 'notification') return undefined;
-  const url = unsubscribeUrl(applicationId, to);
+  const url = unsubscribeUrl(applicationId, to, topic);
   if (url === null) return undefined;
   return {
     'List-Unsubscribe': `<${url}>`,
@@ -110,6 +119,22 @@ async function assertEndUser(applicationId: string, to: string): Promise<void> {
   if (!found) throw recipientNotEndUser();
 }
 
+/** The address to send to. By id: only a live, unbanned end user with a verified address. */
+async function recipientAddress(application: Application, to: SendRequest['to']): Promise<string> {
+  if (typeof to === 'string') {
+    if (application.emailRecipientsMustBeEndUsers) await assertEndUser(application.id, to);
+    return to;
+  }
+  const user = await prisma.endUser.findFirst({
+    where: { id: to.endUserId, applicationId: application.id },
+    select: { email: true, emailVerified: true, erasedAt: true, bannedAt: true },
+  });
+  if (!user || user.erasedAt !== null) throw recipientNotFound(to.endUserId);
+  if (user.bannedAt !== null) throw recipientBanned(to.endUserId);
+  if (!user.emailVerified) throw recipientUnverified(to.endUserId);
+  return user.email;
+}
+
 /**
  * Mark pending rows past the cutoff as `unknown`. Called by a replay that
  * finds one, and by the periodic sweep for rows nobody replays.
@@ -132,12 +157,14 @@ async function replay(row: EmailLog, fingerprint: string): Promise<EmailSendResu
   }
   if (row.status === 'unknown') throw sendOutcomeUnknown(row.id, true);
   if (row.status === 'error') throw deliveryFailed(row.error ?? 'unknown error', row.id, true);
+  const status = row.status === 'sent' || row.status === 'scheduled' || row.status === 'canceled' ? row.status : 'suppressed';
   return {
     id: row.id,
-    status: row.status === 'sent' ? 'sent' : 'suppressed',
+    status,
     template: row.customTemplateKey ?? '',
     version: row.customTemplateVersion ?? 0,
     ...(row.messageId !== null && { messageId: row.messageId }),
+    ...(row.sendAt !== null && { sendAt: row.sendAt.toISOString() }),
   };
 }
 
@@ -152,6 +179,7 @@ type Reservation = { kind: 'reserved'; row: EmailLog } | { kind: 'replayed'; res
 async function reserve(
   application: Application,
   req: SendRequest,
+  address: string,
   version: number,
   fingerprint: string,
 ): Promise<Reservation> {
@@ -165,18 +193,23 @@ async function reserve(
       if (existing) return { kind: 'replayed', result: await replay(existing, fingerprint) };
     }
     try {
+      const scheduled = req.sendAt !== undefined;
       const row = await prisma.emailLog.create({
         data: {
           tenantId: application.tenantId,
           applicationId: application.id,
-          toAddress: req.to.toLowerCase(),
-          subject: `[pending] ${req.template}`,
+          toAddress: address.toLowerCase(),
+          subject: `[${scheduled ? 'scheduled' : 'pending'}] ${req.template}`,
           via: 'none',
-          status: 'pending',
+          status: scheduled ? 'scheduled' : 'pending',
           idempotencyKey: req.idempotencyKey ?? null,
           idempotencyFingerprint: keyed ? fingerprint : null,
           customTemplateKey: req.template,
           customTemplateVersion: version,
+          ...(scheduled && {
+            sendAt: req.sendAt!,
+            scheduledRequest: { to: req.to, variables: req.variables } as Prisma.InputJsonObject,
+          }),
         },
       });
       return { kind: 'reserved', row };
@@ -202,7 +235,15 @@ async function reserve(
  * });
  * ```
  */
-export async function sendCustomEmail(application: Application, req: SendRequest): Promise<EmailSendResult> {
+export interface PreparedSend {
+  version: CustomEmailTemplateVersion;
+  values: Record<string, string>;
+  address: string;
+  topic: string;
+}
+
+/** Every refusal a send can answer before it touches the log, in the order a send meets them. */
+export async function prepareSend(application: Application, req: SendRequest): Promise<PreparedSend> {
   const transport = customTransport(application);
   if (!transport.eligible) throw transportNotCustom(transport.via);
 
@@ -217,52 +258,107 @@ export async function sendCustomEmail(application: Application, req: SendRequest
   const { values, issues } = validateVariables(schema, version.linkDomains, req.variables);
   if (issues.length > 0) throw variablesInvalid(req.template, version.version, issues);
 
-  if (application.emailRecipientsMustBeEndUsers) await assertEndUser(application.id, req.to);
+  const address = await recipientAddress(application, req.to);
+  return { version, values, address, topic: version.topic ?? req.template };
+}
 
-  const keyed = req.idempotencyKey !== undefined;
-  const reservation = await reserve(application, req, version.version, fingerprintOf(req));
+/**
+ * Everything a send checks, then the render, without sending: no log row, no
+ * cap counted and no idempotency key used. `suppressed` means a real send
+ * would be logged as suppressed.
+ *
+ * @example
+ * ```ts
+ * const preview = await dryRunCustomEmail(application, { template: 'welcome', to: { endUserId }, variables });
+ * ```
+ */
+export async function dryRunCustomEmail(application: Application, req: SendRequest): Promise<EmailDryRunResult> {
+  const { version, values, address, topic } = await prepareSend(application, req);
+  const blocked = await sendableTo(application, address, version.category as SendKind, { topic });
+  const rendered = renderCustom(version, values);
+  return {
+    dryRun: true,
+    status: blocked === null ? 'would_send' : 'suppressed',
+    template: req.template,
+    version: version.version,
+    subject: rendered.subject,
+    html: rendered.html,
+    text: rendered.text,
+  };
+}
+
+export async function sendCustomEmail(application: Application, req: SendRequest): Promise<EmailSendResult> {
+  const prepared = await prepareSend(application, req);
+  const reservation = await reserve(application, req, prepared.address, prepared.version.version, fingerprintOf(req));
   if (reservation.kind === 'replayed') return reservation.result;
   const reserved = reservation.row;
-  const base = { id: reserved.id, template: req.template, version: version.version };
+  if (reserved.status === 'scheduled') {
+    return {
+      id: reserved.id,
+      status: 'scheduled',
+      template: req.template,
+      version: prepared.version.version,
+      sendAt: reserved.sendAt!.toISOString(),
+    };
+  }
+  return deliverReserved(application, req.template, prepared, reserved.id, { keyed: req.idempotencyKey !== undefined });
+}
 
-  const blocked = await sendableTo(application, req.to, version.category as SendKind);
+/**
+ * The second half of a send, on a log row already reserved for it: the
+ * suppression list, the caps, then the transport. A scheduled send firing
+ * records a cap refusal or a provider failure on its row; a send made now
+ * answers them to its caller.
+ */
+export async function deliverReserved(
+  application: Application,
+  template: string,
+  { version, values, address, topic }: PreparedSend,
+  logId: string,
+  opts: { keyed: boolean; scheduled?: boolean },
+): Promise<EmailSendResult> {
+  const base = { id: logId, template, version: version.version };
+
+  const blocked = await sendableTo(application, address, version.category as SendKind, { topic });
   if (blocked !== null) {
     await prisma.emailLog.update({
-      where: { id: reserved.id },
-      data: { status: 'suppressed', subject: `[suppressed] ${req.template}`, error: blocked.text },
+      where: { id: logId },
+      data: { status: 'suppressed', subject: `[suppressed] ${template}`, error: blocked.text },
     });
     return { ...base, status: 'suppressed' };
   }
 
   try {
-    await consumeSendAllowance(application.tenantId, req.to);
+    await consumeSendAllowance(application.tenantId, address);
   } catch (e) {
+    // A scheduled send keeps its row: the poller decides whether to wait or give up.
+    if (opts.scheduled === true) throw e;
     // Nothing was sent, so the key must stay usable once the window resets.
-    await prisma.emailLog.deleteMany({ where: { id: reserved.id } });
+    await prisma.emailLog.deleteMany({ where: { id: logId } });
     throw e;
   }
 
   const rendered = renderCustom(version, values);
-  const headers = unsubscribeHeaders(version.category, application.id, req.to);
+  const headers = unsubscribeHeaders(version.category, application.id, address, topic);
   const outcome: SendOutcome = await sendEmail(
     application,
     {
-      to: req.to,
+      to: address,
       ...rendered,
       ...(headers !== undefined && { headers }),
       ...(version.fromName !== null && { fromName: version.fromName }),
     },
     {
-      logId: reserved.id,
+      logId,
       requireCustomTransport: true,
-      customTemplateKey: req.template,
+      customTemplateKey: template,
       customTemplateVersion: version.version,
     },
   );
   if (outcome.kind === 'sent') {
     return { ...base, status: 'sent', ...(outcome.messageId !== null && { messageId: outcome.messageId }) };
   }
-  throw deliveryFailed(outcome.kind === 'error' ? outcome.message : 'no transport.', reserved.id, keyed);
+  throw deliveryFailed(outcome.kind === 'error' ? outcome.message : 'no transport.', logId, opts.keyed);
 }
 
 /**
@@ -298,7 +394,7 @@ export async function testSendCustomTemplate(
 
   const schema = readVariableSchema(draft.variableSchema);
   const rendered = renderCustom(draft, sampleValues(schema, draft.linkDomains));
-  const headers = unsubscribeHeaders(draft.category, application.id, operatorEmail);
+  const headers = unsubscribeHeaders(draft.category, application.id, operatorEmail, draft.topic ?? draft.key);
   return sendEmail(
     application,
     {

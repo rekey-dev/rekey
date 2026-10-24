@@ -193,7 +193,7 @@ export default async function AuthedLayout({
   const active = me.memberships.find((m) => m.tenantId === me.activeTenantId);
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-neutral-50 dark:bg-neutral-950">
+    <div className="min-h-screen flex flex-col md:flex-row bg-[var(--color-bg)]">
       {/* Fires once when the operator enters the authed area (panel session). */}
       <TrackView event={AnalyticsEvent.PanelAccess} />
       {/* Keyboard users skip straight past the sidebar nav (WP6). */}

@@ -1,10 +1,12 @@
 import type { Prisma, TenantRole } from '@prisma/client';
 import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
 import type { ResolvedSignupInvite } from './operator-signup-policy.js';
+import { applyInvitationGrants } from '../tenant-workspaces/invitation-grants.js';
 
 /**
  * Give a just-created operator their first membership: the workspace a bound
- * invite names, at its role, or a new workspace they OWN. Runs inside the
+ * invite names, at its role (with the app grants a teammate invitation
+ * carries), or a new workspace they OWN. Runs inside the
  * operator-creation transaction, before the invite is consumed.
  *
  * @example
@@ -23,9 +25,12 @@ export async function joinOrCreateWorkspace(
 ): Promise<{ tenantId: string; role: TenantRole }> {
   const bound = input.invite?.workspace;
   if (bound) {
-    await tx.tenantMembership.create({
+    const membership = await tx.tenantMembership.create({
       data: { tenantUserId: input.userId, tenantId: bound.tenantId, role: bound.role },
     });
+    if (input.invite?.kind === 'workspace-invitation') {
+      await applyInvitationGrants(tx, input.invite.inviteId, membership.id);
+    }
     return { tenantId: bound.tenantId, role: bound.role };
   }
   // `resolveNewTenantLimits()` stamps the deployment's DEFAULT_TENANT_LIMITS

@@ -32,6 +32,13 @@ export async function saveAuth(applicationId: string, formData: FormData): Promi
   const deviceBinding = (deviceBindingRaw === 'required' ? 'required' : 'optional') as
     | 'optional'
     | 'required';
+  const deviceRelease = (
+    String(formData.get('deviceRelease') ?? '') === 'server_only' ? 'server_only' : 'self_service'
+  ) as 'self_service' | 'server_only';
+  const deletionRaw = String(formData.get('accountDeletion') ?? '');
+  const accountDeletion = (
+    deletionRaw === 'server_only' || deletionRaw === 'off' ? deletionRaw : 'self_service'
+  ) as 'self_service' | 'server_only' | 'off';
   // Only ever HS256 or RS256, anything else is a crafted form post, and the
   // API would reject it anyway. Falling back to HS256 keeps the default.
   const rawAlg = String(formData.get('tokenAlg') ?? '');
@@ -69,6 +76,8 @@ export async function saveAuth(applicationId: string, formData: FormData): Promi
         requireEmailVerification,
         welcomeEmail,
         deviceBinding,
+        deviceRelease,
+        accountDeletion,
         tokenAlg,
         redirectUrls,
         appUrl,

@@ -35,6 +35,7 @@ import {
   RETURN_TO_HEADER,
   SESSION_INTERRUPTED_REASON,
   isGatewayFailure,
+  mayRotateFrom,
   racedMark,
   refreshRouteFor,
   wasIssuedRecently,
@@ -637,13 +638,16 @@ export async function api<T>(args: RequestArgs): Promise<T> {
   let interrupted = false;
 
   if (res.status === 401) {
-    if (!(await canWriteCookies(jar))) {
-      // A Server Component render. Refreshing here would spend the single-use
-      // refresh token without any way to store its replacement, and the
-      // browser's next request would replay the spent one, which the API
-      // treats as theft and answers by revoking every session this operator
-      // has. So the render never refreshes: it sends the browser to a Route
-      // Handler that refreshes, writes the cookies and comes back here.
+    if (!(await canWriteCookies(jar)) || !mayRotateFrom(await headers())) {
+      // A Server Component render, or a request another site started (a
+      // cross-site navigation to a Route Handler). Refreshing here would spend
+      // the single-use refresh token where its replacement can be lost: a
+      // render cannot store it, and a cross-site navigation can be aborted
+      // after the rotation. The browser's next request would replay the spent
+      // one, which the API treats as theft and answers by revoking every
+      // session this operator has. So it never refreshes here: it sends the
+      // browser to the refresh route, which answers a cross-site request with
+      // a same-origin interstitial first.
       //
       // Not for a token minted moments ago: that is the refresh route's own
       // result being refused, and another lap would only rotate again. It
@@ -991,6 +995,14 @@ export interface ApplicationRow {
      * sent and lets the sign-in through when it is not.
      */
     deviceBinding?: 'optional' | 'required';
+    /**
+     * Who may release a device. `server_only` refuses the end-user's own
+     * release from the browser; operators and secret keys still can. Absent
+     * on apps saved before it existed: `self_service`.
+     */
+    deviceRelease?: 'self_service' | 'server_only';
+    /** Who may erase an account with DELETE /users/me. Absent on apps saved before it existed: `self_service`. */
+    accountDeletion?: 'self_service' | 'server_only' | 'off';
   };
   billingConfig: {
     /** Master switch. When false the whole billing surface is gated server-side. */
@@ -1532,7 +1544,7 @@ export interface OrganizationDetail {
   invitations: OrganizationInvitationRow[];
 }
 
-export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown';
+export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown' | 'scheduled' | 'canceled';
 
 export interface EmailLogRow {
   id: string;
@@ -1612,6 +1624,7 @@ export interface InvitationRow {
   createdAt: string;
   invitedById: string;
   status: 'pending' | 'accepted' | 'expired' | 'revoked';
+  appGrants: { applicationId: string; role: 'APP_ADMIN' | 'APP_BILLING' | 'APP_VIEWER' }[];
 }
 
 export interface BillingCredentialsStatus {

@@ -11,11 +11,12 @@ import { withProviderErrors } from '../../lib/provider-errors.js';
 import { getProviderForApplication } from './providers/index.js';
 import { getModule } from './providers/registry.js';
 import { type BillingProviderName } from './credentials.service.js';
-import { cancelEffect } from '@rekey.dev/shared-types';
+import { cancelEffect, type CancelReason } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 import { billingService } from './billing.service.js';
 import { logSubscriptionCanceled } from './money-events.js';
+import { isOneTimePlan } from './plan-kind.js';
 
 /** A provider that only receives events and can be asked for nothing. */
 function isInboundOnlyProvider(provider: string | null): boolean {
@@ -27,6 +28,8 @@ function isInboundOnlyProvider(provider: string | null): boolean {
  * surface). Semantics:
  *
  *   - No ACTIVE/PAST_DUE/PENDING subscription → 404 SUBSCRIPTION_NOT_FOUND.
+ *   - A one-time plan (credit pack, perpetual licence) → 409
+ *     SUBSCRIPTION_NOT_CANCELABLE: it bills once and has nothing to stop.
  *   - Default (`atPeriodEnd !== false`) on an ACTIVE sub with a known period
  *     end → the local row records `cancelAt = currentPeriodEnd` while staying
  *     ACTIVE, and any provider is told to stop at period end. The status
@@ -48,8 +51,18 @@ function isInboundOnlyProvider(provider: string | null): boolean {
 export async function cancelCurrentSubscription(
   application: Application,
   endUser: EndUser,
-  opts?: { atPeriodEnd?: boolean; organizationId?: string; subscriptionId?: string },
+  opts?: {
+    atPeriodEnd?: boolean;
+    organizationId?: string;
+    subscriptionId?: string;
+    reason?: CancelReason;
+    feedback?: string;
+  },
 ): Promise<Subscription> {
+  const said = {
+    ...(opts?.reason !== undefined && { cancelReason: opts.reason }),
+    ...(opts?.feedback !== undefined && { cancelFeedback: opts.feedback }),
+  };
   const sub = opts?.subscriptionId
     ? await billingService.findOwnSubscription(application, endUser, opts.subscriptionId, opts.organizationId)
     : await billingService.getCurrentSubscription(
@@ -89,6 +102,16 @@ export async function cancelCurrentSubscription(
   // happen. `cancelSubscriptionById` has always had this guard.
   if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
 
+  const plan = await prisma.plan.findUniqueOrThrow({ where: { id: sub.planId } });
+  // A PENDING one is an unpaid checkout, which the buyer may still abandon.
+  if (isOneTimePlan(plan) && sub.status !== 'PENDING') {
+    throw new RekeyError({
+      statusCode: 409,
+      code: 'SUBSCRIPTION_NOT_CANCELABLE',
+      message: `Subscription "${sub.id}" is a one-time purchase of plan "${plan.slug}", so it has no renewal to cancel.`,
+      fix: 'Nothing renews or bills again, so leave it. To end a recurring plan, pass its `subscriptionId` from GET /api/v1/billing/subscriptions.',
+    });
+  }
 
   const providerBacked = Boolean(sub.provider && sub.providerSubId);
   // Scheduling a cancellation for the end of the period does NOT require a
@@ -141,7 +164,7 @@ export async function cancelCurrentSubscription(
     return prisma.$transaction(async (tx) => {
       const scheduled = await tx.subscription.update({
         where: { id: sub.id },
-        data: { cancelAt: sub.currentPeriodEnd },
+        data: { cancelAt: sub.currentPeriodEnd, ...said },
       });
       await logSubscriptionCanceled(tx, sub.id, { atPeriodEnd: true, cause: 'end_user' }, { actor: { type: 'end_user', id: endUser.id } });
       return scheduled;
@@ -155,7 +178,7 @@ export async function cancelCurrentSubscription(
   const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
     const row = await tx.subscription.update({
       where: { id: sub.id },
-      data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+      data: { status: 'CANCELED', canceledAt: now, cancelAt: now, ...said },
     });
     await logSubscriptionCanceled(tx, row.id, { atPeriodEnd: false, cause: 'end_user' }, { actor: { type: 'end_user', id: endUser.id } });
     return {

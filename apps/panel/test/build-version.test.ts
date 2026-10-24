@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { parseBuildInfo, resolveCommit, versionLine } from '../src/lib/build-info';
+import { parseBuildInfo, resolveCommit, versionBadge, versionLine } from '../src/lib/build-info';
 
 const same = { version: '2.2.0-rc.4', commit: 'a1b2c3d4e5' };
 
@@ -58,5 +58,35 @@ describe('parseBuildInfo', () => {
   it('reads a malformed commit as unknown', () => {
     expect(resolveCommit('main')).toBe('unknown');
     expect(parseBuildInfo({ version: '2.2.0', commit: 42 })).toEqual({ version: '2.2.0', commit: 'unknown' });
+  });
+});
+
+describe('versionBadge', () => {
+  it('labels the panel version and links its release notes', () => {
+    expect(versionBadge(same, same)).toEqual({
+      label: 'v2.2.0-rc.4',
+      title: 'Rekey v2.2.0-rc.4 · a1b2c3d',
+      mismatch: false,
+      href: 'https://github.com/rekey-dev/rekey/releases/tag/v2.2.0-rc.4',
+    });
+  });
+
+  it('flags a panel and API on different builds', () => {
+    const badge = versionBadge({ version: '2.2.1', commit: 'unknown' }, { version: '2.2.0', commit: 'unknown' });
+    expect(badge).toMatchObject({
+      label: 'v2.2.1 · API v2.2.0',
+      title: 'Panel v2.2.1 · API v2.2.0',
+      mismatch: true,
+      href: 'https://github.com/rekey-dev/rekey/releases',
+    });
+  });
+
+  it('still renders when the API did not answer, and says so', () => {
+    const badge = versionBadge({ version: '2.2.1', commit: 'unknown' }, null);
+    expect(badge).toMatchObject({
+      label: 'v2.2.1 · API ?',
+      mismatch: false,
+      title: 'Panel v2.2.1 · API version unavailable',
+    });
   });
 });

@@ -94,7 +94,7 @@ An Application with `authConfig.deviceBinding: 'required'` refuses every primary
 
 ## Reading a failed sign-in
 
-`classifySignInError(err)` returns one of `invalid_credentials`, `device_required`, `device_limit` (carries `limit` + the `devices` to release), `device_blocked`, `retry_later` (carries `retryAfterSeconds`), `other`, or `null` when the value is not an API error at all, in which case rethrow it.
+`classifySignInError(err)` returns one of `invalid_credentials`, `device_required`, `device_limit` (carries `limit`, the `devices` to release, and `selfRelease`, false when the Application keeps release with its operators, so show "contact support" instead), `device_blocked`, `retry_later` (carries `retryAfterSeconds`), `other`, or `null` when the value is not an API error at all, in which case rethrow it.
 
 Two of those must never be rendered as a wrong password: `DEVICE_LIMIT_REACHED` (correct credentials, the account is at its `max_devices` cap, and the device list is the only repair path since no token was issued) and `PASSWORD_VERIFY_BUSY` (the server never checked the password, and nothing was counted toward lockout). It does not retry for you; the wait belongs in the UI.
 

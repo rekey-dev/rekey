@@ -21,8 +21,13 @@
  */
 
 import type {
+  CancelReason,
+  EmailDryRunResult,
+  EmailPreferences,
+  EmailSendRecord,
   EmailSendRequest,
   EmailSendResult,
+  EmailTopicState,
   ApplicationDto,
   AuthResultDto,
   MeInclude,
@@ -92,8 +97,13 @@ import { RekeyError } from '@rekey.dev/shared-types/error';
 import { ListsClient } from './lists.js';
 
 export type {
+  CancelReason,
+  EmailDryRunResult,
+  EmailPreferences,
+  EmailSendRecord,
   EmailSendRequest,
   EmailSendResult,
+  EmailTopicState,
   ContactListPublicDto,
   ContactListSummaryDto,
   ListMemberDto,
@@ -1345,6 +1355,25 @@ class AuthClient {
   }
 
   /**
+   * Erase the signed-in user's own account, as an operator erasure does. It
+   * cannot be undone. With a secret key no confirmation is needed; your server
+   * is the gate. Throws ACCOUNT_HAS_ACTIVE_SUBSCRIPTION (409) while a
+   * subscription still bills through a provider: cancel it first, and
+   * ACCOUNT_SELF_DELETION_DISABLED (403) when the Application sets
+   * `authConfig.accountDeletion` to `off`.
+   *
+   * @example
+   * ```ts
+   * await rekey.auth.deleteCurrentUser(accessToken);
+   * ```
+   */
+  deleteCurrentUser(accessToken: string): Promise<{ erased: true; erasedAt: string }> {
+    return this.client.send('DELETE', '/api/v1/users/me/', undefined, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
    * Exchange a refresh token for a fresh {access, refresh} pair. The presented
    * refresh is revoked atomically, call this **once** and store the new
    * `refreshToken` from the response immediately.
@@ -2148,6 +2177,11 @@ class DevicesClient {
    * INCLUDING the current one when it is the same device, so treat a release of
    * `claims.dev` as a sign-out. Idempotent for an already-released device; a
    * BLOCKED device refuses with `DEVICE_BLOCKED` (only an operator can unblock).
+   * This client holds a secret key, so an Application's
+   * `deviceRelease: 'server_only'` does not refuse it: that setting is for
+   * browsers, and your backend deciding to release is the route it leaves open.
+   * Do not expose this call to end-users (a Server Action that releases
+   * whatever the visitor asks): that quietly undoes the operator's choice.
    *
    * @example
    * ```ts
@@ -2246,6 +2280,35 @@ class UsersClient {
    */
   updateProfile(endUserId: string, patch: Record<string, ProfileValue | null>): Promise<ProfileStateDto> {
     return this.client.send('PATCH', `/api/v1/users/${encodeURIComponent(endUserId)}/profile`, patch);
+  }
+
+  /**
+   * Which notification email topics an end user receives. The one-click
+   * unsubscribe link writes the same records, so a settings page built on
+   * this matches the email. Needs `auth:read`.
+   *
+   * @example
+   * ```ts
+   * const { topics } = await rekey.users.getEmailPreferences(userId); // { onboarding: 'subscribed', ... }
+   * ```
+   */
+  getEmailPreferences(endUserId: string): Promise<EmailPreferences> {
+    return this.client.send('GET', `/api/v1/users/${encodeURIComponent(endUserId)}/email-preferences`);
+  }
+
+  /**
+   * Set notification topics to `subscribed` or `unsubscribed`. Lifting a topic
+   * never lifts "unsubscribe from all" or an operator's suppression. Needs
+   * the elevated `email:send` scope. Throws EMAIL_TOPIC_UNKNOWN for a topic
+   * no notification template was published with.
+   *
+   * @example
+   * ```ts
+   * await rekey.users.updateEmailPreferences(userId, { onboarding: 'unsubscribed' });
+   * ```
+   */
+  updateEmailPreferences(endUserId: string, topics: Record<string, EmailTopicState>): Promise<EmailPreferences> {
+    return this.client.send('PATCH', `/api/v1/users/${encodeURIComponent(endUserId)}/email-preferences`, { topics });
   }
 
   /**
@@ -2491,7 +2554,11 @@ class EmailClient {
    * whose first send never recorded an outcome throws `EMAIL_SEND_OUTCOME_UNKNOWN`
    * after five minutes: check whether it arrived before sending with a new key.
    *
-   * A recipient who used the one-click unsubscribe in a `notification` email
+   * `to` may be `{ endUserId }`: Rekey looks up the address and throws
+   * EMAIL_RECIPIENT_NOT_FOUND, EMAIL_RECIPIENT_BANNED or
+   * EMAIL_RECIPIENT_UNVERIFIED instead of sending to a user who should not get it.
+   *
+   * A recipient who left the template's topic, or every notification email,
    * resolves `suppressed` for notification templates only; `critical`
    * templates and Rekey's own account emails still reach them.
    *
@@ -2499,14 +2566,59 @@ class EmailClient {
    * ```ts
    * const { id, status } = await rekey.email.send({
    *   template: 'order_shipped',
-   *   to: 'buyer@example.com',
+   *   to: { endUserId: order.userId },
    *   variables: { orderNumber: 'A-1042', trackingUrl: 'https://track.example.com/A-1042' },
    *   idempotencyKey: `order-shipped:${order.id}`,
    * });
    * ```
    */
-  send(input: EmailSendRequest): Promise<EmailSendResult> {
+  send(input: Omit<EmailSendRequest, 'dryRun'>): Promise<EmailSendResult> {
     return this.client.send('POST', '/api/v1/email/send', input);
+  }
+
+  /**
+   * Run every check a send runs and render the template, without sending: no
+   * log row, no cap counted, no idempotency key used. `status: 'suppressed'`
+   * means a real send would not go out. Use it in CI to catch a template
+   * change that breaks your variables.
+   *
+   * @example
+   * ```ts
+   * const { status, subject } = await rekey.email.dryRun({ template: 'welcome', to: { endUserId }, variables });
+   * ```
+   */
+  dryRun(input: Omit<EmailSendRequest, 'dryRun' | 'idempotencyKey'>): Promise<EmailDryRunResult> {
+    return this.client.send('POST', '/api/v1/email/send', { ...input, dryRun: true });
+  }
+
+  /**
+   * Read a send back by the `id` it returned, or by the idempotency key it was
+   * sent with. Throws EMAIL_SEND_NOT_FOUND when nothing matches.
+   *
+   * @example
+   * ```ts
+   * const sent = await rekey.email.getSend({ idempotencyKey: `welcome:${userId}` });
+   * if (sent.status === 'unknown') { ... }
+   * ```
+   */
+  /**
+   * Cancel a send made with `sendAt` before it fires. Throws
+   * EMAIL_SEND_NOT_SCHEDULED once it has fired or was canceled.
+   *
+   * @example
+   * ```ts
+   * const { id } = await rekey.email.send({ template: 'finish_setup', to: { endUserId }, variables, sendAt: in24h });
+   * await rekey.email.cancelSend(id); // they finished setup first
+   * ```
+   */
+  cancelSend(id: string): Promise<EmailSendRecord> {
+    return this.client.send('DELETE', `/api/v1/email/sends/${encodeURIComponent(id)}`);
+  }
+
+  getSend(by: { id: string } | { idempotencyKey: string }): Promise<EmailSendRecord> {
+    return 'id' in by
+      ? this.client.send('GET', `/api/v1/email/sends/${encodeURIComponent(by.id)}`)
+      : this.client.send('GET', `/api/v1/email/sends?idempotencyKey=${encodeURIComponent(by.idempotencyKey)}`);
   }
 }
 
@@ -3101,8 +3213,9 @@ class BillingClient {
    * `opts.organizationId` reads an organization's subscription instead of the
    * user's own on an org-billed app. The caller must be a member.
    *
-   * A buyer can hold several live subscriptions; this returns one (a paid
-   * plan before the free tier, then the newest). {@link listSubscriptions}
+   * A buyer can hold several live subscriptions; this returns one (a
+   * recurring paid plan, then a one-time purchase such as a credit pack, then
+   * the free tier; the newest within each). {@link listSubscriptions}
    * returns them all. No `metadata` on this end-user view.
    *
    * `price` is what this subscriber pays each period: the price their
@@ -3565,16 +3678,26 @@ class BillingClient {
    * must be its OWNER or ADMIN. Pass `subscriptionId` to cancel one of several
    * live subscriptions ({@link listSubscriptions}).
    *
+   * Pass `reason` (one of `CANCEL_REASONS`) and `feedback` from your cancel
+   * survey: they are kept on the subscription, shown in the panel and carried
+   * on its webhooks as `data.subscription.cancellation`.
+   *
    * @example
    * ```ts
-   * const sub = await rekey.billing.cancelSubscription(userAccessToken);
+   * const sub = await rekey.billing.cancelSubscription(userAccessToken, { reason: 'too_expensive' });
    * // Tell them what they actually get: access until the date they paid through.
    * console.log(`Access until ${sub.cancelAt ?? sub.currentPeriodEnd}`);
    * ```
    */
   cancelSubscription(
     accessToken: string,
-    input?: { atPeriodEnd?: boolean; organizationId?: string; subscriptionId?: string },
+    input?: {
+      atPeriodEnd?: boolean;
+      organizationId?: string;
+      subscriptionId?: string;
+      reason?: CancelReason;
+      feedback?: string;
+    },
   ): Promise<SelfSubscriptionDto> {
     return this.client.send(
       'POST',
@@ -3585,6 +3708,8 @@ class BillingClient {
         ...(input?.atPeriodEnd !== undefined && { atPeriodEnd: input.atPeriodEnd }),
         ...(input?.organizationId && { organizationId: input.organizationId }),
         ...(input?.subscriptionId && { subscriptionId: input.subscriptionId }),
+        ...(input?.reason && { reason: input.reason }),
+        ...(input?.feedback && { feedback: input.feedback }),
       },
       { 'X-Rekey-User-Token': accessToken },
     );

@@ -279,6 +279,60 @@ describe('Stripe renewal lifecycle', () => {
       ).toMatchObject({ status: 'SUCCEEDED', amount: 0 });
     });
 
+    it('a renewal invoice that lands before customer.subscription.updated still refills credits', async () => {
+      const plan = await seedPlan({ applicationId: appId, slug: 'early-renewal', name: 'Early', kind: 'SUBSCRIPTION', interval: 'MONTH' }, { currency: 'USD', amount: 999 });
+      await prisma.planEntitlement.create({ data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 } });
+      const sub = await prisma.subscription.create({
+        data: {
+          applicationId: appId,
+          endUserId,
+          planId: plan.id,
+          status: 'ACTIVE',
+          provider: 'stripe',
+          providerSubId: 'sub_early_renewal',
+          currentPeriodEnd: new Date('2027-01-31T00:00:00.000Z'),
+        },
+      });
+      const billedUntil = (id: string, end: string) =>
+        invoice(id, 'sub_early_renewal', {
+          lines: { object: 'list', data: [{ period: { start: 0, end: Date.parse(end) / 1000 } }] },
+        });
+
+      await post('invoice.paid', billedUntil('in_period_1', '2027-01-31T00:00:00.000Z'));
+      expect(await creditsService.getBalance(appId, { endUserId })).toBe(500);
+      // No subscription.updated in between: the invoice alone has to move the period.
+      await post('invoice.paid', billedUntil('in_period_2', '2027-02-28T00:00:00.000Z'));
+      expect(await creditsService.getBalance(appId, { endUserId })).toBe(1000);
+      expect((await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).currentPeriodEnd).toEqual(
+        new Date('2027-02-28T00:00:00.000Z'),
+      );
+    });
+
+    it('an older invoice paid late does not move the period back', async () => {
+      const plan = await seedPlan({ applicationId: appId, slug: 'late-invoice', name: 'Late', kind: 'SUBSCRIPTION', interval: 'MONTH' }, { currency: 'USD', amount: 999 });
+      const sub = await prisma.subscription.create({
+        data: {
+          applicationId: appId,
+          endUserId,
+          planId: plan.id,
+          status: 'PAST_DUE',
+          provider: 'stripe',
+          providerSubId: 'sub_late_invoice',
+          currentPeriodEnd: new Date('2027-02-28T00:00:00.000Z'),
+        },
+      });
+      await post(
+        'invoice.paid',
+        invoice('in_late_january', 'sub_late_invoice', {
+          lines: { object: 'list', data: [{ period: { start: 0, end: Date.parse('2027-01-31T00:00:00.000Z') / 1000 } }] },
+        }),
+      );
+      expect(await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({
+        status: 'ACTIVE',
+        currentPeriodEnd: new Date('2027-02-28T00:00:00.000Z'),
+      });
+    });
+
     it('a $0 renewal still extends a TIMED licence', async () => {
       const plan = await seedPlan({
         applicationId: appId,

@@ -934,6 +934,22 @@ export const operatorWriteTools: OperatorTool[] = [
             'records a device when the client sends one; "required" refuses sign-in without ' +
             'one. Refresh is never gated.',
         },
+        deviceRelease: {
+          type: 'string',
+          enum: ['self_service', 'server_only'],
+          description:
+            'Who may release a device. "self_service" (default) lets the end-user release ' +
+            'their own; "server_only" refuses that from a browser key, so releases go through ' +
+            'the operator or a secret key. Only meaningful with deviceBinding "required".',
+        },
+        accountDeletion: {
+          type: 'string',
+          enum: ['self_service', 'server_only', 'off'],
+          description:
+            'Who may erase an account with DELETE /users/me. "self_service" (default): the end-user ' +
+            'from a browser with a password or MFA code, or a secret key. "server_only": a secret key ' +
+            'only. "off": nobody; only an operator erasure removes an account.',
+        },
         passwordBreachCheckEnabled: { type: 'boolean' },
         sendVerificationEmailOnSignUp: {
           type: 'boolean',
@@ -987,6 +1003,12 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(args.deviceBinding !== undefined && {
           deviceBinding: args.deviceBinding as 'optional' | 'required',
         }),
+        ...(args.deviceRelease !== undefined && {
+          deviceRelease: args.deviceRelease as 'self_service' | 'server_only',
+        }),
+        ...(args.accountDeletion !== undefined && {
+          accountDeletion: args.accountDeletion as 'self_service' | 'server_only' | 'off',
+        }),
         ...(args.passwordBreachCheckEnabled !== undefined && {
           passwordBreachCheckEnabled: args.passwordBreachCheckEnabled === true,
         }),
@@ -1005,7 +1027,11 @@ export const operatorWriteTools: OperatorTool[] = [
         patch,
         actorTenantUserId: ctx.tenantUserId,
       });
-      audit(ctx, 'app.auth_config_updated', app.id, { fields: Object.keys(patch) });
+      audit(ctx, 'app.auth_config_updated', app.id, {
+        fields: Object.keys(patch),
+        ...(patch.deviceRelease !== undefined && { deviceRelease: patch.deviceRelease }),
+        ...(patch.accountDeletion !== undefined && { accountDeletion: patch.accountDeletion }),
+      });
       return { id: updated.id, slug: updated.slug, authConfig: updated.authConfig };
     },
   },

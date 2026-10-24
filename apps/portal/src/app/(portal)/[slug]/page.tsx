@@ -1,4 +1,4 @@
-import { isEntitlingStatus } from '@rekey.dev/shared-types';
+import { isEntitlingStatus, type CancelReason } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cancelCopy } from '@/lib/cancel-copy';
@@ -64,9 +64,26 @@ const CHECKOUT_ERR: Record<string, string> = {
   BILLING_SUBSCRIPTION_SUBJECT_CONFLICT:
     'You already have this plan on another account of yours. It has to be canceled and finish before you can start it here.',
   SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription. It may already be canceled.',
+  SUBSCRIPTION_NOT_CANCELABLE: 'That was a one-time purchase, so there is nothing to cancel. It will not bill again.',
   SUBSCRIPTION_MANAGED_EXTERNALLY:
     'This subscription is managed through your billing account, not here. Cancel it there and this page updates shortly after.',
 };
+
+const CANCEL_REASON_OPTIONS: ReadonlyArray<readonly [CancelReason, string]> = [
+  ['too_expensive', 'It costs too much'],
+  ['missing_features', 'It is missing something I need'],
+  ['switched_service', 'I switched to something else'],
+  ['unused', 'I am not using it'],
+  ['too_complex', 'It is too hard to use'],
+  ['low_quality', 'It did not work well enough'],
+  ['customer_service', 'Support did not help'],
+  ['other', 'Something else'],
+];
+
+/** A credit pack or a perpetual licence bills once, so there is nothing to cancel. Mirrors the API's isOneTimePlan. */
+function boughtOnce(plan: { kind: string; licenseKind: string | null } | undefined): boolean {
+  return plan?.kind === 'CREDIT' || (plan?.kind === 'LICENSE' && plan.licenseKind !== 'TIMED');
+}
 
 export default async function DashboardPage({
   params,
@@ -213,7 +230,7 @@ export default async function DashboardPage({
                       Managed through your billing account. Changes and cancellations are made there.
                     </p>
                   )}
-                  {isEntitlingStatus(sub.status) && !subCanceling && canCheckout && !subManagedExternally && (
+                  {isEntitlingStatus(sub.status) && !subCanceling && canCheckout && !subManagedExternally && !boughtOnce(plan) && (
                     <form action={cancelSubscriptionAction.bind(null, slug, orgId, sub.id)} className="pt-2">
                       <ConfirmSubmit
                         variant="neutral"
@@ -222,7 +239,19 @@ export default async function DashboardPage({
                         message={cancelText.message}
                         confirmLabel={cancelText.confirmLabel}
                         pendingLabel="Cancelling…"
-                      />
+                      >
+                        <label className="block space-y-1 text-sm">
+                          <span className="text-[var(--color-muted-fg)]">Why are you cancelling? (optional)</span>
+                          <select name="reason" defaultValue="" className="w-full rounded border border-[var(--color-border)] bg-transparent px-2 py-1">
+                            <option value="">Prefer not to say</option>
+                            {CANCEL_REASON_OPTIONS.map(([value, text]) => (
+                              <option key={value} value={value}>
+                                {text}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </ConfirmSubmit>
                     </form>
                   )}
                 </li>

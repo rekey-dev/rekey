@@ -11,7 +11,8 @@
  *     redirects to `/session/refresh` with its own path as `next`;
  *   - that route rotates and writes both cookies onto its redirect;
  *   - `next` only ever resolves to a same-origin path;
- *   - a token the route minted moments ago is not sent round again.
+ *   - a token the route minted moments ago is not sent round again;
+ *   - a Route Handler reached cross-site never refreshes in place.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -181,6 +182,40 @@ describe('api() in a Server Action', () => {
     await expect(api<{ ok: boolean }>({ method: 'POST', path: '/x', body: {} })).resolves.toEqual({ ok: true });
     expect(refreshCalls).toBe(1);
     expect(jar.get('rekey_refresh')?.value).toBe('refresh-1-next');
+  });
+});
+
+describe('api() in a Route Handler another site navigated to', () => {
+  // A cross-site page can open `/api/check-slug` and abort the navigation
+  // after the API rotated, dropping the new pair; the replay of the spent
+  // token then revokes every session the operator has.
+  it.each(['cross-site', 'same-site'])('a %s request never refreshes and leaves the session cookies alone', async (site) => {
+    requestHeaders.set('sec-fetch-site', site);
+    const { api } = await import('@/lib/api');
+
+    await expect(api({ method: 'GET', path: '/api/v1/tenant/applications', redirectOn401: false })).rejects.toMatchObject({
+      statusCode: 401,
+    });
+    expect(refreshCalls).toBe(0);
+    expect(jar.get('rekey_refresh')?.value).toBe('refresh-1');
+  });
+
+  it('a page-like caller is sent through the refresh route instead', async () => {
+    requestHeaders.set('sec-fetch-site', 'cross-site');
+    const { api } = await import('@/lib/api');
+
+    await expect(api({ method: 'GET', path: '/api/v1/tenant/applications' })).rejects.toThrow(
+      'NEXT_REDIRECT:/session/refresh?next=%2Fapplications%2Fapp_1%2Fkeys%3Ftab%3Dlive',
+    );
+    expect(refreshCalls).toBe(0);
+  });
+
+  it('a same-origin fetch still refreshes in place', async () => {
+    requestHeaders.set('sec-fetch-site', 'same-origin');
+    const { api } = await import('@/lib/api');
+
+    await expect(api<{ ok: boolean }>({ method: 'GET', path: '/x', redirectOn401: false })).resolves.toEqual({ ok: true });
+    expect(refreshCalls).toBe(1);
   });
 });
 

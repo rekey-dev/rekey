@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, getMe, getWorkspaceLimits } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getMe, getWorkspaceLimits, type MemberRow } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
 import Link from '@/components/Link';
@@ -15,6 +15,8 @@ import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { WorkspaceLimits } from '@/components/WorkspaceLimits';
 import { Badge } from '@/components/Badge';
 import { savedStateKey } from '@/lib/saved-state-key';
+import { roleLabel } from '@/lib/workspace-roles';
+import type { Page } from '@/lib/paginate';
 import { dangerButtonClass } from '@/components/Button';
 
 interface WorkspaceDto {
@@ -98,7 +100,7 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can rename a workspace.',
 };
 const ERR_MCP: Record<string, string> = {
-  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can switch operator MCP.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can change AI assistant access.',
 };
 
 export default async function WorkspaceSettingsPage({
@@ -119,10 +121,12 @@ export default async function WorkspaceSettingsPage({
   const errorCard = sp.card === 'mcp' ? 'mcp' : 'general';
   const deletionRequested = typeof sp.deletionRequested === 'string';
 
-  const [workspace, me] = await Promise.all([
+  const [workspace, me, people] = await Promise.all([
     api<WorkspaceDto>({ method: 'GET', path: '/api/v1/tenant/workspace' }),
     getMe(),
+    api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members?limit=100' }),
   ]);
+  const owners = people.items.filter((m) => m.role === 'OWNER');
   const canEdit = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   const isOwner = me.activeRole === 'OWNER';
 
@@ -147,18 +151,19 @@ export default async function WorkspaceSettingsPage({
         title="Workspace settings"
         description={
           <>
-            Name, usage, agent access and deletion for{' '}
-            <strong className="font-medium text-[var(--color-fg)]">{workspace.name}</strong>.
+            Everything about{' '}
+            <strong className="font-medium text-[var(--color-fg)]">{workspace.name}</strong>: its
+            name, who is in it, plan limits and AI assistant access.
           </>
         }
       />
 
       {renamed && <SavedBanner params={['renamed']} message="Workspace renamed." />}
-      {savedMcp && <SavedBanner message="Operator MCP setting saved." />}
+      {savedMcp && <SavedBanner message="AI assistant access saved." />}
       {!canEdit && (
         <Banner tone="info">
-          You&apos;re a {me.activeRole.toLowerCase()}, so these settings are read-only. Owners and
-          admins can change them.
+          You&apos;re a {roleLabel(me.activeRole).toLowerCase()} here, so you can look but not change
+          these settings. Owners and admins can change them.
         </Banner>
       )}
 
@@ -176,7 +181,7 @@ export default async function WorkspaceSettingsPage({
               <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
             </Banner>
           )}
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="max-w-md">
             <Field label="Workspace name" required hint={canEdit ? '2 to 80 characters.' : undefined}>
               <input
                 type="text"
@@ -189,21 +194,32 @@ export default async function WorkspaceSettingsPage({
                 className={`${fieldInputCls} disabled:cursor-not-allowed disabled:opacity-60`}
               />
             </Field>
-            <Field label="Workspace ID" hint="Stays the same for the life of the workspace. Quote it when you ask for support.">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={workspace.id}
-                  readOnly
-                  aria-label="Workspace ID"
-                  className={`${fieldInputCls} bg-[var(--color-surface-muted)] font-mono opacity-70`}
-                />
-                <CopyButton value={workspace.id} label="Copy" />
-              </div>
-            </Field>
           </div>
           {canEdit && <StickyFormFooter label="Save name" />}
         </ActionForm>
+        <p className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-3 text-xs text-[var(--color-muted-fg)]">
+          Workspace ID, if support asks for it:
+          <code className="font-mono text-[var(--color-fg)]">{workspace.id}</code>
+          <CopyButton value={workspace.id} label="Copy" />
+        </p>
+      </Card>
+
+      <Card className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Team</h2>
+          <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
+            {people.page.total} {people.page.total === 1 ? 'person' : 'people'} in this workspace.
+            {owners.length > 0 && (
+              <> Owned by {owners.map((o) => o.name ?? o.email).join(', ')}.</>
+            )}
+          </p>
+        </div>
+        <Link
+          href="/team"
+          className="inline-flex shrink-0 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--color-surface-muted)]"
+        >
+          {canEdit ? 'Manage team' : 'See team'}
+        </Link>
       </Card>
 
       {/* Usage and limits, read-only for every role. The production figure is
@@ -218,21 +234,19 @@ export default async function WorkspaceSettingsPage({
       <div id="operator-mcp" className="scroll-mt-24">
       <Card className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Operator MCP</h2>
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">AI assistant access</h2>
           <Badge tone={workspace.operatorMcpEnabled ? 'success' : 'neutral'} dot>
-            {workspace.operatorMcpEnabled ? 'allowed' : 'off'}
+            {workspace.operatorMcpEnabled ? 'On' : 'Off'}
           </Badge>
         </div>
         <p className="max-w-2xl text-sm text-[var(--color-muted-fg)]">
-          Whether AI agents may act in this workspace through the operator MCP server. Turning it off
-          refuses every connected agent on its next request and grants no new consent. Nothing is
-          revoked: an agent keeps its connection, and turning this back on restores it as it was.
-          Each application has its own switch for the end-user MCP server. To connect an agent,
-          follow the steps on{' '}
+          Lets AI assistants such as Claude or Cursor work in this workspace for you, through the
+          operator MCP server. Turning it off stops every connected assistant straight away; turning it
+          back on lets them carry on as before. To connect one, see{' '}
           <Link href="/account/mcp" className="underline underline-offset-2">
-            Operator MCP
-          </Link>{' '}
-          under Account.
+            Account, AI assistants (MCP)
+          </Link>
+          .
         </p>
         {error && errorCard === 'mcp' && (
           <Banner tone="error">
@@ -251,7 +265,7 @@ export default async function WorkspaceSettingsPage({
               defaultChecked={workspace.operatorMcpEnabled}
               disabled={!canEdit}
             />
-            Allow operator MCP in this workspace
+            Let AI assistants work in this workspace
           </label>
           {canEdit && <StickyFormFooter hint="Applies to every agent's next request." />}
         </ActionForm>
@@ -283,7 +297,7 @@ export default async function WorkspaceSettingsPage({
                     title="Delete this workspace?"
                     description={`This unwinds every application, billing row, end-user, and license for "${workspace.name}". It can't be undone.`}
                     triggerLabel="Delete workspace"
-                    confirmLabel="Continue to delete"
+                    confirmLabel="Show me how to delete"
                     triggerClassName={dangerButtonClass('sm')}
                   />
                 </ActionForm>

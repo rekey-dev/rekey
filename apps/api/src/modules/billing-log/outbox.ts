@@ -50,7 +50,10 @@ export function retryDelayMs(attempts: number): number {
  * const settled = await drainBillingEventOutbox(100, app.log);
  */
 export async function drainBillingEventOutbox(limit = DEFAULT_BATCH, log?: BillingLogLogger): Promise<number> {
-  const now = new Date();
+  // The database's clock, not ours: `next_attempt_at` defaults to its
+  // CURRENT_TIMESTAMP rounded to the millisecond, so a row queued a moment ago
+  // can read as later than this process's `new Date()` and be skipped.
+  const [{ now }] = await prisma.$queryRaw<[{ now: Date }]>`SELECT CURRENT_TIMESTAMP(3) AS "now"`;
   const pending = await prisma.billingEventOutbox.findMany({
     where: { processedAt: null, nextAttemptAt: { lte: now } },
     orderBy: { createdAt: 'asc' },

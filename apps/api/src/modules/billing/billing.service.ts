@@ -31,6 +31,7 @@ import {
 import type { Application, EndUser, Subscription } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { costsNothing } from './free-plan.js';
+import { isOneTimePlan } from './plan-kind.js';
 import { plansService } from '../plans/plans.service.js';
 
 import { getModule } from './providers/registry.js';
@@ -201,7 +202,7 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
   if (paidSinceCancellation) {
     return prisma.subscription.update({
       where: { id: sub.id },
-      data: { cancelAt: null, canceledAt: null },
+      data: { cancelAt: null, canceledAt: null, cancelReason: null, cancelFeedback: null },
     });
   }
 
@@ -241,8 +242,11 @@ export const LIVE_SUBSCRIPTIONS_CAP = 100;
 
 /**
  * The subject's ACTIVE, TRIALING and PAST_DUE rows in the order
- * `getCurrentSubscription` considers them: paid plans before the free
- * fallback, newest `createdAt` first within each, `id` descending on a tie.
+ * `getCurrentSubscription` considers them: recurring paid plans, then one-time
+ * plans (a credit pack, a perpetual licence), then the free fallback, newest
+ * `createdAt` first within each, `id` descending on a tie. A one-time purchase
+ * ranks below a recurring plan so buying a pack never displaces the
+ * subscription the buyer is on.
  * At most the newest {@link LIVE_SUBSCRIPTIONS_CAP} rows are considered.
  *
  * Newest rather than dearest: two plans can be priced in different currencies
@@ -274,10 +278,10 @@ async function rankedLiveSubscriptions(
     }),
   );
   const fallbackPlanIds = new Set(plans.filter((plan) => costsNothing(plan)).map((plan) => plan.id));
-  return [
-    ...liveRows.filter((row) => !fallbackPlanIds.has(row.planId)),
-    ...liveRows.filter((row) => fallbackPlanIds.has(row.planId)),
-  ];
+  const oneTimePlanIds = new Set(plans.filter((plan) => isOneTimePlan(plan)).map((plan) => plan.id));
+  const rank = (row: Subscription): number =>
+    fallbackPlanIds.has(row.planId) ? 2 : oneTimePlanIds.has(row.planId) ? 1 : 0;
+  return [0, 1, 2].flatMap((group) => liveRows.filter((row) => rank(row) === group));
 }
 
 export const billingService = {
@@ -364,7 +368,8 @@ export const billingService = {
     // all, on the page whose whole job is to say what they are on.
     //
     // Among live rows, a free plan is the fallback, never the answer while
-    // anything else is live, and among several paid ones the newest wins (see
+    // anything else is live, a one-time purchase never outranks a recurring
+    // plan, and among several in one group the newest wins (see
     // `rankedLiveSubscriptions`; `listLiveSubscriptions` returns them all).
     // Recency cannot
     // decide it: checkout reuses the (app, end-user, plan) row, so a buyer who

@@ -16,6 +16,11 @@ export interface OneTimeSecret {
    * its success redirect's `?e=`; with no redirect, the dialog reports it.
    */
   flag?: string;
+  /**
+   * The operator can get a fresh one later (an invitation link they can send
+   * again), so the dialog drops the "shown once" warning and closes freely.
+   */
+  reissuable?: boolean;
 }
 
 /** What a minting action resolves to. Nothing, when it redirected instead. */

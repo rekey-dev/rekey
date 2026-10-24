@@ -92,6 +92,7 @@ async function saveDetails(applicationId: string, key: string, formData: FormDat
   if (!variables.ok) redirect(`${p.page}?error=bad-variables`);
   const links = parseLinkDomains(String(formData.get('linkDomains') ?? ''));
   if (links.invalid.length > 0) redirect(`${p.page}?error=bad-domains`);
+  const topic = String(formData.get('topic') ?? '').trim();
   await call(p.page, () =>
     api({
       method: 'PATCH',
@@ -99,6 +100,7 @@ async function saveDetails(applicationId: string, key: string, formData: FormDat
       body: {
         name,
         category: String(formData.get('category') ?? 'notification'),
+        topic: topic === '' || topic === key ? null : topic,
         fromName: fromName === '' ? null : fromName,
         variableSchema: variables.defs,
         linkDomains: links.domains,
@@ -266,6 +268,7 @@ export default async function CustomTemplatePage({
           key={savedStateKey({
             name: template.name,
             category: template.category,
+            topic: template.topic,
             fromName: template.fromName,
             linkDomains: template.linkDomains,
             variableSchema: template.variableSchema,
@@ -273,7 +276,7 @@ export default async function CustomTemplatePage({
           action={saveDetails.bind(null, id, key)}
           className="space-y-4"
         >
-          <div className="grid items-start gap-3 sm:grid-cols-3">
+          <div className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Name" required>
               <input name="name" required maxLength={120} defaultValue={template.name} className={inputCls} />
             </Field>
@@ -282,6 +285,19 @@ export default async function CustomTemplatePage({
                 <option value="notification">Notification</option>
                 <option value="critical">Critical</option>
               </select>
+            </Field>
+            <Field
+              label="Unsubscribe topic"
+              hint="Notification mail only. Unsubscribing leaves every template with this topic. Leave empty to use the key."
+            >
+              <input
+                name="topic"
+                maxLength={64}
+                pattern="[a-z][a-z0-9_]{2,63}"
+                placeholder={key}
+                defaultValue={template.topic === key ? '' : template.topic}
+                className={`${inputCls} font-mono`}
+              />
             </Field>
             <Field
               label="From name"

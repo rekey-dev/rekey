@@ -663,9 +663,11 @@ describe('custom email templates', () => {
       expect(confirm.statusCode).toBe(200);
       expect(confirm.headers['content-type']).toContain('text/html');
       expect(confirm.body).toContain('<form method="post"');
-      expect(confirm.body).toContain('Notification emails from Acme stop');
+      expect(confirm.body).toContain('Emails about order shipped from Acme stop');
+      expect(confirm.body).toContain('scope=all');
       expect(confirm.body).toContain('password resets');
       expect(await prisma.emailSuppression.count({ where: { applicationId: w.appId } })).toBe(0);
+      expect(await prisma.emailTopicOptOut.count({ where: { applicationId: w.appId } })).toBe(0);
 
       const oneClick = await inject({
         method: 'POST',
@@ -674,11 +676,14 @@ describe('custom email templates', () => {
         payload: 'List-Unsubscribe=One-Click',
       });
       expect(oneClick.statusCode).toBe(200);
-      const suppression = await prisma.emailSuppression.findUniqueOrThrow({
-        where: { applicationId_address: { applicationId: w.appId, address: 'reader@example.com' } },
+      const optOut = await prisma.emailTopicOptOut.findUniqueOrThrow({
+        where: {
+          applicationId_address_topic: { applicationId: w.appId, address: 'reader@example.com', topic: 'order_shipped' },
+        },
       });
-      expect(suppression).toMatchObject({ reason: 'unsubscribe', category: 'notification', createdBy: null });
-      expect(oneClick.body).toContain('Notification emails from Acme stop');
+      expect(optOut.topic).toBe('order_shipped');
+      expect(await prisma.emailSuppression.count({ where: { applicationId: w.appId } })).toBe(0);
+      expect(oneClick.body).toContain('Emails about order shipped from Acme stop');
       expect(oneClick.body).not.toContain('will no longer receive email');
 
       h.sends.length = 0;
@@ -974,14 +979,15 @@ describe('custom email templates', () => {
 
     it('an unsubscribe does not narrow an existing bounce, and the list shows the category', async () => {
       const w = await ready();
-      await oneClickUnsubscribe(w, 'news@example.com');
+      const { createUnsubscribeToken } = await import('../src/modules/email/custom/unsubscribe-token.js');
+      const leaveAll = createUnsubscribeToken(w.appId, 'news@example.com');
+      expect((await inject({ method: 'POST', url: `/api/v1/email/unsubscribe?token=${leaveAll}` })).statusCode).toBe(200);
       await inject({
         method: 'POST',
         url: `${base(w)}/email-suppressions`,
         headers: auth(w.ownerToken),
         payload: { address: 'bounced@example.com', reason: 'bounce' },
       });
-      const { createUnsubscribeToken } = await import('../src/modules/email/custom/unsubscribe-token.js');
       const token = createUnsubscribeToken(w.appId, 'bounced@example.com');
       expect((await inject({ method: 'POST', url: `/api/v1/email/unsubscribe?token=${token}` })).statusCode).toBe(200);
       const list = await inject({ method: 'GET', url: `${base(w)}/email-suppressions`, headers: auth(w.ownerToken) });

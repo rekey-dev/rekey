@@ -30,6 +30,11 @@ export const LOGIN_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   // already does on the sign-up page.
   OPERATOR_INVITE_REQUIRED: 'This deployment is invite-only, and this account has not been invited yet.',
   OPERATOR_SIGNUP_CLOSED: 'This deployment is not accepting new operators.',
+  OPERATOR_INVITE_EMAIL_MISMATCH:
+    'That account uses a different email address from the one invited. Sign in with the invited address.',
+  OPERATOR_INVITE_INVALID: 'That invitation is no longer valid. Ask whoever invited you to send it again.',
+  OPERATOR_INVITE_EXPIRED: 'That invitation has expired. Ask whoever invited you to send it again.',
+  OPERATOR_INVITE_USED: 'That invitation was already used. Sign in instead.',
   OAUTH_PROVIDER_NOT_CONFIGURED: 'That sign-in provider is not enabled on this deployment.',
   OAUTH_PROVIDER_UNKNOWN: 'Unknown sign-in provider.',
   OAUTH_EMAIL_NOT_VERIFIED: 'Your provider account email is not verified. Verify it at the provider, then retry.',

@@ -4,8 +4,9 @@
  * Light / dark / system theme switcher. Cycles on click; persists the choice in
  * localStorage and applies a `.dark` class to <html> (tailwind darkMode:'class'
  * + the .dark CSS vars in globals.css). "system" follows the OS and live-updates
- * when the OS preference changes. The initial class is set by an inline script
- * in the root layout (THEME_INIT) so there's no flash before this mounts.
+ * when the OS preference changes. The initial class, and the listener that
+ * follows the OS, come from an inline script in the root layout (THEME_INIT),
+ * so they work before and without this button being mounted.
  */
 
 import * as React from 'react';
@@ -13,8 +14,11 @@ import * as React from 'react';
 export type Theme = 'light' | 'dark' | 'system';
 export const THEME_KEY = 'rekey-theme';
 
-/** Inline-script body for the root layout, runs before paint to avoid FOUC. */
-export const THEME_INIT = `(function(){try{var t=localStorage.getItem('${THEME_KEY}')||'system';var d=t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d);}catch(e){}})();`;
+/**
+ * Inline-script body for the root layout. Runs before paint to avoid FOUC, and
+ * keeps "system" following the OS for the life of the page.
+ */
+export const THEME_INIT = `(function(){try{var q=window.matchMedia('(prefers-color-scheme: dark)');var a=function(){var t=localStorage.getItem('${THEME_KEY}')||'system';document.documentElement.classList.toggle('dark',t==='dark'||(t==='system'&&q.matches));};a();q.addEventListener('change',a);}catch(e){}})();`;
 
 function applyTheme(theme: Theme): void {
   const dark =
@@ -46,26 +50,18 @@ const ICON: Record<Theme, React.JSX.Element> = {
 const LABEL: Record<Theme, string> = { light: 'Light', dark: 'Dark', system: 'System' };
 const NEXT: Record<Theme, Theme> = { light: 'dark', dark: 'system', system: 'light' };
 
+function storedTheme(): Theme {
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    return stored === 'light' || stored === 'dark' ? stored : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+/** Client-only: it lives in the account menu, which never server-renders open. */
 export function ThemeToggle(): React.JSX.Element {
-  const [theme, setTheme] = React.useState<Theme>('system');
-  const [mounted, setMounted] = React.useState(false);
-
-  React.useEffect(() => {
-    const stored = (localStorage.getItem(THEME_KEY) as Theme | null) ?? 'system';
-    setTheme(stored);
-    setMounted(true);
-  }, []);
-
-  React.useEffect(() => {
-    if (!mounted) return;
-    applyTheme(theme);
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = (): void => {
-      if (((localStorage.getItem(THEME_KEY) as Theme | null) ?? 'system') === 'system') applyTheme('system');
-    };
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, [theme, mounted]);
+  const [theme, setTheme] = React.useState<Theme>(storedTheme);
 
   function cycle(): void {
     const next = NEXT[theme];
@@ -78,8 +74,7 @@ export function ThemeToggle(): React.JSX.Element {
     applyTheme(next);
   }
 
-  // Avoid a hydration mismatch on the label (server can't know localStorage).
-  const label = mounted ? LABEL[theme] : 'Theme';
+  const label = LABEL[theme];
 
   return (
     <button

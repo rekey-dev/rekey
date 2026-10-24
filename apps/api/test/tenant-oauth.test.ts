@@ -177,4 +177,31 @@ describe('Operator OAuth (panel social login)', () => {
     expect(replay.statusCode).toBe(409);
     expect(replay.json().error.code).toBe('OPERATOR_INVITE_USED');
   });
+
+  it('invite: a teammate invitation link creates the invited person inside that workspace', async () => {
+    const owner = await app.inject({
+      method: 'POST',
+      url: '/api/v1/tenant/auth/sign-up',
+      payload: { email: 'oauth-inviter@example.com', password: 'pw-one-two-three', workspaceName: 'Inviter Co' },
+    });
+    const { accessToken, activeTenantId } = owner.json().data as { accessToken: string; activeTenantId: string };
+    // Inviting needs a confirmed inviter.
+    await prisma.tenantUser.update({ where: { email: 'oauth-inviter@example.com' }, data: { emailVerified: true } });
+    const invitation = await app.inject({
+      method: 'POST',
+      url: '/api/v1/tenant/workspace/invitations',
+      headers: { authorization: `Bearer ${accessToken}` },
+      payload: { email: 'oauth-invitee@example.com', role: 'MEMBER' },
+    });
+    const token = (invitation.json().data as { token: string }).token;
+    process.env.OPERATOR_SIGNUP_MODE = 'invite';
+    nextIdentity = { providerAccountId: 'g-invitee', email: 'oauth-invitee@example.com', emailVerified: true };
+
+    const res = await callback('google', 'auth-code', token);
+    expect(res.statusCode, res.body).toBe(200);
+    const memberships = await prisma.tenantMembership.findMany({
+      where: { tenantUser: { email: 'oauth-invitee@example.com' } },
+    });
+    expect(memberships.map((m) => [m.tenantId, m.role])).toEqual([[activeTenantId, 'MEMBER']]);
+  });
 });

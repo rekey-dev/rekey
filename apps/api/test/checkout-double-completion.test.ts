@@ -127,19 +127,16 @@ describe('a subscription row that has two completable checkout sessions', () => 
   }
 
   function completeStripe(sessionId: string, stripeSubId: string) {
-    const payload = JSON.stringify({
-      id: `evt_${randomUUID()}`,
-      object: 'event',
-      type: 'checkout.session.completed',
-      data: {
-        object: {
-          id: sessionId,
-          metadata: { applicationId },
-          mode: 'subscription',
-          subscription: stripeSubId,
-        },
-      },
+    return deliverStripe('checkout.session.completed', {
+      id: sessionId,
+      metadata: { applicationId },
+      mode: 'subscription',
+      subscription: stripeSubId,
     });
+  }
+
+  function deliverStripe(type: string, object: Record<string, unknown>) {
+    const payload = JSON.stringify({ id: `evt_${randomUUID()}`, object: 'event', type, data: { object } });
     return app.inject({
       method: 'POST',
       url: `/api/v1/billing/webhook/stripe/${appSlug}`,
@@ -294,6 +291,33 @@ describe('a subscription row that has two completable checkout sessions', () => 
     });
 
     const again = await checkout('stripe');
+    await completeStripe(again, 'sub_SECOND');
+
+    const row = await theRow();
+    expect(row.status).toBe('ACTIVE');
+    expect(row.providerSubId).toBe('sub_SECOND');
+  });
+
+  it('keeps a resubscribe live when the old subscription\'s deletion arrives late', async () => {
+    // Stripe retries `customer.subscription.deleted` for the ended
+    // subscription after the buyer has already opened a new checkout. The
+    // reused row must not still answer to the old id, or that retry cancels
+    // the new checkout and its completion is then refused as terminal.
+    const first = await checkout('stripe');
+    await completeStripe(first, 'sub_FIRST');
+    await prisma.subscription.updateMany({
+      where: { applicationId },
+      data: { status: 'CANCELED', canceledAt: new Date() },
+    });
+
+    const again = await checkout('stripe');
+    const late = await deliverStripe('customer.subscription.deleted', {
+      id: 'sub_FIRST',
+      object: 'subscription',
+      status: 'canceled',
+      metadata: { applicationId },
+    });
+    expect(late.statusCode).toBe(200);
     await completeStripe(again, 'sub_SECOND');
 
     const row = await theRow();

@@ -379,6 +379,8 @@ export const creditsService = {
     applicationId: string;
     amount: number;
     paymentRef: string;
+    /** The ledger line the buyer reads. Defaults to a credit pack purchase. */
+    description?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
     /** The payment that paid for them, when it is recorded by the time they are granted. */
     paymentId?: string | undefined;
@@ -394,7 +396,7 @@ export const creditsService = {
       delta: input.amount,
       reason: 'PURCHASE',
       idempotencyKey: `purchase:${input.paymentRef}`,
-      description: 'Credit pack purchase',
+      description: input.description ?? 'Credit pack purchase',
       metadata: input.metadata,
       paymentId: input.paymentId,
       planPriceId: input.planPriceId,

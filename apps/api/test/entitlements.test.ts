@@ -136,6 +136,28 @@ describe('Plan entitlements + provisioner', () => {
     expect(licCount).toBe(1);
   });
 
+  it('labels subscription credits as subscription credits, first period and renewal', async () => {
+    const planId = await makePlan('team', { kind: 'SUBSCRIPTION' });
+    await putEntitlement('team', { kind: 'CREDIT', quantity: 500 });
+    const euId = await makeEndUser(`label-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const sub = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId, status: 'ACTIVE', provider: 'stripe' },
+    });
+    await entitlementsService.provision({ subscription: sub });
+    const renewed = await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000) },
+    });
+    await entitlementsService.provision({ subscription: renewed });
+
+    const entries = await prisma.creditLedger.findMany({
+      where: { applicationId: appId, endUserId: euId },
+      orderBy: { balanceAfter: 'asc' },
+      select: { description: true },
+    });
+    expect(entries.map((e) => e.description)).toEqual(['Subscription credits', 'Subscription credits renewal']);
+  });
+
   it('back-compat: a legacy single-kind CREDIT plan provisions from its kind fields', async () => {
     const planId = await makePlan('legacy-credits', { kind: 'CREDIT', creditsAmount: 100 });
     const euId = await makeEndUser(`legacy-${Math.random().toString(36).slice(2, 7)}@example.com`);
@@ -144,6 +166,8 @@ describe('Plan entitlements + provisioner', () => {
     });
     await entitlementsService.provision({ subscription: sub });
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(100);
+    const entry = await prisma.creditLedger.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
+    expect(entry.description).toBe('Credit pack purchase');
   });
 
   describe('entitlementOverrides', () => {

@@ -36,6 +36,13 @@ import { requirePublishableOrSecretKey, requireScope } from '../middleware/api-k
 import { requireUserSession } from '../middleware/user-session.js';
 import { RekeyError } from '../lib/error.js';
 import { authService } from '../modules/auth/auth.service.js';
+import { mfaService } from '../modules/mfa/mfa.service.js';
+import { eraseEndUser } from '../modules/tenant-applications/end-user-erasure.service.js';
+import { assertStepUp } from '../lib/step-up.js';
+import { prisma } from '../lib/prisma.js';
+import { recordSecurityEvent, requestContext } from '../lib/security-events.js';
+import { refuseWhileImpersonating } from '../middleware/impersonation.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { ok, errs, ref } from '../lib/openapi.js';
 import {
   ME_INCLUDED_PROPERTIES_SCHEMA,
@@ -331,6 +338,131 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
       });
 
       return { success: true, data: (await selfRecord(req, endUser)).record };
+    },
+  );
+
+  app.delete(
+    '/',
+    {
+      onRequest: requireScope('auth:write'),
+      preHandler: refuseWhileImpersonating('delete this account'),
+      schema: {
+        tags: ['Public · Auth'],
+        summary: "Delete the current end-user's own account",
+        description:
+          'Erases the caller exactly as an operator erasure does: the account is tombstoned, every ' +
+          'session ends, personal data is scrubbed or deleted and `user.erased` fires. Payments and ' +
+          'subscriptions stay as the financial record. It cannot be undone, and calling it again ' +
+          'answers 410 END_USER_ERASED because the token died with the account. An operator\'s ' +
+          'impersonation session is refused (403 IMPERSONATION_ACTION_FORBIDDEN).\n\n' +
+          'A publishable (browser) caller must confirm with `password`, or `code` when MFA is enrolled, ' +
+          'so a stolen token cannot delete an account. A secret-key caller is the trusted gate and ' +
+          'sends neither.\n\n' +
+          'The Application decides who may call it with `authConfig.accountDeletion`: `self_service` ' +
+          '(default), `server_only` (secret key only) or `off`.\n\n' +
+          'Refused with 409 `ACCOUNT_HAS_ACTIVE_SUBSCRIPTION` while a subscription is still billing ' +
+          'through a payment provider: cancel it first, so nobody keeps charging an erased account.',
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
+        body: {
+          type: 'object',
+          properties: {
+            password: { type: 'string', maxLength: 1024 },
+            code: { type: 'string', maxLength: 64 },
+          },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { erased: { type: 'boolean', enum: [true] }, erasedAt: { type: 'string', format: 'date-time' } },
+              required: ['erased', 'erasedAt'],
+            },
+            'The account is erased.',
+          ),
+          ...errs({
+            400: 'STEP_UP_UNAVAILABLE: a browser caller whose account has no password and no MFA has nothing to confirm with.',
+            401:
+              'STEP_UP_REQUIRED: a browser caller sent no valid `password` or `code`; or the user token is ' +
+              'missing, invalid or already ended.',
+            403:
+              'API_KEY_SCOPE_INSUFFICIENT: a secret key without `auth:write`; or ' +
+              'IMPERSONATION_ACTION_FORBIDDEN: the token is an operator impersonation session; or ' +
+              'ACCOUNT_SELF_DELETION_DISABLED: the Application sets `authConfig.accountDeletion` to `off`, ' +
+              'or to `server_only` and this is a publishable key.',
+            410: 'END_USER_ERASED: the account was already erased.',
+            409:
+              'ACCOUNT_HAS_ACTIVE_SUBSCRIPTION: a subscription is still billing through a payment provider. ' +
+              'Cancel it first.',
+          }),
+        },
+      },
+      // `password`/`code` are optional, so a secret-key caller may send no body.
+      preValidation: async (req) => {
+        if (req.body === undefined || req.body === null) req.body = {};
+      },
+    },
+    async (req) => {
+      const endUserId = req.endUser!.id;
+      const applicationId = req.application!.id;
+      const { accountDeletion } = AuthConfigSchema.parse(req.application!.authConfig);
+      if (accountDeletion === 'off' || (accountDeletion === 'server_only' && req.authKind !== 'secret')) {
+        throw new RekeyError({
+          statusCode: 403,
+          code: 'ACCOUNT_SELF_DELETION_DISABLED',
+          message:
+            accountDeletion === 'off'
+              ? 'This Application does not let accounts be deleted this way.'
+              : 'This Application only lets its own server delete accounts.',
+          fix:
+            accountDeletion === 'off'
+              ? "Ask the application's support to erase the account."
+              : 'Delete the account from your backend with a secret key, or change Account deletion in the panel (Application, Auth).',
+        });
+      }
+      if (req.authKind === 'publishable') {
+        const proof = req.body as { password?: unknown; code?: unknown };
+        await assertStepUp({
+          endUserId,
+          action: 'delete your account',
+          proof: {
+            ...(typeof proof.password === 'string' && { password: proof.password }),
+            ...(typeof proof.code === 'string' && { code: proof.code }),
+          },
+          verifyMfaCode: (a) => mfaService.check(a),
+        });
+      }
+      const billing = await prisma.subscription.count({
+        where: {
+          applicationId,
+          endUserId,
+          status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+          provider: { not: null },
+          providerSubId: { not: null },
+          cancelAt: null,
+        },
+      });
+      if (billing > 0) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'ACCOUNT_HAS_ACTIVE_SUBSCRIPTION',
+          message: 'This account has a subscription that is still billing, so it cannot be deleted yet.',
+          fix: 'Cancel the subscription first (POST /api/v1/billing/subscription/cancel), then delete the account.',
+        });
+      }
+      const result = await eraseEndUser({ applicationId, endUserId, actor: { type: 'end_user', id: endUserId } });
+      void recordSecurityEvent({
+        type: 'end_user.erased',
+        actorType: 'end_user',
+        actorId: endUserId,
+        tenantId: req.application!.tenantId,
+        applicationId,
+        ...requestContext(req),
+        metadata: { endUserId, erased: result.erased, counts: result.counts, selfService: true },
+      });
+      return { success: true, data: { erased: true, erasedAt: result.erasedAt } };
     },
   );
 }

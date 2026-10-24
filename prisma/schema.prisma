@@ -244,10 +244,27 @@ model TenantInvitation {
 
   tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   acceptedBy TenantUser? @relation("acceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+  appGrants  TenantInvitationGrant[]
 
   @@index([tenantId])
   @@index([expiresAt])
   @@map("tenant_invitations")
+}
+
+// The ApplicationGrant rows a MEMBER invitation creates when it is accepted or
+// used to sign up. A row per app, so deleting the app drops it from the invite.
+model TenantInvitationGrant {
+  id            String               @id @default(cuid())
+  invitationId  String               @map("invitation_id")
+  applicationId String               @map("application_id")
+  role          ApplicationGrantRole
+
+  invitation  TenantInvitation @relation(fields: [invitationId], references: [id], onDelete: Cascade)
+  application Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([invitationId, applicationId])
+  @@index([applicationId])
+  @@map("tenant_invitation_grants")
 }
 
 // Deploy-time operator-registration control (OPERATOR_SIGNUP_MODE='invite').
@@ -720,6 +737,7 @@ model Application {
   emailLogs           EmailLog[]
   emailEventSettings  EmailEventSetting[]
   emailSuppressions   EmailSuppression[]
+  emailTopicOptOuts   EmailTopicOptOut[]
   customEmailTemplates        CustomEmailTemplate[]
   customEmailTemplateVersions CustomEmailTemplateVersion[]
   contactLists        ContactList[]
@@ -734,6 +752,7 @@ model Application {
   oauthAuthCodes      OAuthAuthCode[]
   dunningCases        DunningCase[]
   applicationGrants   ApplicationGrant[]
+  invitationGrants    TenantInvitationGrant[]
   trialRedemptions    TrialRedemption[]
   freeTierClaims      FreeTierClaim[]
   orgFreeTierClaims   OrganizationFreeTierClaim[]
@@ -797,6 +816,11 @@ model CustomEmailTemplate {
   name           String
   /** critical | notification. Only notification mail carries List-Unsubscribe. */
   category       String
+  /**
+   * What a recipient unsubscribes from when they leave this notification mail.
+   * Null means the template key. Copied onto each version at publish.
+   */
+  topic          String?
   fromName       String?   @map("from_name")
   subject        String
   designJson     Json?     @map("design_json")
@@ -832,6 +856,8 @@ model CustomEmailTemplateVersion {
   applicationId  String   @map("application_id")
   version        Int
   category       String
+  /** The template's topic at publish. Null on versions published before topics existed: the key. */
+  topic          String?
   fromName       String?  @map("from_name")
   subject        String
   bodyHtml       String   @map("body_html")
@@ -918,6 +944,25 @@ model EmailSuppression {
   @@unique([applicationId, address])
   @@index([applicationId, createdAt])
   @@map("email_suppressions")
+}
+
+/**
+ * One recipient left one topic of notification mail, through a one-click
+ * unsubscribe or the email-preferences API. Narrower than EmailSuppression,
+ * which stops a whole category or every email. Read through `sendableTo`.
+ */
+model EmailTopicOptOut {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  /** Lowercased, matching EmailSuppression. */
+  address       String
+  topic         String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, address, topic])
+  @@map("email_topic_opt_outs")
 }
 
 // ============================================================================
@@ -1203,7 +1248,7 @@ model EmailLog {
   eventKey      String?  @map("event_key")
   /** Transport used: byo_resend | default_resend | byo_smtp | none. */
   via           String
-  /** Outcome: sent | error | no_transport | suppressed | pending (a custom send in flight) | unknown (pending past its cutoff). */
+  /** Outcome: sent | error | no_transport | suppressed | pending (a custom send in flight) | unknown (pending past its cutoff) | scheduled | canceled. */
   status        String
   /** Provider message id when status=sent (nullable — some providers omit). */
   messageId     String?  @map("message_id")
@@ -1219,6 +1264,11 @@ model EmailLog {
   idempotencyFingerprint String? @map("idempotency_fingerprint")
   customTemplateKey      String? @map("custom_template_key")
   customTemplateVersion  Int?    @map("custom_template_version")
+  /** When a scheduled custom send is due. Null for a send that went at once. */
+  sendAt                 DateTime? @map("send_at")
+  /** What a scheduled send was asked to send: `to` and `variables`. Cleared once it fires or is canceled. */
+  scheduledRequest       Json?   @map("scheduled_request")
+  /** For a scheduled row, the moment it was scheduled until it fires, then the moment it fired. */
   createdAt     DateTime @default(now()) @map("created_at")
 
   application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
@@ -1229,6 +1279,8 @@ model EmailLog {
   @@index([applicationId, createdAt])
   @@index([tenantId, createdAt])
   @@index([status])
+  // The scheduled-send poller: due rows, oldest first.
+  @@index([status, sendAt])
   // Erasure scrubs every row sent to one person's address inside its
   // transaction; without this that is a scan of the Application's whole log.
   @@index([applicationId, toAddress])
@@ -2752,6 +2804,10 @@ model Subscription {
   trialWillEndNotifiedFor DateTime? @map("trial_will_end_notified_for")
   cancelAt         DateTime?       @map("cancel_at")
   canceledAt       DateTime?       @map("canceled_at")
+  /** Why the subscriber cancelled, when they said: one of CANCEL_REASONS. */
+  cancelReason     String?         @map("cancel_reason")
+  /** The subscriber's own words. Nulled by erasure. */
+  cancelFeedback   String?         @map("cancel_feedback")
   // Provider's id for this subscription (sub_..., I-...., etc.). Scoped by
   // applicationId, NOT globally unique — see @@unique below.
   providerSubId String?            @map("provider_sub_id")

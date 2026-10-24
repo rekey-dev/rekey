@@ -28,6 +28,8 @@ import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import {
   BillingConfigSchema,
+  CANCEL_FEEDBACK_MAX,
+  CANCEL_REASONS,
   type CheckoutFellBackWarning,
   type CheckoutReadinessCheck,
   type CheckoutReturnUrlWarning,
@@ -265,6 +267,12 @@ const CancelBody = z
     atPeriodEnd: z.boolean().optional(),
     organizationId: z.string().min(1).optional(),
     subscriptionId: z.string().min(1).max(64).optional(),
+    reason: z.enum(CANCEL_REASONS).optional(),
+    feedback: z.string().trim().min(1).max(CANCEL_FEEDBACK_MAX).optional(),
+  })
+  .refine((b) => b.feedback === undefined || b.reason !== undefined, {
+    message: 'Send `reason` with `feedback`; use `other` when none fits.',
+    path: ['feedback'],
   })
   .default({});
 
@@ -610,8 +618,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'what a customer used to be on and when it ended, instead of showing a former ' +
           'subscriber the same empty state as someone who never subscribed. The flag can only ' +
           'turn a null into a row: when a live subscription exists it is still the one ' +
-          'returned. A caller holding several live subscriptions gets one: a paid plan before ' +
-          'the free tier, then the most recently created (ties broken by id). ' +
+          'returned. A caller holding several live subscriptions gets one: a recurring paid plan, ' +
+          'then a one-time purchase (credit pack or perpetual licence), then the free tier, the ' +
+          'most recently created within each (ties broken by id). ' +
           "`GET /billing/subscriptions` lists them all. The response never carries the row's " +
           '`metadata`. Requires the user JWT in X-Rekey-User-Token.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
@@ -671,8 +680,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'Every ACTIVE, TRIALING and PAST_DUE subscription of the calling end-user, or of ' +
           '`?organizationId=` (member-only) on an org-billed app. A buyer can hold several at ' +
           'once, for instance two plans bought separately, and `GET /billing/subscription` ' +
-          'returns only one of them. Items are in the order that route ranks them: paid plans ' +
-          'before the free tier, newest first within each, so `items[0]` is what it returns. ' +
+          'returns only one of them. Items are in the order that route ranks them: recurring ' +
+          'paid plans, then one-time purchases, then the free tier, newest first within each, ' +
+          'so `items[0]` is what it returns. ' +
           'At most 100 rows, the newest; a subject holds at most one row per plan. ' +
           'Read this before offering a checkout, so a buyer is never offered a plan they already ' +
           'hold. Requires the user JWT in X-Rekey-User-Token.',
@@ -818,6 +828,18 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 'Cancel this subscription of the billing subject instead of the current one. An ' +
                 'id belonging to anyone else answers 404.',
             },
+            reason: {
+              type: 'string',
+              enum: [...CANCEL_REASONS],
+              description:
+                'Why they are leaving, when they said. Stored on the subscription, shown in the panel, ' +
+                'and carried as `data.subscription.cancellation` on its webhooks.',
+            },
+            feedback: {
+              type: 'string',
+              maxLength: CANCEL_FEEDBACK_MAX,
+              description: "Their own words, sent with a `reason` (`other` when none fits). Erasing the end user deletes it.",
+            },
           },
         },
         response: {
@@ -840,7 +862,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               'IDEMPOTENCY_KEY_IN_FLIGHT: a request with this Idempotency-Key is still being ' +
               'processed; or IDEMPOTENCY_KEY_REUSED: the key was already used for a different ' +
               'method, path, or body; or SUBSCRIPTION_CHECKOUT_UNFINISHED: `subscriptionId` ' +
-              'names a checkout that was never completed.',
+              'names a checkout that was never completed; or SUBSCRIPTION_NOT_CANCELABLE: the ' +
+              'subscription is a one-time purchase (credit pack or perpetual licence), which has ' +
+              'no renewal to cancel.',
           }),
         },
       },
@@ -865,6 +889,8 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           ...(body.atPeriodEnd !== undefined && { atPeriodEnd: body.atPeriodEnd }),
           ...(body.organizationId && { organizationId: body.organizationId }),
           ...(body.subscriptionId && { subscriptionId: body.subscriptionId }),
+          ...(body.reason && { reason: body.reason }),
+          ...(body.feedback && { feedback: body.feedback }),
         },
       );
       return { success: true, data: toSelfSubscription(subscription) };

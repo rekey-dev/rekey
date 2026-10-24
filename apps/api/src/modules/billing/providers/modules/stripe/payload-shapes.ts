@@ -114,6 +114,20 @@ export function invoicePriceId(invoice: Stripe.Invoice): string | null {
 }
 
 /**
+ * The latest period end an invoice's lines bill for, or null when they name
+ * none. Taken as the max because a one-off item can sit on a renewal invoice
+ * with a period of its own that ends earlier.
+ */
+export function invoicePeriodEnd(invoice: Stripe.Invoice): Date | null {
+  const lines = (invoice.lines as { data?: unknown } | null | undefined)?.data;
+  if (!Array.isArray(lines)) return null;
+  const ends = (lines as Array<{ period?: { end?: unknown } | null } | null>)
+    .map((line) => line?.period?.end)
+    .filter((end): end is number => typeof end === 'number');
+  return ends.length > 0 ? new Date(Math.max(...ends) * 1000) : null;
+}
+
+/**
  * Which id a refunded charge's Payment row was recorded under, as far as the
  * charge alone can say.
  *

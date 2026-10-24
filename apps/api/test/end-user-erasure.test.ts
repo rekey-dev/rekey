@@ -9,6 +9,8 @@
  *   - financial rows are RETAINED but PII-scrubbed (metadata/description);
  *   - an erased user can't sign in / magic-link / refresh / use a live access
  *     token (all surface END_USER_ERASED, HTTP 410);
+ *   - organization invitations to the address, and their webhook payloads,
+ *     lose the address;
  *   - a `user.erased` outbound webhook is emitted;
  *   - an `end_user.erased` security event is recorded;
  *   - OWNER/ADMIN gate (MEMBER → 403);
@@ -656,6 +658,78 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     });
     expect(exported.statusCode).toBe(200);
     expect((JSON.parse(exported.body) as { endUser: { email: string } }).endUser.email).toBe(neighbourEmail);
+  });
+
+  it('erases the address from organization invitations and their webhook deliveries', async () => {
+    const b = await bootstrap('invites');
+    const email = 'invitee@example.com';
+    const { euid } = await signUpUser(b, email);
+    const org = await prisma.organization.create({
+      data: { applicationId: b.applicationId, name: 'Org', slug: 'invites-org' },
+    });
+    const invite = (tag: string, address: string, extra: Partial<Prisma.OrganizationInvitationUncheckedCreateInput> = {}) =>
+      prisma.organizationInvitation.create({
+        data: {
+          organizationId: org.id,
+          email: address,
+          role: 'MEMBER',
+          tokenHash: `hash-${tag}`,
+          expiresAt: new Date(Date.now() + 86_400_000),
+          invitedById: 'inviter',
+          ...extra,
+        },
+      });
+    const pending = await invite('pending', email);
+    const accepted = await invite('accepted', email, { acceptedAt: new Date(), acceptedById: euid });
+    const lookalike = await invite('lookalike', `x${email}`);
+
+    const endpoint = await prisma.webhookEndpoint.create({
+      data: {
+        applicationId: b.applicationId,
+        url: 'https://example.com/hook',
+        secret: 'whsec_test_invites',
+        events: ['organization.invitation.created'],
+        enabled: true,
+      },
+    });
+    const delivery = (eventId: string, address: string) =>
+      prisma.webhookDelivery.create({
+        data: {
+          endpointId: endpoint.id,
+          applicationId: b.applicationId,
+          eventId,
+          eventType: 'organization.invitation.created',
+          status: 'SUCCEEDED',
+          attempts: 1,
+          payload: {
+            eventId,
+            type: 'organization.invitation.created',
+            data: { invitation: { id: eventId, organizationId: org.id, email: address, role: 'MEMBER' } },
+          },
+        },
+      });
+    const subjectDelivery = await delivery('inv-subject', email);
+    const lookalikeDelivery = await delivery('inv-lookalike', `x${email}`);
+
+    const res = await erase(b, euid);
+    expect(res.statusCode).toBe(200);
+
+    expect(await prisma.organizationInvitation.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect((await prisma.organizationInvitation.findUniqueOrThrow({ where: { id: accepted.id } })).email).toBe(
+      tombstoneEmail(euid),
+    );
+    expect((await prisma.organizationInvitation.findUniqueOrThrow({ where: { id: lookalike.id } })).email).toBe(
+      `x${email}`,
+    );
+    const payloadEmail = async (id: string) =>
+      ((await prisma.webhookDelivery.findUniqueOrThrow({ where: { id } })).payload as {
+        data: { invitation: { email: string } };
+      }).data.invitation.email;
+    expect(await payloadEmail(subjectDelivery.id)).toBe(tombstoneEmail(euid));
+    expect(await payloadEmail(lookalikeDelivery.id)).toBe(`x${email}`);
+
+    const [erased] = await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.erased' });
+    expect((erased!.metadata as { counts: Record<string, number> }).counts.organizationInvitationsErased).toBe(2);
   });
 
   it('cross-tenant and cross-application erasure 404 without leaking existence', async () => {

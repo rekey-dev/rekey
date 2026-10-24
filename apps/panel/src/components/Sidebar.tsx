@@ -1,8 +1,9 @@
 'use client';
 
 /**
- * Global sidebar for the operator panel, workspace switcher up top, global
- * nav links, then the user account + sign-out at the bottom. Per-app
+ * Global sidebar for the operator panel: brand and version, workspace
+ * switcher and search up top, global nav links, then workspace settings and
+ * the account menu at the bottom. Per-app
  * navigation is rendered as a *secondary* sidebar inside the app layout
  * (apps/[id]/layout.tsx), not here, so the global sidebar stays predictable
  * across every page.
@@ -17,6 +18,13 @@ import Link from '@/components/Link';
 import { LinkPending } from '@/components/LinkPending';
 import { usePathname } from 'next/navigation';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './DropdownMenu';
 import { ThemeToggle } from './ThemeToggle';
 import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
@@ -74,12 +82,6 @@ const ICONS = {
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   ),
-  workspace: (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-      <polyline points="9 22 9 12 15 12 15 22" />
-    </svg>
-  ),
   security: (
     <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
@@ -119,8 +121,26 @@ const ICONS = {
     </svg>
   ),
   discord: (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
       <path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.028C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .079.009c.12.1.246.198.373.292a.077.077 0 0 1-.007.128 12.3 12.3 0 0 1-1.873.891.077.077 0 0 0-.041.107c.36.698.772 1.363 1.225 1.993a.076.076 0 0 0 .084.029 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
+    </svg>
+  ),
+  settings: (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ),
+  mcp: (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  ),
+  chevrons: (
+    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m7 15 5 5 5-5" />
+      <path d="m7 9 5-5 5 5" />
     </svg>
   ),
   search: (
@@ -145,7 +165,7 @@ function SearchButton(): React.JSX.Element {
     <button
       type="button"
       onClick={openCommandPalette}
-      className="mt-2 flex w-full items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+      className="flex w-full items-center gap-2 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-xs text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
     >
       <span className="text-[var(--color-faint-fg)]">{ICONS.search}</span>
       Search…
@@ -157,42 +177,127 @@ function SearchButton(): React.JSX.Element {
 }
 
 interface NavSection {
-  heading: string;
+  /** Omitted for the first group, which needs no label. */
+  heading?: string;
   items: NavItem[];
 }
 
 const NAV: NavSection[] = [
   {
-    heading: 'Workspace',
     items: [
       { href: '/applications', label: 'Applications', icon: ICONS.apps },
       { href: '/team', label: 'Team', icon: ICONS.team },
-      { href: '/workspace', label: 'Workspace settings', icon: ICONS.workspace },
     ],
   },
   {
-    // Everything log/history-shaped, grouped together.
     heading: 'Logs',
     items: [
       { href: '/audit-log', label: 'Audit log', icon: ICONS.audit, minRole: 'ADMIN' },
       { href: '/email-logs', label: 'Email delivery', icon: ICONS.mail, minRole: 'ADMIN' },
-      { href: '/account/activity', label: 'My requests', icon: ICONS.activity },
     ],
   },
   {
-    heading: 'Account',
+    heading: 'Developers',
     items: [
-      { href: '/account/security', label: 'Account security', icon: ICONS.security },
       { href: '/account/api-tokens', label: 'API tokens', icon: ICONS.apiKey },
       {
         href: '/account/mcp',
-        label: 'Operator MCP',
-        icon: ICONS.apiKey,
-        title: 'MCP (Model Context Protocol): let AI agents read your workspace.',
+        label: 'AI assistants (MCP)',
+        icon: ICONS.mcp,
+        title: 'Connect an AI assistant such as Claude or Cursor to your workspace.',
       },
+      { href: '/account/activity', label: 'My requests', icon: ICONS.activity },
     ],
   },
 ];
+
+const SETTINGS: NavItem = { href: '/workspace', label: 'Workspace settings', icon: ICONS.settings };
+
+const FOCUS_RING =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
+
+function NavLink({ item, active }: { item: NavItem; active: boolean }): React.JSX.Element {
+  return (
+    <Link
+      href={item.href}
+      title={item.title}
+      aria-current={active ? 'page' : undefined}
+      className={
+        `flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors ${FOCUS_RING} ` +
+        (active
+          ? 'bg-[var(--color-surface-muted)] font-medium text-[var(--color-primary)]'
+          : 'text-[var(--color-muted-fg)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_60%,transparent)] hover:text-[var(--color-fg)]')
+      }
+    >
+      <span className={active ? 'text-[var(--color-primary)]' : 'text-[var(--color-faint-fg)]'}>{item.icon}</span>
+      <LinkPending>{item.label}</LinkPending>
+    </Link>
+  );
+}
+
+/**
+ * The signed-in operator at the foot of the sidebar, opening upward into
+ * their own settings, the theme and sign-out.
+ */
+function AccountMenu({
+  userEmail,
+  signOutAction,
+  active,
+}: {
+  userEmail: string;
+  signOutAction: () => Promise<void>;
+  /** On a page this menu leads to, so the sidebar still shows where you are. */
+  active: boolean;
+}): React.JSX.Element {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger>
+        <button
+          type="button"
+          title={userEmail}
+          className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-[var(--color-surface-muted)] ${active ? 'bg-[var(--color-surface-muted)]' : ''} ${FOCUS_RING}`}
+        >
+          <span
+            aria-hidden="true"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[var(--color-surface-muted)] text-xs font-semibold text-[var(--color-fg)]"
+          >
+            {userEmail.charAt(0).toUpperCase()}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-muted-fg)]">{userEmail}</span>
+          <span className="text-[var(--color-faint-fg)]">{ICONS.chevrons}</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent sideOffset={0} className="bottom-full mb-1 w-full">
+        <p className="truncate px-2 py-1.5 text-sm font-medium text-[var(--color-fg)]" title={userEmail}>
+          {userEmail}
+        </p>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem href="/account/security">
+          <span className="flex items-center gap-2">
+            <span className="text-[var(--color-faint-fg)]">{ICONS.security}</span>
+            Account security
+          </span>
+        </DropdownMenuItem>
+        <div className="flex items-center justify-between px-2 py-1">
+          <span className="text-sm text-[var(--color-fg)]">Theme</span>
+          <ThemeToggle />
+        </div>
+        <DropdownMenuSeparator />
+        {/* A plain form, not a DropdownMenuItem: closing the menu on click
+            would unmount the button before the browser submits its form. */}
+        <ActionForm action={signOutAction}>
+          <SubmitButton
+            pendingLabel="Signing out…"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
+          >
+            <span className="text-[var(--color-faint-fg)]">{ICONS.signout}</span>
+            Sign out
+          </SubmitButton>
+        </ActionForm>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 export function Sidebar({
   memberships,
@@ -213,7 +318,7 @@ export function Sidebar({
   /** Omitted when this deployment does not allow additional workspaces. */
   createWorkspaceAction?: ((formData: FormData) => Promise<void>) | undefined;
   signOutAction: () => Promise<void>;
-  /** The muted release line, rendered by the server (`BuildVersion`). */
+  /** The version badge beside the logo, rendered by the server (`BuildVersion`). */
   buildVersion?: React.ReactNode;
   /** Set on Rekey Cloud only. Unset hides the "Get help on Discord" row. */
   discordUrl?: string | undefined;
@@ -225,97 +330,60 @@ export function Sidebar({
   }
 
   return (
-    <aside className="w-56 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface)] flex flex-col h-screen sticky top-0">
-      <div className="px-4 pt-4 pb-3">
-        <Link
-          href="/applications"
-          className="mb-3 inline-flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo-mark.png" alt="" className="h-6 w-auto" />
-          <span className="text-sm font-semibold text-[var(--color-fg)]">Rekey</span>
-        </Link>
+    <aside className="w-60 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface)] flex flex-col h-dvh sticky top-0">
+      <div className="px-3 pt-4 pb-2 space-y-3">
+        <div className="flex items-center gap-2 px-2">
+          <Link href="/applications" className={`inline-flex items-center gap-2 rounded-md ${FOCUS_RING}`}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo-mark.png" alt="" className="h-6 w-6" />
+            <span className="text-[15px] font-semibold tracking-tight text-[var(--color-fg)]">Rekey</span>
+          </Link>
+          {buildVersion}
+        </div>
         <WorkspaceSwitcher
           memberships={memberships}
           activeTenantId={activeTenantId}
           switchAction={switchAction}
           {...(createWorkspaceAction && { createAction: createWorkspaceAction })}
         />
-        <p className="mt-2 text-[10px] font-medium uppercase tracking-wider text-[var(--color-faint-fg)]">
-          {activeRole}
-        </p>
         <SearchButton />
       </div>
 
-      <nav className="flex-1 space-y-2 overflow-y-auto px-2 py-2">
+      <nav aria-label="Main" className="flex-1 space-y-4 overflow-y-auto px-3 py-2">
         {NAV.filter((section) =>
           // A heading with nothing under it reads as a broken nav rather than a
-          // permission boundary. Today no section empties out for any role, but
-          // gating one more item would silently produce one.
+          // permission boundary.
           section.items.some((item) => meetsRole(activeRole, item.minRole)),
         ).map((section) => (
-          <div key={section.heading} className="space-y-0.5">
-            <p className="px-2 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--color-faint-fg)]">
-              {section.heading}
-            </p>
+          <div key={section.heading ?? 'main'} className="space-y-0.5">
+            {section.heading && (
+              <p className="px-2 pb-1 text-xs font-medium text-[var(--color-muted-fg)]">{section.heading}</p>
+            )}
             {section.items
               .filter((item) => meetsRole(activeRole, item.minRole))
-              .map((item) => {
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  title={item.title}
-                  aria-current={active ? 'page' : undefined}
-                  className={
-                    'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ' +
-                    (active
-                      ? 'bg-[var(--color-surface-muted)] font-medium text-[var(--color-fg)]'
-                      : 'text-[var(--color-muted-fg)] hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)]')
-                  }
-                >
-                  <span className={active ? 'text-[var(--color-primary)]' : 'text-[var(--color-faint-fg)]'}>
-                    {item.icon}
-                  </span>
-                  <LinkPending>{item.label}</LinkPending>
-                </Link>
-              );
-            })}
+              .map((item) => (
+                <NavLink key={item.href} item={item} active={isActive(item.href)} />
+              ))}
           </div>
         ))}
       </nav>
 
-      <div className="border-t border-[var(--color-border)] px-3 py-3 min-w-0 space-y-2">
+      <div className="border-t border-[var(--color-border)] px-3 py-2 min-w-0 space-y-1">
+        <NavLink item={SETTINGS} active={isActive(SETTINGS.href)} />
         {discordUrl && (
           <a
             href={discordUrl}
             target="_blank"
             rel="noopener noreferrer"
             onClick={() => track(AnalyticsEvent.DiscordClicked)}
-            className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-2 hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+            title="Priority support on Discord for paying customers"
+            className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-[var(--color-muted-fg)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_60%,transparent)] hover:text-[var(--color-fg)] ${FOCUS_RING}`}
           >
-            <span className="text-[var(--color-primary)]">{ICONS.discord}</span>
-            <span className="min-w-0 leading-tight">
-              <span className="block text-xs font-medium text-[var(--color-fg)]">Get help on Discord</span>
-              <span className="block text-[11px] text-[var(--color-muted-fg)]">Priority support for paying customers</span>
-            </span>
+            <span className="text-[var(--color-faint-fg)]">{ICONS.discord}</span>
+            Get help on Discord
           </a>
         )}
-        <div title={userEmail} className="text-xs text-[var(--color-muted-fg)] truncate">{userEmail}</div>
-        <div className="flex items-center gap-2">
-          <ActionForm action={signOutAction}>
-            <SubmitButton
-              pendingLabel="Signing out…"
-              className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
-            >
-              {ICONS.signout}
-              Sign out
-            </SubmitButton>
-          </ActionForm>
-          <ThemeToggle />
-        </div>
-        {buildVersion}
+        <AccountMenu userEmail={userEmail} signOutAction={signOutAction} active={isActive('/account/security')} />
       </div>
     </aside>
   );

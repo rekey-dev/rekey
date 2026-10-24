@@ -16,7 +16,12 @@ import { prisma } from '../../lib/prisma.js';
  */
 export type SendKind = 'auth' | 'critical' | 'notification';
 
-export type BlockReason = 'application_disabled' | 'event_disabled' | 'suppressed_address' | 'unsubscribed';
+export type BlockReason =
+  | 'application_disabled'
+  | 'event_disabled'
+  | 'suppressed_address'
+  | 'unsubscribed'
+  | 'topic_unsubscribed';
 
 export interface Blocked {
   reason: BlockReason;
@@ -31,6 +36,7 @@ export const BLOCK_TEXT: Record<BlockReason, string> = {
   event_disabled: 'This email event is switched off for this Application.',
   suppressed_address: 'This address is on the Application suppression list.',
   unsubscribed: 'This address unsubscribed from notification emails.',
+  topic_unsubscribed: 'This address unsubscribed from this topic of notification emails.',
 };
 
 /** True when a suppression row with this category stops mail of this kind. */
@@ -40,6 +46,9 @@ export function suppressionCovers(category: string | null, kind: SendKind): bool
 
 /**
  * Null when the send may go out, otherwise why not. Broadest gate first.
+ *
+ * `topic` is the notification topic of the mail; a recipient who left that
+ * topic is blocked from it alone. Other kinds of mail never read topics.
  *
  * `testSend` skips the master switch and the per-event switch, because proving
  * a transport works before switching mail back on is what a test send is for.
@@ -56,7 +65,7 @@ export async function sendableTo(
   application: Application,
   to: string,
   kind: SendKind,
-  opts: { eventKey?: string; testSend?: boolean } = {},
+  opts: { eventKey?: string; testSend?: boolean; topic?: string } = {},
 ): Promise<Blocked | null> {
   if (!opts.testSend) {
     if (application.emailsEnabled === false) {
@@ -73,11 +82,21 @@ export async function sendableTo(
       }
     }
   }
+  const address = to.trim().toLowerCase();
   const row = await prisma.emailSuppression.findUnique({
-    where: { applicationId_address: { applicationId: application.id, address: to.trim().toLowerCase() } },
+    where: { applicationId_address: { applicationId: application.id, address } },
     select: { reason: true, category: true },
   });
-  if (row === null || !suppressionCovers(row.category, kind)) return null;
-  const reason: BlockReason = row.category === null ? 'suppressed_address' : 'unsubscribed';
-  return { reason, text: BLOCK_TEXT[reason], suppressionReason: row.reason };
+  if (row !== null && suppressionCovers(row.category, kind)) {
+    const reason: BlockReason = row.category === null ? 'suppressed_address' : 'unsubscribed';
+    return { reason, text: BLOCK_TEXT[reason], suppressionReason: row.reason };
+  }
+  if (kind !== 'notification' || opts.topic === undefined) return null;
+  const optOut = await prisma.emailTopicOptOut.findUnique({
+    where: { applicationId_address_topic: { applicationId: application.id, address, topic: opts.topic } },
+    select: { id: true },
+  });
+  return optOut === null
+    ? null
+    : { reason: 'topic_unsubscribed', text: BLOCK_TEXT.topic_unsubscribed, suppressionReason: 'unsubscribe' };
 }

@@ -108,6 +108,8 @@ const DEFAULT_AUTH_CONFIG: AuthConfig = {
   // Devices are recorded when a client identifies itself and never demanded;
   // requiring a binding is a per-app decision for native clients only.
   deviceBinding: 'optional',
+  deviceRelease: 'self_service',
+  accountDeletion: 'self_service',
 };
 
 function defaultBillingConfig(provider: BillingProvider): BillingConfig {
@@ -429,6 +431,9 @@ export const applicationsService = {
        * tokens keep verifying (the API accepts both). Default HS256.
        */
       tokenAlg?: 'HS256' | 'RS256' | undefined;
+      deviceBinding?: 'optional' | 'required' | undefined;
+      deviceRelease?: 'self_service' | 'server_only' | undefined;
+      accountDeletion?: 'self_service' | 'server_only' | 'off' | undefined;
     };
     /**
      * The operator making the change, or null when no operator is. `appUrl`

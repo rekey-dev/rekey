@@ -236,7 +236,12 @@ async function mirrorVerifiedPayment(
   const activates = ACTIVATED_BY_PAYMENT.has(sub.status);
   const subData = {
     ...(activates && { status: 'ACTIVE' as const }),
-    ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+    // Forward only: an older invoice delivered late must not pull the period
+    // back to a date already past and expire a paying subscriber.
+    ...(ev.currentPeriodEnd !== undefined &&
+      (sub.currentPeriodEnd === null || ev.currentPeriodEnd > sub.currentPeriodEnd) && {
+        currentPeriodEnd: ev.currentPeriodEnd,
+      }),
     // A PENDING row going live on its payment is a checkout completing, and a
     // resubscribe reuses the cancelled row, so the old dates go. Not on
     // PAST_DUE: that is dunning recovery, where a cancellation the buyer

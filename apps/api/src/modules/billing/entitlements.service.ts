@@ -625,6 +625,14 @@ export const entitlementsService = {
       })
       .catch(() => null);
 
+    const creditGrantDescription =
+      plan.kind === 'CREDIT'
+        ? 'Credit pack purchase'
+        : oneTime
+          ? 'Plan purchase credits'
+          : period === 'initial'
+            ? 'Subscription credits'
+            : 'Subscription credits renewal';
     for (const e of entitlements) {
       if (e.kind === 'CREDIT' && e.quantity && e.quantity > 0) {
         if (legacyCredit !== null && legacyCredit.delta === e.quantity) {
@@ -637,6 +645,7 @@ export const entitlementsService = {
           amount: e.quantity,
           // Idempotency anchor: one grant per (subscription, entitlement, period).
           paymentRef: `ent:${sub.id}:CREDIT:${e.key}:${period}`,
+          description: creditGrantDescription,
           metadata: { source: 'entitlement', planId: plan.id, subscriptionId: sub.id },
           ...(args.paymentId !== undefined && { paymentId: args.paymentId }),
           ...(sub.planPriceId !== null && { planPriceId: sub.planPriceId }),

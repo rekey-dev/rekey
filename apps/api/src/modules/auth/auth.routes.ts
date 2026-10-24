@@ -147,7 +147,8 @@ const DEVICE_BODY_SCHEMA = {
 
 const DEVICE_ERRORS_403 =
   ' Or DEVICE_LIMIT_REACHED: the account is at its `max_devices` entitlement; `details.devices` ' +
-  'lists the active devices to release; or DEVICE_BLOCKED: an operator blocked this device.';
+  'lists the active devices to release, and `details.selfRelease` is false when only an operator or a ' +
+  'secret key may release one; or DEVICE_BLOCKED: an operator blocked this device.';
 const DEVICE_ERRORS_400 =
   ' Or DEVICE_FINGERPRINT_REQUIRED: the Application requires a `device` binding on sign-in.';
 

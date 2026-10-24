@@ -208,8 +208,18 @@ export const env = createEnv({
     // Public halves are served at GET /.well-known/jwks.json either way.
     JWT_RS256_PRIVATE_KEY: z.string().min(1).optional(),
 
-    // 32 bytes hex = 64 chars. Required in production for token-at-rest encryption.
-    ENCRYPTION_KEY: z.string().length(64).optional(),
+    // Required in production for token-at-rest encryption. Checked as hex, not
+    // just length: Node's hex decoder stops at the first non-hex character, so
+    // a 64-character password-style key would boot and then fail every
+    // encrypt with ERR_CRYPTO_INVALID_KEYLEN.
+    ENCRYPTION_KEY: z
+      .string()
+      .regex(
+        /^[0-9a-fA-F]{64}$/,
+        'ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes). ' +
+          'fix: generate one with `openssl rand -hex 32`.',
+      )
+      .optional(),
 
     API_URL: z.string().url().default('http://localhost:3030'),
 

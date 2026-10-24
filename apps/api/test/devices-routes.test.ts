@@ -21,6 +21,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
 import { operatorsConfirmTheirEmail } from './confirmed-accounts.js';
+import { setDefaultDeviceLimit } from './device-fixtures.js';
 
 operatorsConfirmTheirEmail();
 
@@ -162,6 +163,99 @@ describe('device management routes', () => {
     expect(foreign.json().error.code).toBe('DEVICE_NOT_FOUND');
     void userId;
     void stranger;
+  });
+
+  it('end-user: server_only refuses a browser release before the lookup; list, secret key and operator still work', async () => {
+    const userId = await makeEndUser('so@example.com');
+    const laptop = await signIn('so@example.com', 'fp-so-laptop-001', 'Laptop');
+    const desktop = await signIn('so@example.com', 'fp-so-desktop-01', 'Desktop');
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/auth-config`,
+      headers: auth(),
+      payload: { deviceRelease: 'server_only' },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json().data.authConfig.deviceRelease).toBe('server_only');
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/users/me/devices', headers: userHeaders(laptop) });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().data.items).toHaveLength(2);
+
+    for (const id of [desktop.deviceId, 'no-such-device']) {
+      const refused = await app.inject({ method: 'DELETE', url: `/api/v1/users/me/devices/${id}`, headers: userHeaders(laptop) });
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error.code).toBe('DEVICE_SELF_RELEASE_DISABLED');
+    }
+    const untouched = await prisma.device.findUniqueOrThrow({ where: { id: desktop.deviceId! } });
+    expect(untouched.status).toBe('ACTIVE');
+    const desktopRenewed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: publishable(),
+      payload: { refreshToken: desktop.refreshToken },
+    });
+    expect(desktopRenewed.statusCode).toBe(200);
+
+    // A secret key can already release any device through /devices, so the
+    // same call carrying the user token is not refused.
+    const viaSecret = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/users/me/devices/${desktop.deviceId}`,
+      headers: { ...secret(), 'x-rekey-user-token': laptop.accessToken },
+    });
+    expect(viaSecret.statusCode).toBe(200);
+    expect(viaSecret.json().data.device.status).toBe('RELEASED');
+
+    const viaOperator = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${appId}/end-users/${userId}/devices/${laptop.deviceId}/release`,
+      headers: auth(),
+    });
+    expect(viaOperator.statusCode).toBe(200);
+    expect(viaOperator.json().data.device.status).toBe('RELEASED');
+
+    const audit = await prisma.securityEvent.findFirst({
+      where: { applicationId: appId, type: 'app.auth_config_updated' },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(audit?.metadata).toMatchObject({ deviceRelease: 'server_only' });
+  });
+
+  it('device limit: details.selfRelease follows the setting so a client knows to point at support', async () => {
+    await setDefaultDeviceLimit(app, token, appId, 1);
+    await makeEndUser('cap@example.com');
+    await signIn('cap@example.com', 'fp-cap-first-001');
+    const overCap = (): Promise<{ statusCode: number; json: () => { error: { code: string; fix: string; details: { selfRelease: boolean } } } }> =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: publishable(),
+        payload: { email: 'cap@example.com', password: PASSWORD, device: { fingerprint: 'fp-cap-second-01' } },
+      });
+
+    const selfService = await overCap();
+    expect(selfService.json().error.code).toBe('DEVICE_LIMIT_REACHED');
+    expect(selfService.json().error.details.selfRelease).toBe(true);
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/auth-config`,
+      headers: auth(),
+      payload: { deviceRelease: 'server_only' },
+    });
+    const serverOnly = await overCap();
+    expect(serverOnly.statusCode).toBe(403);
+    expect(serverOnly.json().error.details.selfRelease).toBe(false);
+    expect(serverOnly.json().error.fix).not.toContain('DELETE /api/v1/users/me/devices');
+
+    const bad = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/auth-config`,
+      headers: auth(),
+      payload: { deviceRelease: 'operators' },
+    });
+    expect(bad.statusCode).toBe(400);
   });
 
   it('secret key: refuses the publishable key, lists with operator-grade fields, releases scoped by end-user', async () => {

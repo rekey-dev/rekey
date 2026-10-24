@@ -780,17 +780,9 @@ export const emailService = {
   // ---- Email logs (read-only; powers the panel's per-app + per-tenant views) ----
 
   /** Recent send-log rows for one Application. */
-  async listAppLogs(args: {
-    applicationId: string;
-    limit?: number;
-    offset?: number;
-    status?: EmailLogStatus;
-  }): Promise<EmailLogRow[]> {
+  async listAppLogs(args: AppLogFilter & { limit?: number; offset?: number }): Promise<EmailLogRow[]> {
     const rows = await prisma.emailLog.findMany({
-      where: {
-        applicationId: args.applicationId,
-        ...(args.status && { status: args.status }),
-      },
+      where: appLogWhere(args),
       orderBy: { createdAt: 'desc' },
       take: args.limit ?? 100,
       ...(args.offset !== undefined ? { skip: args.offset } : {}),
@@ -799,16 +791,14 @@ export const emailService = {
   },
 
   /** Total send-log rows matching `listAppLogs`, ignoring limit/offset. */
-  async countAppLogs(args: {
-    applicationId: string;
-    status?: EmailLogStatus;
-  }): Promise<number> {
-    return prisma.emailLog.count({
-      where: {
-        applicationId: args.applicationId,
-        ...(args.status && { status: args.status }),
-      },
-    });
+  async countAppLogs(args: AppLogFilter): Promise<number> {
+    return prisma.emailLog.count({ where: appLogWhere(args) });
+  },
+
+  /** One send-log row of this Application, by row id or by the idempotency key it was sent with. */
+  async findAppLog(applicationId: string, by: { id: string } | { idempotencyKey: string }): Promise<EmailLogRow | null> {
+    const row = await prisma.emailLog.findFirst({ where: { applicationId, ...by } });
+    return row === null ? null : shapeLog(row);
   },
 
   /**
@@ -861,7 +851,26 @@ export const emailService = {
   },
 };
 
-export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown';
+export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown' | 'scheduled' | 'canceled';
+
+export interface AppLogFilter {
+  applicationId: string;
+  status?: EmailLogStatus | undefined;
+  customTemplateKey?: string | undefined;
+  /** Exact, case-insensitive: log rows store the address lowercased. */
+  toAddress?: string | undefined;
+  since?: Date | undefined;
+}
+
+function appLogWhere(f: AppLogFilter): Prisma.EmailLogWhereInput {
+  return {
+    applicationId: f.applicationId,
+    ...(f.status && { status: f.status }),
+    ...(f.customTemplateKey !== undefined && { customTemplateKey: f.customTemplateKey }),
+    ...(f.toAddress !== undefined && { toAddress: f.toAddress.trim().toLowerCase() }),
+    ...(f.since !== undefined && { createdAt: { gte: f.since } }),
+  };
+}
 
 export interface EmailLogRow {
   id: string;
@@ -875,6 +884,7 @@ export interface EmailLogRow {
   error: string | null;
   customTemplateKey: string | null;
   customTemplateVersion: number | null;
+  sendAt: Date | null;
   createdAt: Date;
 }
 
@@ -890,6 +900,7 @@ function shapeLog(r: {
   error: string | null;
   customTemplateKey: string | null;
   customTemplateVersion: number | null;
+  sendAt: Date | null;
   createdAt: Date;
 }): EmailLogRow {
   return {
@@ -904,6 +915,7 @@ function shapeLog(r: {
     error: r.error,
     customTemplateKey: r.customTemplateKey,
     customTemplateVersion: r.customTemplateVersion,
+    sendAt: r.sendAt,
     createdAt: r.createdAt,
   };
 }

@@ -1,16 +1,23 @@
 /**
- * Invitation acceptance flow.
+ * Where an invitation link lands.
  *
- *   1. GET /preview unauth, show workspace name + role + expiry.
- *   2. If signed in: POST /accept directly + persist new session, hop to /applications.
- *   3. If not signed in: route to /login?inviteToken=… so the user can
- *      sign in then come back. (Sign-up here is possible too; deferred.)
+ *   1. GET /preview, unauthenticated: show the workspace, the role in plain
+ *      words, and who it was sent to.
+ *   2. Signed in: one button joins, and the new session hops into the workspace.
+ *   3. Signed out: the page offers the ways in this deployment has. Every one
+ *      of them carries the invitation, so a person with no account yet is
+ *      created straight into the workspace, even where registration is
+ *      invite-only:
+ *        - a provider button (`/login/oauth`) passes it as the invite key;
+ *        - "Create account and join" hands it to /sign-up;
+ *        - "Sign in" brings an existing operator back here to accept.
+ *      A deployment that signs operators in with its own accounts (the `rekey`
+ *      provider, "Continue with Rekey.dev" on Rekey Cloud) leads with that
+ *      button and offers no panel-only account, so nobody ends up with two.
  *
  * The token may also be a workspace-bound operator invite (`rp_opinv_…`, from
- * `rekey init --owner-email`). The API previews and accepts it on the same
- * routes. The one difference is a new account: sign-up itself redeems that
- * key, so "Create a new account" hands it to /sign-up instead of routing back
- * here, where a plain sign-up would have made a second workspace.
+ * `rekey init --owner-email`). The API previews, accepts and redeems it at
+ * sign-up exactly like an invitation.
  */
 
 import * as React from 'react';
@@ -21,16 +28,19 @@ import { cookies } from 'next/headers';
 import { publicGet, setSessionCookies, ACCESS_COOKIE, PanelApiError, api } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
-import { AuthCard } from '@/components/AuthCard';
-import { formatDateTime } from '@/lib/date';
+import { AuthCard, OrDivider } from '@/components/AuthCard';
+import { OAuthButton, PROVIDER_LABELS } from '@/components/OAuthButton';
+import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
+import { ROLE_SUMMARY, roleLabel, type WorkspaceRole } from '@/lib/workspace-roles';
+import { startOAuth } from '../login/oauth-start';
 
-export const metadata: Metadata = { title: 'Accept invitation · Rekey' };
+export const metadata: Metadata = { title: 'Join your team · Rekey' };
 
 interface PreviewDto {
   tenantId: string;
   tenantName: string;
-  role: 'OWNER' | 'ADMIN' | 'MEMBER';
+  role: WorkspaceRole;
   invitedEmail: string;
   expiresAt: string;
 }
@@ -43,10 +53,6 @@ interface AcceptResponse {
   refreshTokenExpiresAt: string;
 }
 
-// A previous unauthenticated `accept` action was reachable as an orphaned
-// server-action ID even though the form only wired `acceptAuthed`. It was
-// removed; only this authed path exists, using the `api()` client that
-// reads the session cookie.
 async function acceptAuthed(formData: FormData): Promise<void> {
   'use server';
   const token = String(formData.get('token') ?? '');
@@ -68,21 +74,34 @@ async function acceptAuthed(formData: FormData): Promise<void> {
 }
 
 const ERR: Record<string, string> = {
-  missing: 'Invite token missing.',
+  missing: 'This invite link is incomplete. Open it again from the email, or ask for a new one.',
   INVITATION_NOT_FOUND:
     'This invite link is incomplete or has expired. Ask whoever invited you to send a new one.',
   INVITATION_REVOKED: 'This invite was withdrawn. Ask whoever invited you to send a new one.',
-  INVITATION_EXPIRED: 'This invite has expired. Ask whoever invited you to send a new one.',
-  INVITATION_ALREADY_ACCEPTED: 'This invite has already been used.',
+  INVITATION_EXPIRED: 'This invite has expired. Ask whoever invited you to send it again.',
+  INVITATION_ALREADY_ACCEPTED: 'This invite has already been used. Sign in to get to your workspace.',
   INVITATION_NOT_USABLE: 'This invite is no longer usable. Ask for a new one.',
   INVITATION_EMAIL_MISMATCH:
-    'This invite was sent to a different email address. Sign in with that address to accept it.',
+    'You are signed in with a different email address from the one invited. Sign out, then open this link again and use the invited address.',
   PREVIEW_FAILED: 'We couldn’t check this invite just now. Please try again in a moment.',
   // Unmapped codes render nothing, so every code the accept action can
   // redirect with must have an entry here or the failure is silent.
   INTERNAL_ERROR: 'Something went wrong on our side. Please try again.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
 };
+
+const PRIMARY_LINK =
+  'block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors';
+
+async function signupOpenForInvitees(): Promise<boolean> {
+  try {
+    const { mode } = await publicGet<{ mode: string }>('/api/v1/tenant/auth/signup-mode');
+    return mode !== 'closed';
+  } catch {
+    // The API still enforces the real mode; a wrong guess only shows a button.
+    return true;
+  }
+}
 
 export default async function AcceptInvitePage({
   searchParams,
@@ -102,10 +121,7 @@ export default async function AcceptInvitePage({
           This invite link is incomplete or has expired. Ask whoever invited you to send a new
           one. If you already have an account, you can sign in instead.
         </p>
-        <Link
-          href="/login"
-          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
-        >
+        <Link href="/login" className={PRIMARY_LINK}>
           Go to sign in
         </Link>
       </AuthCard>
@@ -122,78 +138,113 @@ export default async function AcceptInvitePage({
 
   const jar = await cookies();
   const signedIn = Boolean(jar.get(ACCESS_COOKIE)?.value);
-  const signUpHref =
-    token.startsWith('rp_opinv_') && preview
-      ? `/sign-up?invite=${encodeURIComponent(token)}&email=${encodeURIComponent(preview.invitedEmail)}`
-      : `/sign-up?next=${encodeURIComponent(`/accept-invite?token=${token}`)}`;
+
+  // A first sign-in through a provider creates the account and uses the
+  // invitation on the way, then lands back here. That is success, not an error.
+  // A used operator key previews as NOT_USABLE rather than ALREADY_ACCEPTED.
+  if (signedIn && (previewError === 'INVITATION_ALREADY_ACCEPTED' || previewError === 'INVITATION_NOT_USABLE')) {
+    return (
+      <AuthCard title="You’re in" spacing="sm">
+        <p className="text-sm text-[var(--color-muted-fg)]">
+          This invitation has been accepted. Your new workspace is ready.
+        </p>
+        <Link href="/applications" className={PRIMARY_LINK}>
+          Open the workspace
+        </Link>
+      </AuthCard>
+    );
+  }
+
+  if (!preview) {
+    return (
+      <AuthCard title="Join your team" spacing="sm">
+        <Banner tone="error">
+          {ERR[previewError ?? ''] ?? 'This invite link isn’t usable. Ask whoever invited you to send a new one.'}
+        </Banner>
+        <Link href="/login" className={PRIMARY_LINK}>
+          Go to sign in
+        </Link>
+      </AuthCard>
+    );
+  }
+
+  const next = `/accept-invite?token=${token}`;
+  const [providers, canCreate] = signedIn
+    ? [[] as string[], false]
+    : await Promise.all([
+        publicGet<{ providers: string[] }>('/api/v1/tenant/auth/oauth/providers')
+          .then((d) => d.providers.filter((p) => p in PROVIDER_LABELS))
+          .catch(() => [] as string[]),
+        signupOpenForInvitees(),
+      ]);
+  // Operators on this deployment have an account somewhere else (Rekey Cloud's
+  // rekey.dev account); a panel-only password account would be a second one.
+  const ownAccounts = providers.includes('rekey');
+  const orderedProviders = ownAccounts ? ['rekey', ...providers.filter((p) => p !== 'rekey')] : providers;
+  const signUpHref = `/sign-up?invite=${encodeURIComponent(token)}&email=${encodeURIComponent(preview.invitedEmail)}`;
+  const signInHref = `/login?next=${encodeURIComponent(next)}&email=${encodeURIComponent(preview.invitedEmail)}`;
 
   return (
-    <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
-      <div className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm">
-        <h1 className="text-2xl font-semibold">Workspace invitation</h1>
-
-        {previewError && (
-          <>
-            <Banner tone="error">
-              {ERR[previewError] ?? 'This invite link isn’t usable. Ask whoever invited you to send a new one.'}
-            </Banner>
-            {/* Always offer sign-in here, since the person may already have an account. */}
-            <Link
-              href="/login"
-              className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
-            >
-              Go to sign in
-            </Link>
-          </>
-        )}
-
-        {preview && (
-          <>
-            <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-4 space-y-1">
-              <p className="text-xs uppercase tracking-wide text-neutral-600 dark:text-neutral-500">You&apos;re invited to</p>
-              <p className="text-lg font-medium">{preview.tenantName}</p>
-              <p className="text-sm text-[var(--color-muted-fg)]">
-                as <span className="font-medium">{preview.role}</span>
-              </p>
-              <p className="text-xs text-neutral-600 dark:text-neutral-500 pt-1">
-                Sent to {preview.invitedEmail} · expires {formatDateTime(preview.expiresAt)}
-              </p>
-            </div>
-
-            {error && <Banner tone="error">{error}</Banner>}
-
-            {signedIn ? (
-              <ActionForm action={acceptAuthed}>
-                <input type="hidden" name="token" value={token} />
-                <SubmitButton
-                  pendingLabel="Accepting…"
-                  className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  Accept invitation
-                </SubmitButton>
-              </ActionForm>
-            ) : (
-              <div className="space-y-2">
-                <p className="text-sm text-[var(--color-muted-fg)]">
-                  Sign in to accept this invitation:
-                </p>
-                <Link
-                  href={`/login?next=${encodeURIComponent(`/accept-invite?token=${token}`)}`}
-                  className="block w-full rounded-md bg-neutral-900 px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900"
-                >
-                  Sign in
-                </Link>
-                <Link
-                  href={signUpHref}
-                  className="block w-full rounded-md border border-[var(--color-border)] px-4 py-2.5 text-center text-sm font-medium hover:bg-[var(--color-surface-muted)]"
-                >
-                  Create a new account
-                </Link>
-              </div>
-            )}
-          </>
-        )}
+    <AuthCard title={`Join ${preview.tenantName}`} subtitle="You’ve been invited to work together on Rekey.">
+      <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-4">
+        <p className="text-sm">
+          You’ll join as <span className="font-semibold">{roleLabel(preview.role)}</span>.
+        </p>
+        <p className="text-sm text-[var(--color-muted-fg)]">{ROLE_SUMMARY[preview.role]}</p>
+        <p className="pt-1 text-xs text-[var(--color-muted-fg)]">
+          For {preview.invitedEmail} · valid until {formatDate(preview.expiresAt)}
+        </p>
       </div>
-    </main>
+
+      {error && <Banner tone="error">{error}</Banner>}
+
+      {signedIn ? (
+        <ActionForm action={acceptAuthed} className="space-y-2">
+          <input type="hidden" name="token" value={token} />
+          <SubmitButton
+            pendingLabel="Joining…"
+            className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            Join {preview.tenantName}
+          </SubmitButton>
+          <p className="text-center text-xs text-[var(--color-muted-fg)]">
+            Use the account for {preview.invitedEmail}.
+          </p>
+        </ActionForm>
+      ) : (
+        <div className="space-y-3">
+          {orderedProviders.length > 0 && (
+            <div className="space-y-2">
+              {orderedProviders.map((p) => (
+                <ActionForm key={p} action={startOAuth.bind(null, p, next)}>
+                  <OAuthButton provider={p} label={PROVIDER_LABELS[p]!} />
+                </ActionForm>
+              ))}
+              {ownAccounts && canCreate && (
+                <p className="text-center text-xs text-[var(--color-muted-fg)]">
+                  No account yet? You can create one on the next screen. Use {preview.invitedEmail}.
+                </p>
+              )}
+            </div>
+          )}
+
+          {!ownAccounts && canCreate && (
+            <>
+              {orderedProviders.length > 0 && <OrDivider />}
+              <Link href={signUpHref} className={PRIMARY_LINK}>
+                Create account and join
+              </Link>
+            </>
+          )}
+
+          <p className="pt-1 text-center text-sm text-[var(--color-muted-fg)]">
+            Already have an account?{' '}
+            <Link href={signInHref} className="font-medium text-[var(--color-fg)] underline">
+              Sign in
+            </Link>
+          </p>
+        </div>
+      )}
+    </AuthCard>
   );
 }

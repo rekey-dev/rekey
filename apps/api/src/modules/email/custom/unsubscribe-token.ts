@@ -2,7 +2,8 @@
  * Signed one-click unsubscribe tokens for `notification` custom mail.
  *
  * Format: `keyId.payload.signature`. The payload names the Application, the
- * address and the category being left. Tokens never expire, because an
+ * address, the category and, when the mail had one, the topic being left. A
+ * token without a topic leaves the whole category. Tokens never expire, because an
  * unsubscribe link in a two-year-old email must still work, so the signing key
  * is rotatable: `EMAIL_UNSUBSCRIBE_SECRET` signs under
  * `EMAIL_UNSUBSCRIBE_SECRET_ID`, and `EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS` keeps
@@ -12,6 +13,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { CUSTOM_EMAIL_TOPIC_RE } from '@rekey.dev/shared-types';
 import { env } from '../../../config/env.js';
 import { publicApiOrigin } from '../../../lib/public-api-origin.js';
 
@@ -24,6 +26,7 @@ export interface UnsubscribeTarget {
   applicationId: string;
   address: string;
   category: UnsubscribeCategory;
+  topic?: string;
 }
 
 function derivedKey(): Buffer {
@@ -54,11 +57,17 @@ function sign(key: Buffer, keyId: string, payload: string): string {
 export function createUnsubscribeToken(
   applicationId: string,
   address: string,
+  topic?: string,
   category: UnsubscribeCategory = 'notification',
 ): string {
   const [keyId, key] = unsubscribeKeys().entries().next().value as [string, Buffer];
   const payload = Buffer.from(
-    JSON.stringify({ a: applicationId, e: address.trim().toLowerCase(), c: category }),
+    JSON.stringify({
+      a: applicationId,
+      e: address.trim().toLowerCase(),
+      c: category,
+      ...(topic !== undefined && { t: topic }),
+    }),
   ).toString('base64url');
   return `${keyId}.${payload}.${sign(key, keyId, payload)}`;
 }
@@ -75,10 +84,12 @@ export function verifyUnsubscribeToken(token: string): UnsubscribeTarget | null 
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null) return null;
-    const { a, e, c } = parsed as { a?: unknown; e?: unknown; c?: unknown };
+    const { a, e, c, t } = parsed as { a?: unknown; e?: unknown; c?: unknown; t?: unknown };
     if (typeof a !== 'string' || typeof e !== 'string' || a.length === 0 || e.length === 0) return null;
     if (c !== 'notification') return null;
-    return { applicationId: a, address: e, category: c };
+    if (t === undefined) return { applicationId: a, address: e, category: c };
+    if (typeof t !== 'string' || !CUSTOM_EMAIL_TOPIC_RE.test(t)) return null;
+    return { applicationId: a, address: e, category: c, topic: t };
   } catch {
     return null;
   }
@@ -90,8 +101,8 @@ export function verifyUnsubscribeToken(token: string): UnsubscribeTarget | null 
  * a mailbox, and a header pointing at it would promise an unsubscribe that
  * cannot happen.
  */
-export function unsubscribeUrl(applicationId: string, address: string): string | null {
+export function unsubscribeUrl(applicationId: string, address: string, topic: string): string | null {
   const origin = publicApiOrigin();
   if (origin === null) return null;
-  return `${origin.replace(/\/+$/, '')}/api/v1/email/unsubscribe?token=${createUnsubscribeToken(applicationId, address)}`;
+  return `${origin.replace(/\/+$/, '')}/api/v1/email/unsubscribe?token=${createUnsubscribeToken(applicationId, address, topic)}`;
 }

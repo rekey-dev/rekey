@@ -101,7 +101,8 @@ const TABLES: readonly RetainedTable[] = [
     batch: 2_000,
     ageColumn: 'createdAt',
     async findStale(cutoff, take, full) {
-      const where = { createdAt: { lt: cutoff } };
+      // A scheduled send keeps its scheduling time as createdAt until it fires.
+      const where = { createdAt: { lt: cutoff }, status: { not: 'scheduled' } };
       const orderBy = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
       return full
         ? prisma.emailLog.findMany({ where, orderBy, take })
@@ -109,7 +110,7 @@ const TABLES: readonly RetainedTable[] = [
     },
     async deleteStale(ids, cutoff) {
       const { count } = await prisma.emailLog.deleteMany({
-        where: { id: { in: ids }, createdAt: { lt: cutoff } },
+        where: { id: { in: ids }, createdAt: { lt: cutoff }, status: { not: 'scheduled' } },
       });
       return count;
     },

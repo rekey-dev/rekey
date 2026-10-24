@@ -127,6 +127,9 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'contact.subscribed',
   'contact.unsubscribed',
   'contact.submission.created',
+  // Custom notification email. Written in the transaction that recorded the
+  // opt-out. Payload: address, endUserId?, category, topic?.
+  'email.unsubscribed',
   // Support mode. Written in the transaction that opened, changed or closed
   // the case. Payload: `data.user.id` and `data.support`. Never the reason.
   'support.opened',

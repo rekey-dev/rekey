@@ -182,7 +182,15 @@ describe('checkoutAction, a coupon code', () => {
 
 describe('cancelSubscriptionAction', () => {
   it('names the cancelled subscription in the redirect', async () => {
-    const to = await redirectOf(() => cancelSubscriptionAction('acme', null, 's_basic'));
+    const to = await redirectOf(() => cancelSubscriptionAction('acme', null, 's_basic', form({})));
     expect(to).toBe('/acme?e=canceled&sub=s_basic');
+  });
+
+  it('passes on a reason the customer chose, and drops one that is not a known reason', async () => {
+    const cancel = vi.fn(async () => ({}));
+    client.cancelSubscription = cancel;
+    await redirectOf(() => cancelSubscriptionAction('acme', null, 's_basic', form({ reason: 'too_expensive' })));
+    await redirectOf(() => cancelSubscriptionAction('acme', null, 's_basic', form({ reason: 'made_up' })));
+    expect(cancel.mock.calls.map((c) => (c as unknown as [string, { reason?: string }])[1].reason)).toEqual(['too_expensive', undefined]);
   });
 });

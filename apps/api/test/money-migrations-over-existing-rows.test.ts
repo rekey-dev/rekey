@@ -746,8 +746,10 @@ describe('money model migrations, in order over old rows', () => {
         'drop_unused_lockout_columns',
       ]);
       expect(drops).toEqual([false, false, false, false, true, true, true]);
-      // Nothing is applied after the last of them.
-      expect(readdirSync(MIGRATIONS).filter((name) => !name.endsWith('.toml')).sort().at(-1)).toBe(CONTRACT.at(-1));
+      // Nothing else runs between them, so the breaking drops land together.
+      const all = readdirSync(MIGRATIONS).filter((name) => !name.endsWith('.toml')).sort();
+      const first = all.indexOf(CONTRACT[0]!);
+      expect(all.slice(first, first + CONTRACT.length)).toEqual(CONTRACT);
     });
 
     it('stop the deploy before anything changes, with every reason, its count and what to do in one message', async () => {

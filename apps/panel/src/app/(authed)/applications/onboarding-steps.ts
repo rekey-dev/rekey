@@ -163,7 +163,7 @@ export async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
             key: 'invite',
             label: 'Invite a teammate',
             description: 'Bring a colleague into this workspace.',
-            href: '/team/invitations',
+            href: '/team?newInvite=1',
             done:
               (members?.length ?? 0) > 1 ||
               (invitations ?? []).some((i) => i.status === 'pending'),

@@ -415,6 +415,7 @@ interface DeviceBindingPlan {
 
 /** The route-documented error for a device the service will not admit. */
 function deviceRefusal(
+  application: Application,
   outcome: Exclude<PreflightDeviceOutcome, { kind: 'ok' }>,
 ): RekeyError {
   if (outcome.kind === 'blocked') {
@@ -425,15 +426,20 @@ function deviceRefusal(
       fix: 'Contact the application\'s support, only an operator can unblock a device.',
     });
   }
+  const selfRelease = AuthConfigSchema.parse(application.authConfig).deviceRelease === 'self_service';
   return new RekeyError({
     statusCode: 403,
     code: 'DEVICE_LIMIT_REACHED',
     message: `This account is already signed in on ${outcome.limit} device${outcome.limit === 1 ? '' : 's'}, the most its plan allows.`,
-    fix:
-      'Release one of the devices listed in `details.devices`: sign in without `device` (when binding is optional) ' +
-      'and call DELETE /api/v1/users/me/devices/:id, have your backend call POST /api/v1/devices/:id/release, ' +
-      'or upgrade the plan. See docs/devices.md.',
+    fix: selfRelease
+      ? 'Release one of the devices listed in `details.devices`: sign in without `device` (when binding is optional) ' +
+        'and call DELETE /api/v1/users/me/devices/:id, have your backend call POST /api/v1/devices/:id/release, ' +
+        'or upgrade the plan. See docs/devices.md.'
+      : "This Application keeps device release on the server (`details.selfRelease` is false): ask the application's " +
+        'support to release one of the devices in `details.devices`, have your backend call ' +
+        'POST /api/v1/devices/:id/release, or upgrade the plan. See docs/devices.md.',
     details: {
+      selfRelease,
       limit: outcome.limit,
       devices: outcome.devices.map((d) => ({
         id: d.id,
@@ -698,7 +704,7 @@ async function commitDeviceBinding(
     ip: plan.ip,
     via: plan.via,
   });
-  if (outcome.kind !== 'ok') throw deviceRefusal(outcome);
+  if (outcome.kind !== 'ok') throw deviceRefusal(application, outcome);
   return outcome.device.id;
 }
 
@@ -1561,7 +1567,7 @@ export const authService = {
         ip: plan.ip,
         via: plan.via,
       });
-      if (check.kind !== 'ok') throw deviceRefusal(check);
+      if (check.kind !== 'ok') throw deviceRefusal(input.application, check);
     }
     const spent = await match.spend();
     if (spent !== 'accepted') throw codeRefused(spent);
@@ -1753,7 +1759,7 @@ export const authService = {
         ip: plan.ip,
         via: plan.via,
       });
-      if (check.kind !== 'ok') throw deviceRefusal(check);
+      if (check.kind !== 'ok') throw deviceRefusal(application, check);
     }
 
     let replacement;
@@ -3085,11 +3091,9 @@ export const authService = {
    *   - **Email-first** (`email` provided): we scope `allowCredentials`
    *     to that user's registered passkeys.
    *
-   * KNOWN GAP: a known email with zero passkeys is currently distinguishable
-   * from an unknown email. The intent is for both to return the usernameless
-   * shape, but `allowCredentials: []` is emitted for the former (the omission in
-   * `lib/webauthn.ts` is keyed on `null`, not on emptiness) while the latter
-   * emits no field at all. Fix is to pass `null` when the list is empty.
+   * An unknown email and a known email with no passkeys both get the
+   * usernameless shape, so the response does not reveal which addresses
+   * have an account.
    */
   async passkeyAuthenticateStart(input: {
     application: Application;
@@ -3109,13 +3113,10 @@ export const authService = {
         },
         include: { webauthnCredentials: true },
       });
-      if (endUser) {
+      // Enumeration guard: no user and no passkeys both fall through to
+      // usernameless options. The complete path refuses without disclosing.
+      if (endUser && endUser.webauthnCredentials.length > 0) {
         allowCredentials = endUser.webauthnCredentials;
-      } else {
-        // Enumeration guard: fall through to usernameless options so the
-        // shape is identical to the no-user case. The complete path then
-        // refuses with a non-disclosing error.
-        allowCredentials = null;
       }
     }
     const result = await buildAuthenticationOptions({

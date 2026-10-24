@@ -58,8 +58,16 @@ export type SignInFailure =
    * devices filling the cap. Render them and let the user pick one to release.
    * No token was issued, so releasing needs your backend or an operator (or a
    * session signed in without `device`, where the policy allows it).
+   * `selfRelease` is false when the Application sets `deviceRelease:
+   * 'server_only'`: show "contact support" instead of a release button.
    */
-  | { kind: 'device_limit'; code: string; limit: number | null; devices: DeviceChoice[] }
+  | {
+      kind: 'device_limit';
+      code: string;
+      limit: number | null;
+      devices: DeviceChoice[];
+      selfRelease: boolean;
+    }
   /** An operator blocked this fingerprint. Only an operator can lift it. */
   | { kind: 'device_blocked'; code: string }
   /**
@@ -175,7 +183,12 @@ export function classifySignInError(err: unknown): SignInFailure | null {
       typeof details === 'object' && details !== null
         ? num((details as { limit?: unknown }).limit)
         : null;
-    return { kind: 'device_limit', code, limit, devices: readDevices(details) };
+    // Absent on an API older than the setting, which always allowed it.
+    const selfRelease =
+      typeof details !== 'object' ||
+      details === null ||
+      (details as { selfRelease?: unknown }).selfRelease !== false;
+    return { kind: 'device_limit', code, limit, devices: readDevices(details), selfRelease };
   }
   if (RETRYABLE.has(code)) {
     return { kind: 'retry_later', code, retryAfterSeconds: num(err.retryAfterSeconds) };

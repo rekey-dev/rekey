@@ -142,8 +142,8 @@ importers:
         specifier: ^9.0.2
         version: 9.0.3
       nodemailer:
-        specifier: ^6.9.16
-        version: 6.10.1
+        specifier: ^10.2.1
+        version: 10.2.1
       otpauth:
         specifier: ^9.3.4
         version: 9.5.1
@@ -175,9 +175,6 @@ importers:
       '@types/node':
         specifier: ^22.9.0
         version: 22.19.17
-      '@types/nodemailer':
-        specifier: ^6.4.17
-        version: 6.4.23
       '@vitest/coverage-v8':
         specifier: ^2.1.5
         version: 2.1.9(vitest@2.1.9(@types/node@22.19.17)(jsdom@25.0.1)(lightningcss@1.33.0))
@@ -2179,9 +2176,6 @@ packages:
   '@types/node@24.12.4':
     resolution: {integrity: sha512-GUUEShf+PBCGW2KaXwcIt3Yk+e3pkKwWKb9GSyM9WQVE+ep2jzmHdGsHzu4wgcZy5fN9FBdVzjpBQsYlpfpgLA==}
 
-  '@types/nodemailer@6.4.23':
-    resolution: {integrity: sha512-aFV3/NsYFLSx9mbb5gtirBSXJnAlrusoKNuPbxsASWc7vrKLmIrTQRpdcxNcSFL3VW2A2XpeLEavwb2qMi6nlQ==}
-
   '@types/qrcode@1.5.6':
     resolution: {integrity: sha512-te7NQcV2BOvdj2b1hCAHzAoMNuj65kNBMz0KBaxM6c3VGBOhU0dURQKOtH8CFNI/dsKkwlv32p26qYQTWoB5bw==}
 
@@ -4147,9 +4141,9 @@ packages:
   node-releases@2.0.38:
     resolution: {integrity: sha512-3qT/88Y3FbH/Kx4szpQQ4HzUbVrHPKTLVpVocKiLfoYvw9XSGOX2FmD2d6DrXbVYyAQTF2HeF6My8jmzx7/CRw==}
 
-  nodemailer@6.10.1:
-    resolution: {integrity: sha512-Z+iLaBGVaSjbIzQ4pX6XV41HrooLsQ10ZWPUehGmuantvzWoDVBnmsdUcOIDM1t+yPor5pDhVlDESgOMEGxhHA==}
-    engines: {node: '>=6.0.0'}
+  nodemailer@10.2.1:
+    resolution: {integrity: sha512-ZrDNsPFoDMwefNs7sJwrYiEJ/CG4ClJWDZv05iNJsEBWa8GRDry1QJHTJxsuTAY9eDDKjX4k+q3SxslXJOao7w==}
+    engines: {node: '>=20.0.0'}
 
   normalize-path@3.0.0:
     resolution: {integrity: sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==}
@@ -7029,10 +7023,6 @@ snapshots:
       undici-types: 7.16.0
     optional: true
 
-  '@types/nodemailer@6.4.23':
-    dependencies:
-      '@types/node': 22.19.17
-
   '@types/qrcode@1.5.6':
     dependencies:
       '@types/node': 22.19.17
@@ -9381,7 +9371,7 @@ snapshots:
 
   node-releases@2.0.38: {}
 
-  nodemailer@6.10.1: {}
+  nodemailer@10.2.1: {}
 
   normalize-path@3.0.0: {}
 

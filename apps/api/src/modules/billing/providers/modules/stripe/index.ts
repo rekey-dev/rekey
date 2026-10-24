@@ -29,6 +29,7 @@ import {
   invoiceSubscriptionId,
   listedRefunds,
   periodEndOf,
+  invoicePeriodEnd,
   scopedApplicationId,
 } from './payload-shapes.js';
 import type {
@@ -344,6 +345,11 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
         return [];
       }
       const priceId = invoicePriceId(invoice);
+      // The renewal grant anchors on the row's period end, and nothing orders
+      // this event after `customer.subscription.updated`, which is what
+      // otherwise advances it. Carrying the period here keeps a renewal that
+      // lands first from reusing the old period's anchor and granting nothing.
+      const periodEnd = invoicePeriodEnd(invoice);
       return [
         {
           type: 'payment.succeeded',
@@ -365,6 +371,7 @@ async function translate(payload: unknown, ctx: TranslateCtx): Promise<DomainBil
           // Rekey must still end up in front of the operator.
           deferUntilLinked: firstPeriod && isRecentEvent(event.created),
           ...(priceId !== null && { providerPriceId: priceId }),
+          ...(periodEnd !== null && { currentPeriodEnd: periodEnd }),
           raw: payload,
         },
       ];

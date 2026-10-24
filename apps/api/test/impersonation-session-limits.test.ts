@@ -172,6 +172,13 @@ describe('impersonation session limits', () => {
       expect(mfaSetup.statusCode).toBe(403);
       expect(mfaSetup.json().error.code).toBe('IMPERSONATION_ACTION_FORBIDDEN');
 
+      // Erasure outlives any token: a support session must not erase the
+      // account and have it logged as the user deleting themselves.
+      const erase = await asImpersonator('DELETE', '/api/v1/users/me');
+      expect(erase.statusCode).toBe(403);
+      expect(erase.json().error.code).toBe('IMPERSONATION_ACTION_FORBIDDEN');
+      expect((await prisma.endUser.findUniqueOrThrow({ where: { id: f.endUserId } })).erasedAt).toBeNull();
+
       const mfaDisable = await asImpersonator('POST', '/api/v1/auth/mfa/disable');
       expect(mfaDisable.statusCode).toBe(403);
 

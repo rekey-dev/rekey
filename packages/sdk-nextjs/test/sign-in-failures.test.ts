@@ -57,7 +57,15 @@ describe('DEVICE_LIMIT_REACHED gives the caller the devices to release', () => {
         },
         { id: 'dev_2', label: null, firstSeenAt: null, lastSeenAt: null },
       ],
+      selfRelease: true,
     });
+  });
+
+  it('reports selfRelease false only when the API says so', () => {
+    const failure = classifySignInError(
+      apiError({ code: 'DEVICE_LIMIT_REACHED', details: { limit: 1, devices: [], selfRelease: false } }),
+    );
+    expect(failure).toMatchObject({ kind: 'device_limit', selfRelease: false });
   });
 
   it('survives a details bag that is missing, malformed, or half-typed', () => {
@@ -68,6 +76,7 @@ describe('DEVICE_LIMIT_REACHED gives the caller the devices to release', () => {
       code: 'DEVICE_LIMIT_REACHED',
       limit: null,
       devices: [],
+      selfRelease: true,
     });
 
     const messy = classifySignInError(
@@ -81,6 +90,7 @@ describe('DEVICE_LIMIT_REACHED gives the caller the devices to release', () => {
       code: 'DEVICE_LIMIT_REACHED',
       limit: null,
       devices: [{ id: 'dev_3', label: null, firstSeenAt: null, lastSeenAt: null }],
+      selfRelease: true,
     });
   });
 });

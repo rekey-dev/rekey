@@ -157,6 +157,7 @@ import { usagePublicRoutes, usageSelfRoutes } from "./modules/usage/index.js";
 import { creditsPublicRoutes, creditsSelfRoutes } from "./modules/credits/index.js";
 import {
   customEmailTemplateRoutes,
+  emailPreferencesRoutes,
   emailSendRoutes,
   emailUnsubscribeRoutes,
   tenantEmailRoutes,
@@ -174,6 +175,7 @@ import {
   stopWebhookWorker,
 } from "./modules/webhooks/index.js";
 import { pollBillingEventOutbox } from "./modules/billing-log/index.js";
+import { fireDueScheduledSends } from "./modules/email/custom/scheduled-sends.js";
 import {
   startBillingEventOutboxWorker,
   stopBillingEventOutboxWorker,
@@ -1051,6 +1053,13 @@ export async function buildApp(
     }, BILLING_OUTBOX_POLL_INTERVAL_MS);
     billingOutboxTimer.unref();
 
+    // Scheduled custom sends fire within this long of their sendAt.
+    const SCHEDULED_EMAIL_POLL_INTERVAL_MS = 15 * 1000;
+    const scheduledEmailTimer = setInterval(() => {
+      void fireDueScheduledSends().catch((err) => app.log.warn({ err }, "scheduled email poll failed"));
+    }, SCHEDULED_EMAIL_POLL_INTERVAL_MS);
+    scheduledEmailTimer.unref();
+
     app.addHook("onClose", async () => {
       clearInterval(flushTimer);
       clearInterval(pruneTimer);
@@ -1059,6 +1068,7 @@ export async function buildApp(
       clearInterval(dunningTimer);
       clearInterval(trialTimer);
       clearInterval(billingOutboxTimer);
+      clearInterval(scheduledEmailTimer);
       await stopWebhookWorker();
       await stopBillingEventOutboxWorker();
       await stopBillingLogMaintenance();
@@ -1094,6 +1104,7 @@ export async function buildApp(
   // AFTER /users/me so the literal segment wins over the :id parameter.
   await app.register(usersRoutes, { prefix: "/api/v1/users" });
   await app.register(profileServerRoutes, { prefix: "/api/v1/users" });
+  await app.register(emailPreferencesRoutes, { prefix: "/api/v1/users" });
   await app.register(profileSelfRoutes, { prefix: "/api/v1/users/me" });
   await app.register(profileSchemaPublicRoutes, { prefix: "/api/v1" });
   // Bulk import from another auth system (routes/users-import.ts).

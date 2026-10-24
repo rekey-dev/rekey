@@ -38,6 +38,7 @@ export interface CustomEmailSettings {
 export interface DraftFields {
   name: string;
   category: CustomEmailCategory;
+  topic: string | null;
   fromName: string | null;
   subject: string;
   designJson: unknown;
@@ -71,6 +72,7 @@ export function toDto(row: CustomEmailTemplate): CustomEmailTemplateDto {
     key: row.key,
     name: row.name,
     category: row.category as CustomEmailCategory,
+    topic: row.topic ?? row.key,
     fromName: row.fromName,
     subject: row.subject,
     designJson: row.designJson ?? null,
@@ -101,6 +103,26 @@ async function findOrThrow(applicationId: string, key: string): Promise<CustomEm
 
 function jsonOrNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.DbNull {
   return value === null || value === undefined ? Prisma.DbNull : (value as Prisma.InputJsonValue);
+}
+
+/**
+ * Retagging a published template must not resume mail to people who left its
+ * old topic, so their opt-outs are copied onto the new one.
+ */
+async function carryOptOutsToNewTopic(tx: Prisma.TransactionClient, current: CustomEmailTemplate, topic: string): Promise<void> {
+  if (current.version === 0) return;
+  const previous = await tx.customEmailTemplateVersion.findUnique({
+    where: { templateId_version: { templateId: current.id, version: current.version } },
+    select: { topic: true },
+  });
+  const previousTopic = previous?.topic ?? current.key;
+  if (previousTopic === topic) return;
+  await tx.$executeRaw`
+    INSERT INTO email_topic_opt_outs (id, application_id, address, topic)
+    SELECT gen_random_uuid()::text, application_id, address, ${topic}
+    FROM email_topic_opt_outs
+    WHERE application_id = ${current.applicationId} AND topic = ${previousTopic}
+    ON CONFLICT DO NOTHING`;
 }
 
 export const customTemplatesService = {
@@ -210,12 +232,15 @@ export const customTemplatesService = {
       const current = await tx.customEmailTemplate.findUniqueOrThrow({ where: { id: draft.id } });
       const version = current.version + 1;
       const now = new Date();
+      const topic = current.topic ?? current.key;
+      await carryOptOutsToNewTopic(tx, current, topic);
       await tx.customEmailTemplateVersion.create({
         data: {
           templateId: current.id,
           applicationId: application.id,
           version,
           category: current.category,
+          topic,
           fromName: current.fromName,
           subject: current.subject,
           bodyHtml: current.bodyHtml,

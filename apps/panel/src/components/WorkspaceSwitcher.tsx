@@ -13,6 +13,7 @@
  * keep in sync, the dropdown closes when the navigation happens.
  */
 
+import { roleLabel } from '@/lib/workspace-roles';
 import * as React from 'react';
 import {
   DropdownMenu,
@@ -103,11 +104,27 @@ export function WorkspaceSwitcher({
             title={triggerLabel}
             disabled={switching}
             aria-busy={switching}
-            className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm hover:bg-[var(--color-surface-muted)] transition-colors disabled:opacity-60"
+            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-[var(--color-surface-muted)] transition-colors disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
-            <span className="truncate">{switching ? 'Switching…' : triggerLabel}</span>
+            <span
+              aria-hidden="true"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--color-primary-soft)] text-xs font-semibold text-[var(--color-primary-soft-fg)]"
+            >
+              {triggerLabel.trim().charAt(0).toUpperCase() || 'W'}
+            </span>
+            <span className="min-w-0 flex-1 leading-tight">
+              <span className="block truncate text-sm font-medium text-[var(--color-fg)]">
+                {switching ? 'Switching…' : triggerLabel}
+              </span>
+              {active && (
+                <span className="block text-[11px] capitalize text-[var(--color-muted-fg)]">
+                  {active.role.toLowerCase()}
+                </span>
+              )}
+            </span>
             <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--color-faint-fg)]">
-              <polyline points="6 9 12 15 18 9" />
+              <path d="m7 15 5 5 5-5" />
+              <path d="m7 9 5-5 5 5" />
             </svg>
           </button>
         </DropdownMenuTrigger>
@@ -122,8 +139,8 @@ export function WorkspaceSwitcher({
             >
               <div className="flex items-center justify-between gap-2 min-w-0">
                 <span title={m.tenantName} className="truncate">{m.tenantName}</span>
-                <span className="text-[10px] uppercase tracking-wider text-[var(--color-faint-fg)] shrink-0">
-                  {m.role}
+                <span className="text-[11px] text-[var(--color-muted-fg)] shrink-0">
+                  {roleLabel(m.role)}
                 </span>
               </div>
             </DropdownMenuItem>
@@ -145,7 +162,7 @@ export function WorkspaceSwitcher({
       {createAction && (
         <Modal
           title="Create workspace"
-          description="Workspaces are isolated: applications, members, billing creds, and API keys don't leak between them."
+          description="A workspace is a separate home for a business: its own apps, team, billing and keys, kept apart from your other workspaces."
           trigger="open"
           triggerClassName="hidden"
           triggerRef={newModalTriggerRef}
@@ -164,10 +181,10 @@ export function WorkspaceSwitcher({
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
               />
               <span className="block text-xs text-[var(--color-muted-fg)]">
-                You'll be the OWNER. Invite teammates from the Team page after.
+                You'll be its owner. Invite your team from the Team page afterwards.
               </span>
             </label>
-            <SubmitButton pendingLabel="Creating workspace…">Create + switch</SubmitButton>
+            <SubmitButton pendingLabel="Creating workspace…">Create and open</SubmitButton>
           </ActionForm>
         </Modal>
       )}

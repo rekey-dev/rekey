@@ -316,6 +316,7 @@ nothing. Erasing a contact scrubs its stored deliveries (see
 | `contact.subscribed` | Someone joined a list: a first subscribe, or a secret-key subscribe with `consent` that added back a person who had left. `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, source, consentVersion, consentAt). |
 | `contact.unsubscribed` | Someone left a list: your server called `DELETE /api/v1/lists/:key/members/:email`, or an operator took them off in the panel. Sent once per change. `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, unsubscribedAt). |
 | `contact.submission.created` | A subscribe carried `fields` and they were stored, for example a contact form message. `data.contact` (id, email), `data.list` (id, key), `data.submission` (id, fields, createdAt). |
+| `email.unsubscribed` | A recipient left notification email: a one-click unsubscribe from a custom `notification` template, or your server set a topic to `unsubscribed` with `PATCH /api/v1/users/:id/email-preferences`. Sent once per change. `data.address`, `data.endUserId` (when the address is an end user), `data.category` (`notification`), `data.topic` (absent when they left every notification email). Rekey does not ingest provider bounces or complaints, so none of those reach this event. |
 
 ### Devices
 
@@ -354,7 +355,7 @@ nothing.
 | Event | When |
 |---|---|
 | `subscription.activated` | A Subscription became ACTIVE. |
-| `subscription.canceled` | A Subscription became CANCELED (includes `canceledAt`). |
+| `subscription.canceled` | A Subscription became CANCELED (includes `canceledAt`). When the subscriber gave a reason on cancel, every subscription event carries `data.subscription.cancellation` (`reason`, `feedback`). |
 | `subscription.past_due` | A Subscription became PAST_DUE: a payment failed and the provider is retrying. |
 | `subscription.trial_started` | A Subscription entered TRIALING: a checkout that completed on a trial, a billing system reporting a trial, or a provider moving the subscription onto one. Sent alongside `subscription.activated` when the trial is also the activation. `data.subscription.trialEndsAt` is the trial end. A re-dated trial is not a new start. |
 | `subscription.trial_will_end` | A TRIALING Subscription's trial ends within 3 days. A sweep checks every 10 minutes, and sends it once per subscription and trial end date; a trial re-dated after it was sent is announced again for the new date. Not sent for a trial that already converted or ended. |

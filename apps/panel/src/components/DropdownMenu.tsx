@@ -18,16 +18,20 @@
  *     </DropdownMenuContent>
  *   </DropdownMenu>
  *
- * Click-outside, Escape, and trigger-toggle handled. Items render as
- * focusable buttons; arrow-key navigation is intentionally *not* wired to
- * keep this small, for menus longer than ~6 items we'd swap in Radix.
+ * Click-outside, Escape, and trigger-toggle handled. It follows the
+ * disclosure pattern (a button with `aria-expanded` showing a panel), not the
+ * ARIA menu pattern: that one promises arrow-key navigation this does not
+ * have. Items are plain focusable buttons.
  */
 
 import * as React from 'react';
+import Link from '@/components/Link';
 
 interface MenuContext {
   open: boolean;
   setOpen: (v: boolean) => void;
+  /** Close and put focus back on the trigger, so keyboard users keep their place. */
+  close: () => void;
   triggerRef: React.MutableRefObject<HTMLElement | null>;
   contentRef: React.MutableRefObject<HTMLDivElement | null>;
 }
@@ -44,6 +48,10 @@ export function DropdownMenu({ children }: { children: React.ReactNode }): React
   const [open, setOpen] = React.useState(false);
   const triggerRef = React.useRef<HTMLElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const close = React.useCallback(() => {
+    setOpen(false);
+    (triggerRef.current?.firstElementChild as HTMLElement | null)?.focus();
+  }, []);
 
   React.useEffect(() => {
     if (!open) return;
@@ -58,20 +66,35 @@ export function DropdownMenu({ children }: { children: React.ReactNode }): React
         setOpen(false);
       }
     }
+    // Capture phase, and the key is consumed: inside the mobile drawer (a
+    // native <dialog>) the same Escape would otherwise close the drawer too.
     function onKey(e: KeyboardEvent): void {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      close();
     }
     document.addEventListener('mousedown', onClick);
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('mousedown', onClick);
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
     };
-  }, [open]);
+  }, [open, close]);
 
   return (
-    <Ctx.Provider value={{ open, setOpen, triggerRef, contentRef }}>
-      <div className="relative inline-block w-full">{children}</div>
+    <Ctx.Provider value={{ open, setOpen, close, triggerRef, contentRef }}>
+      <div
+        className="relative inline-block w-full"
+        onBlur={(e) => {
+          // Tabbing out closes it. A null target (a click on a non-focusable
+          // spot, or Safari not focusing buttons) is left to the click handler.
+          const next = e.relatedTarget as Node | null;
+          if (next && !e.currentTarget.contains(next)) setOpen(false);
+        }}
+      >
+        {children}
+      </div>
     </Ctx.Provider>
   );
 }
@@ -93,7 +116,7 @@ export function DropdownMenuTrigger({
       onClick={() => ctx.setOpen(!ctx.open)}
       style={{ display: 'contents' }}
     >
-      {children}
+      {React.cloneElement(children as React.ReactElement<{ 'aria-expanded'?: boolean }>, { 'aria-expanded': ctx.open })}
     </span>
   );
 }
@@ -115,7 +138,6 @@ export function DropdownMenuContent({
   return (
     <div
       ref={ctx.contentRef}
-      role="menu"
       style={{ marginTop: sideOffset }}
       className={`absolute ${alignCls} z-50 min-w-[14rem] rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg p-1 ${className}`}
     >
@@ -126,7 +148,7 @@ export function DropdownMenuContent({
 
 export function DropdownMenuLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
   return (
-    <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-[var(--color-faint-fg)]">
+    <div className="px-2 py-1.5 text-xs font-medium text-[var(--color-faint-fg)]">
       {children}
     </div>
   );
@@ -139,33 +161,38 @@ export function DropdownMenuSeparator(): React.JSX.Element {
 export function DropdownMenuItem({
   children,
   onSelect,
+  href,
   active = false,
   className = '',
 }: {
   children: React.ReactNode;
   onSelect?: () => void;
+  /** Render as a link, so it keeps open-in-new-tab. */
+  href?: string;
   active?: boolean;
   className?: string;
 }): React.JSX.Element {
   const ctx = useMenuCtx();
   function handle(): void {
     onSelect?.();
-    ctx.setOpen(false);
+    ctx.close();
+  }
+  const cls =
+    'block w-full text-left px-2 py-1.5 text-sm rounded-sm transition-colors ' +
+    (active
+      ? 'bg-[var(--color-surface-muted)] text-[var(--color-fg)] font-medium'
+      : 'text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]') +
+    ' ' +
+    className;
+  if (href !== undefined) {
+    return (
+      <Link href={href} onClick={handle} className={cls}>
+        {children}
+      </Link>
+    );
   }
   return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={handle}
-      className={
-        'block w-full text-left px-2 py-1.5 text-sm rounded-sm transition-colors ' +
-        (active
-          ? 'bg-[var(--color-surface-muted)] text-[var(--color-fg)] font-medium'
-          : 'text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]') +
-        ' ' +
-        className
-      }
-    >
+    <button type="button" onClick={handle} className={cls}>
       {children}
     </button>
   );

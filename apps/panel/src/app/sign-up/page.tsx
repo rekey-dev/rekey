@@ -11,7 +11,7 @@ import { AnalyticsEvent } from '@/lib/analytics';
 import { safeNext } from '@/lib/safe-next';
 import { termsLead } from './terms-lead';
 
-export const metadata: Metadata = { title: 'Create your workspace · Rekey' };
+export const metadata: Metadata = { title: 'Create your account · Rekey' };
 
 
 type SignupMode = 'open' | 'invite' | 'closed';
@@ -83,10 +83,10 @@ export default async function SignUpPage({
   // Round-tripped through the form so accept-invite (etc.) can resume after
   // sign-up. The server action re-validates it before redirecting.
   const next = typeof params.next === 'string' ? params.next : undefined;
-  // A workspace-bound invite from /accept-invite: this sign-up joins that
-  // workspace, so there is no workspace to name and no key to paste.
-  const joinKey =
-    typeof params.invite === 'string' && params.invite.startsWith('rp_opinv_') ? params.invite : undefined;
+  // An invitation from /accept-invite (a teammate's invitation, or a
+  // workspace-bound operator key): this sign-up joins that workspace, so there
+  // is no workspace to name and no key to paste.
+  const joinKey = typeof params.invite === 'string' && params.invite.trim() ? params.invite : undefined;
   // Per-field errors render at the broken field instead of the page-top
   // banner, the operator's eye is already at the form.
   const emailError = error === 'EMAIL_ALREADY_EXISTS' ? ERROR_MESSAGES[error] : undefined;
@@ -122,7 +122,7 @@ export default async function SignUpPage({
       title={joinKey ? 'Create your account' : 'Create your workspace'}
       subtitle={
         joinKey
-          ? 'Use the email address the invite was sent to. You join the workspace you were invited to.'
+          ? 'Use the email address your invitation was sent to. You join your team as soon as the account exists.'
           : mode === 'invite'
             ? 'This deployment issues workspace keys. Paste the key you were given.'
             : "You'll be the owner. Invite teammates after sign-up."

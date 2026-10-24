@@ -122,6 +122,9 @@ export async function enqueueSubscriptionEvent(
         amount: sub.unitAmount ?? 0,
         currency: sub.currency,
         interval: sub.plan.interval,
+        ...(sub.cancelReason !== null && {
+          cancellation: { reason: sub.cancelReason, feedback: sub.cancelFeedback },
+        }),
         ...(entitlements !== undefined && { entitlements }),
         currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
         trialEndsAt: sub.trialEndsAt?.toISOString() ?? null,

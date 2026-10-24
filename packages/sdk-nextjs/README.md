@@ -373,7 +373,7 @@ Pass nothing and nothing changes: no key is sent, an unbound chain stays unbound
 
 Two common refusals are not the user's password, and rendering them as one leaves people stuck:
 
-- **`DEVICE_LIMIT_REACHED` (403)**: the account is at its `max_devices` entitlement. The error carries the active devices filling the cap, and that list is the whole repair path: no token was issued, so the user cannot release a device from inside your app.
+- **`DEVICE_LIMIT_REACHED` (403)**: the account is at its `max_devices` entitlement. The error carries the active devices filling the cap, and that list is the whole repair path: no token was issued, so the user cannot release a device from inside your app. `selfRelease` is false when the Application keeps release with its operators; send the user to support then.
 - **`PASSWORD_VERIFY_BUSY` (503)**: the server was saturated and did **not check the password**. Nothing was counted toward lockout and the credentials may be right. "Email or password is incorrect" is simply false here, and it sends the user to password reset to fix a problem that is not theirs.
 
 `classifySignInError` turns a thrown error into the arms a sign-in page has to render:
@@ -390,7 +390,7 @@ try {
   switch (failure.kind) {
     case 'invalid_credentials': return { error: 'Email or password is incorrect.' };
     case 'device_required':     return { error: 'This app must be signed in from a registered device.' };
-    case 'device_limit':        return { devices: failure.devices, limit: failure.limit };
+    case 'device_limit':        return { devices: failure.devices, limit: failure.limit, selfRelease: failure.selfRelease };
     case 'device_blocked':      return { error: 'This device was blocked. Contact support.' };
     case 'retry_later':         return { error: `Server busy. Try again in ${failure.retryAfterSeconds ?? 5}s.` };
     case 'other':               return { error: failure.code };
