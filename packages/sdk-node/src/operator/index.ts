@@ -14,8 +14,8 @@ import { segment, type OperatorTransport } from './transport.js';
 export interface RekeyOperatorConfig extends Pick<RekeyConfig, 'apiUrl' | 'fetch' | 'timeoutMs' | 'signal'> {
   /**
    * An operator personal access token (`rp_op_...`), created in the panel
-   * under Account, API tokens. Reads need the `billing:read` scope and writes
-   * `billing:write`. It acts as a workspace member: keep it on a server.
+   * under Account, API tokens. Reads need the `read` scope and writes
+   * `applications:write`. It acts as a workspace member: keep it on a server.
    */
   operatorToken: string;
   /** The Application these calls act on. */
@@ -24,7 +24,9 @@ export interface RekeyOperatorConfig extends Pick<RekeyConfig, 'apiUrl' | 'fetch
 
 /**
  * Operator access to one Application's billing: prices, coupons, payments and
- * refunds, the billing log, reporting and the routing preview.
+ * their refunds, the billing log, reporting and the routing preview. Issuing
+ * a refund, changing provider credentials and changing the billing settings
+ * need an operator session, so they are in the panel and not here.
  *
  * {@link Rekey} acts as your Application towards its end users, with a secret
  * key. This client acts as a member of the workspace that owns the
@@ -51,7 +53,7 @@ export class RekeyOperator {
   public readonly plans: OperatorPlansClient;
   /** Coupons: a percentage, or an amount per currency. */
   public readonly coupons: OperatorCouponsClient;
-  /** Payments and their refunds. */
+  /** Payments and the refunds recorded against them. */
   public readonly payments: OperatorPaymentsClient;
   /** The billing log, its per-record trails, price fallbacks and reconciliation. */
   public readonly billingLog: OperatorBillingLogClient;
@@ -65,7 +67,7 @@ export class RekeyOperator {
       throw new RekeyError({
         code: 'CONFIG_INVALID_OPERATOR_TOKEN',
         message: 'RekeyOperator requires an `operatorToken` (starts with `rp_op_`).',
-        fix: 'Create one in the panel under Account, API tokens, with the `billing:read` scope (and `billing:write` to change anything), then pass it as `operatorToken`. An Application secret key belongs to `new Rekey(...)`.',
+        fix: 'Create one in the panel under Account, API tokens, with the `read` scope (and `applications:write` to change prices, plans, coupons or the reporting currency), then pass it as `operatorToken`. An Application secret key belongs to `new Rekey(...)`.',
       });
     }
     if (!config.applicationId) {
@@ -111,4 +113,4 @@ export { OperatorBillingLogClient, BillingLogEventsClient } from './billing-log.
 export type { BillingLogListOptions, BillingLogTrailOptions, BillingLogPeriod } from './billing-log.js';
 export { OperatorCouponsClient, OperatorPlansClient, OperatorPlanPricesClient } from './catalog.js';
 export { OperatorBillingClient, OperatorPaymentsClient, OperatorRefundsClient } from './money.js';
-export type { OperatorBillingConfigUpdate, OperatorPaymentsListOptions, RoutingPreviewInput } from './money.js';
+export type { OperatorPaymentsListOptions, RoutingPreviewInput } from './money.js';

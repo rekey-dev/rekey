@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ApplicationGrantRole, TenantRole } from '@prisma/client';
 import { resendInvitation } from './invitation-resend.js';
 import { tenantWorkspacesService, workspaceCreationMode } from './tenant-workspaces.service.js';
+import { InvitationAppGrantsSchema } from './invitation-grants.js';
 import { tenantsService } from '../tenants/tenants.service.js';
 import {
   isOperatorInviteToken,
@@ -140,23 +141,12 @@ const WorkspaceLogQuery = z.object({
   status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown', 'scheduled', 'canceled']).optional(),
 });
 
-const InviteAppGrants = z
-  .array(
-    z.object({
-      applicationId: z.string().min(1),
-      role: z.enum(['APP_ADMIN', 'APP_BILLING', 'APP_VIEWER']),
-    }),
-  )
-  .max(100)
-  .refine((gs) => new Set(gs.map((g) => g.applicationId)).size === gs.length, {
-    message: 'Each application may appear once in appGrants.',
-  });
 const InviteBody = z.object({
   email: z.string().email().max(254),
   role: z.enum(['OWNER', 'ADMIN', 'MEMBER']),
-  appGrants: InviteAppGrants.optional(),
+  appGrants: InvitationAppGrantsSchema.optional(),
 });
-const ResendBody = z.object({ appGrants: InviteAppGrants.optional() }).optional();
+const ResendBody = z.object({ appGrants: InvitationAppGrantsSchema.optional() }).optional();
 // The JSON schema twin of InviteAppGrants for the OpenAPI document.
 const appGrantsJsonSchema = {
   type: 'array',

@@ -27,7 +27,7 @@ const button =
   'inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]';
 
 /**
- * The Users overview filter bar. Everything is a GET form (no `action`, so it
+ * The Insights page filter bar. Everything is a GET form (no `action`, so it
  * submits to this page) or a link, so the
  * URL is the state and the page works without JavaScript; the selects only
  * submit themselves on change as a convenience.

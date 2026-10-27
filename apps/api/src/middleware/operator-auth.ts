@@ -22,6 +22,18 @@ import { patTokenScopes } from '../lib/operator-scopes.js';
 import { resolveOperatorToken } from './operator-token-auth.js';
 import { requireTenantSession } from './tenant-session.js';
 
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    /**
+     * `true` admits an operator personal access token on this route, in a
+     * plugin whose hook is `requireSessionOrOptedInToken`; every other route
+     * there stays session-only. `false` makes a route session-only in a
+     * plugin whose hook is `requireOperatorAuth`.
+     */
+    operatorToken?: boolean;
+  }
+}
+
 /**
  * `onRequest` guard accepting an operator PAT or an operator session.
  *
@@ -31,12 +43,34 @@ import { requireTenantSession } from './tenant-session.js';
  * ```
  */
 export async function requireOperatorAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const header = request.headers.authorization ?? '';
-  if (!header.startsWith('Bearer ') || !isOperatorToken(header.slice(7))) {
-    return requireTenantSession(request, reply);
-  }
+  if (!bearsOperatorToken(request)) return requireTenantSession(request, reply);
+  // Refused before the scope check, so a token is never told to fetch a scope that would not help.
+  if (request.routeOptions.config.operatorToken === false) throw tokenNotAccepted();
   await resolveOperatorToken(request, reply);
   assertTokenCoversRoute(request, request.operatorTokenScopes ?? []);
+}
+
+/**
+ * `onRequest` guard for a plugin where most routes are session-only: a route
+ * that sets `config.operatorToken` gets {@link requireOperatorAuth}, every
+ * other route `requireTenantSession`, and a token there is refused with
+ * `OPERATOR_TOKEN_NOT_ACCEPTED` rather than read as a broken session.
+ *
+ * @example
+ * ```ts
+ * app.addHook('onRequest', requireSessionOrOptedInToken);
+ * app.get('/:id/plans', { config: { access: { scope: 'billing:read' }, operatorToken: true } }, handler);
+ * ```
+ */
+export async function requireSessionOrOptedInToken(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (request.routeOptions.config.operatorToken === true) return requireOperatorAuth(request, reply);
+  if (bearsOperatorToken(request)) throw tokenNotAccepted();
+  return requireTenantSession(request, reply);
+}
+
+function bearsOperatorToken(request: FastifyRequest): boolean {
+  const header = request.headers.authorization ?? '';
+  return header.startsWith('Bearer ') && isOperatorToken(header.slice(7));
 }
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -60,18 +94,11 @@ function assertTokenCoversRoute(request: FastifyRequest, tokenScopes: readonly s
   });
 }
 
-/**
- * `preHandler` for a route behind `requireOperatorAuth` that must stay
- * session-only, such as a bulk personal-data export that should leave an
- * audit trail tied to someone at the panel, not a long-lived token.
- */
-export async function refuseOperatorToken(request: FastifyRequest): Promise<void> {
-  if (request.operatorTokenScopes !== undefined) {
-    throw new RekeyError({
-      statusCode: 403,
-      code: 'OPERATOR_TOKEN_NOT_ACCEPTED',
-      message: 'This action needs an operator session; a personal access token cannot perform it.',
-      fix: 'Do this from the Rekey panel, or call the route with a session access token from POST /api/v1/tenant/auth/sign-in.',
-    });
-  }
+function tokenNotAccepted(): RekeyError {
+  return new RekeyError({
+    statusCode: 403,
+    code: 'OPERATOR_TOKEN_NOT_ACCEPTED',
+    message: 'This action needs an operator session; a personal access token cannot perform it.',
+    fix: 'Do this from the Rekey panel, or call the route with a session access token from POST /api/v1/tenant/auth/sign-in.',
+  });
 }

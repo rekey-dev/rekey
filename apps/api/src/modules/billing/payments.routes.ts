@@ -7,13 +7,13 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok } from '../../lib/openapi.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { TENANT_PAYMENT_JSON_SCHEMA, getTenantPayment } from './tenant-payments.js';
 
 const Params = z.object({ id: z.string().min(1), paymentId: z.string().min(1) });
 
 export async function paymentsRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/payments/:paymentId',
@@ -21,7 +21,7 @@ export async function paymentsRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'One payment',
         description:
           'Requires **read** access to this Application.\n\n' +

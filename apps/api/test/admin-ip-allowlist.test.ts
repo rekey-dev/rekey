@@ -194,10 +194,16 @@ describe("ADMIN_IP_ALLOWLIST with an address the API cannot vouch for", () => {
     expect(
       adminIpAllowlistWarning({ ...noSecret, proxySecret: "set" }),
     ).toBeNull();
-    // A hop count vouches every request, so the gate still has an address.
+    // A hop count believes X-Forwarded-For from any peer, so the gate is spoofable.
     expect(
       adminIpAllowlistWarning({ ...noSecret, internalCallers: 1 }),
-    ).toBeNull();
+    ).toMatch(/TRUSTED_PROXIES is a hop count/);
+    expect(
+      adminIpAllowlistWarning({ ...noSecret, internalCallers: 1, proxySecret: "set" }),
+    ).toMatch(/TRUSTED_PROXIES is a hop count/);
+    expect(
+      adminIpAllowlistWarning({ ...noSecret, internalCallers: ["10.0.0.0/8"] }),
+    ).toMatch(/API_PROXY_SECRET/);
 
     delete process.env.ADMIN_IP_ALLOWLIST;
     expect(adminIpAllowlistWarning(noSecret)).toBeNull();

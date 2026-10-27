@@ -54,7 +54,7 @@ export function timezoneOptions(current: string): string[] {
 }
 
 /**
- * The zone the Users overview counts days in, saved with
+ * The zone the Insights page counts days in, saved with
  * `PATCH /tenant/applications/:id/settings`.
  */
 export function ReportingTimezone({
@@ -71,7 +71,7 @@ export function ReportingTimezone({
     <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4">
       <h3 className="text-sm font-medium text-[var(--color-fg)]">Reporting timezone</h3>
       <p className="mt-1 max-w-prose text-xs text-[var(--color-muted-fg)]">
-        The day boundary Users &gt; Overview counts in. A change applies to days counted from now on; history
+        The day boundary Users &gt; Insights counts in. A change applies to days counted from now on; history
         already recorded keeps the zone it was counted in, and the last 63 days of live activity are always UTC.
       </p>
       {!canWrite && (

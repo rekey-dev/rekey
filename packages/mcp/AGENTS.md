@@ -26,7 +26,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that lets you
 
 The server reads `REKEY_URL` plus at least one credential from its env: `SUPER_ADMIN_KEY` for the deployment-wide read tools, `REKEY_OPERATOR_TOKEN` for the billing tools and the write tools, or both. It exits with a clear stderr message when `REKEY_URL` or every credential is missing. Running with the operator token alone is a supported setup; the deployment-wide read tools then fail closed with `READ_REQUIRES_ADMIN_KEY`.
 
-`REKEY_OPERATOR_TOKEN` is an operator personal-access-token (`rp_op_…`), minted in the Panel (or via `POST /api/v1/tenant/auth/api-tokens`), scoped to a single workspace and a set of permissions. The billing reads need `billing:read`, the billing writes `billing:write`, and `mint_api_key` needs `keys:mint`; without the scope the server rejects the call (default-deny). The deployment-wide read tools never use this token.
+`REKEY_OPERATOR_TOKEN` is an operator personal-access-token (`rp_op_…`), minted in the Panel (or via `POST /api/v1/tenant/auth/api-tokens`), scoped to a single workspace and a set of permissions. The billing reads need `read`, the billing writes `applications:write`, and `mint_api_key` needs `keys:mint`; without the scope the server rejects the call (default-deny). The deployment-wide read tools never use this token.
 
 ## Tools
 
@@ -48,7 +48,7 @@ before telling the user you listed everything.
 | `get_payment_stats_by_app` | 30-day per-application payment health: succeeded/failed/pending/refunded counts, success rate, `volumeByCurrency` (one entry per currency, no total) |
 | `get_billing_outbox_status` | Billing events waiting to reach the billing log: `pending`, `due`, `failing`, and the `stuck` rows |
 
-Billing read tools of one Application (authenticated with `REKEY_OPERATOR_TOKEN`, scope `billing:read`):
+Billing read tools of one Application (authenticated with `REKEY_OPERATOR_TOKEN`, scope `read`):
 
 | Tool | What it does |
 | --- | --- |
@@ -65,12 +65,11 @@ Write tools (authenticated with the scoped `REKEY_OPERATOR_TOKEN`):
 | Tool | What it does |
 | --- | --- |
 | `mint_api_key` | Mint a new secret key for an Application. Args: `applicationId`, `name`, `scopes?`. Scope `keys:mint`. The prefix follows the Application's environment (`PRODUCTION` gives `rp_live_…`, otherwise `rp_test_…`) and is not selectable. The raw key is returned **exactly once**: surface it immediately and warn it is unrecoverable. |
-| `set_plan_price` | Add a price in another currency to a plan, or change one. Args: `applicationId`, `plan` (id or slug), `currency`, `amount?`, `countries?`. Scope `billing:write`. `amount` is required to add a price and can change only until a provider has registered it. |
-| `archive_plan_price` | Stop selling a plan in one currency. Args: `applicationId`, `plan`, `currency`. Scope `billing:write`. The row is kept, archived, when a subscription, a payment or a credit grant names it, and deleted when nothing does. |
-| `create_coupon` | Create a coupon. Args: `applicationId`, `code`, `discountType` (`PERCENT`/`AMOUNT`), `basisPoints?`, `amounts?` (`[{currency, amountOff}]`), `currencies?`, `planSlugs?`, `startsAt?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `billing:write`. |
-| `update_coupon` | Change a coupon. Args: `applicationId`, `code`, `active?`, `basisPoints?`, `amounts?`, `currencies?`, `planSlugs?`. Scope `billing:write`. `amounts` replaces the whole set. |
-| `set_reporting_currency` | Set the currency an Application reports in. Args: `applicationId`, `reportingCurrency`. Scope `billing:write`. Converts nothing. |
-| `create_refund` | Refund a payment at its provider, in full or in part. Args: `applicationId`, `paymentId`, `amount?`, `reason?`, `idempotencyKey?`. Scope `billing:write`. **Moves money**: confirm the payment and the amount with the user first. |
+| `set_plan_price` | Add a price in another currency to a plan, or change one. Args: `applicationId`, `plan` (id or slug), `currency`, `amount?`, `countries?`. Scope `applications:write`. `amount` is required to add a price and can change only until a provider has registered it. |
+| `archive_plan_price` | Stop selling a plan in one currency. Args: `applicationId`, `plan`, `currency`. Scope `applications:write`. The row is kept, archived, when a subscription, a payment or a credit grant names it, and deleted when nothing does. |
+| `create_coupon` | Create a coupon. Args: `applicationId`, `code`, `discountType` (`PERCENT`/`AMOUNT`), `basisPoints?`, `amounts?` (`[{currency, amountOff}]`), `currencies?`, `planSlugs?`, `startsAt?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `applications:write`. |
+| `update_coupon` | Change a coupon. Args: `applicationId`, `code`, `active?`, `basisPoints?`, `amounts?`, `currencies?`, `planSlugs?`. Scope `applications:write`. `amounts` replaces the whole set. |
+| `set_reporting_currency` | Set the currency an Application reports in. Args: `applicationId`, `reportingCurrency`. Scope `applications:write`. Converts nothing. |
 
 ## Write-tool safety model
 
@@ -81,7 +80,7 @@ No write tool uses the all-powerful `SUPER_ADMIN_KEY`. Each authenticates as a *
 - PAT bound to a different workspace than the Application's: `APPLICATION_NOT_FOUND` (404), same as a non-existent app (no cross-tenant oracle).
 - PAT revoked or expired: 401, effective immediately.
 
-Call a write tool only when the user **explicitly** asks for that change, and say what you are about to change before you do. `create_refund` moves money: confirm the payment id and the amount with the user first, and never issue a refund on your own judgement. A hosted deployment also runs an operator MCP server at `/api/v1/tenant/mcp` with a much larger tool set, including plan creation and subscription changes; that is a different server with its own OAuth and switches, not something this package reaches. For a mutation this server has no tool for:
+Call a write tool only when the user **explicitly** asks for that change, and say what you are about to change before you do. There is no refund tool: a refund needs an operator session, so the user issues it in the Panel. A hosted deployment also runs an operator MCP server at `/api/v1/tenant/mcp` with a much larger tool set, including plan creation and subscription changes; that is a different server with its own OAuth and switches, not something this package reaches. For a mutation this server has no tool for:
 
 1. Help them figure out what to do via the read-only tools.
 2. Tell them to run the operation via `rekey <command>` (the CLI) or the Panel.

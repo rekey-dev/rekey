@@ -42,7 +42,7 @@ export const COUPON_FORM_ERR: Record<string, string> = {
 };
 
 const linkButton =
-  'cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
+  'inline-block py-1.5 cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
 
 function initialTerms(coupon: CouponRow): CouponTermsInitial {
   return {
@@ -185,13 +185,13 @@ export function CouponsTable({
                   </Modal>
                   <ActionForm action={setCouponActive.bind(null, applicationId, c.code, !c.active)} className="inline">
                     {c.active ? (
-                      <ConfirmButton confirm={`Deactivate coupon "${c.code}"? It can no longer be redeemed at checkout.`}>
+                      <ConfirmButton title="Deactivate coupon?" confirm={`Deactivate coupon "${c.code}"? It can no longer be redeemed at checkout.`}>
                         Deactivate
                       </ConfirmButton>
                     ) : (
                       <SubmitButton
                         pendingLabel="Reactivating…"
-                        className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                        className="inline-block py-1.5 rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         Reactivate
                       </SubmitButton>

@@ -10,7 +10,8 @@
  *   └──────────────────────────────────────────────────────────────────┘
  *
  * The active group is derived from the current path's first segment under
- * `/applications/{id}`. Clicking a group jumps to its first sub-tab; clicking
+ * `/applications/{id}`, and the active tab is the longest section path the
+ * current path sits under (Email's tabs are two segments deep). Clicking a group jumps to its first sub-tab; clicking
  * the already-active group is a no-op (links to the current path). Groups with
  * a single sub-tab (Overview, Audience) render no second row, the primary row
  * carries the bottom border instead.
@@ -58,6 +59,7 @@ interface Group {
   entrySeg?: string;
   /** Sub-tabs to hide from the second row without removing them from matching. */
   hiddenSegs?: readonly string[];
+  fallbackSeg?: string;
 }
 
 export function AppNav({
@@ -77,7 +79,11 @@ export function AppNav({
   const pathname = usePathname() ?? '';
   const base = `/applications/${id}`;
   const suffix = pathname.startsWith(base) ? pathname.slice(base.length) : '';
-  const currentSeg = suffix.replace(/^\//, '').split('/')[0] ?? '';
+  const currentPath = suffix.replace(/^\//, '');
+  const currentSeg = currentPath.split('/')[0] ?? '';
+  const inGroup = (c: AppSection): boolean => (c.seg.split('/')[0] ?? '') === currentSeg;
+  const matches = (c: AppSection): boolean =>
+    c.seg === currentPath || (!c.exact && c.seg !== '' && currentPath.startsWith(`${c.seg}/`));
 
   const billingLabel = billingEnabled ? (
     'Billing'
@@ -100,7 +106,7 @@ export function AppNav({
           children: g.sections,
           ...(billingEnabled ? {} : { entrySeg: 'billing', hiddenSegs: BILLING_GATED_SEGS }),
         }
-      : { key: g.key, label: g.label, children: g.sections },
+      : { key: g.key, label: g.label, children: g.sections, ...(g.fallbackSeg ? { fallbackSeg: g.fallbackSeg } : {}) },
   );
 
   const hrefFor = (seg: string): string => (seg === '' ? base : `${base}/${seg}`);
@@ -120,7 +126,7 @@ export function AppNav({
       const active = row?.querySelector<HTMLElement>('[aria-current="page"]');
       active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
-  }, [currentSeg]);
+  }, [currentPath]);
 
   // Sections the caller cannot read are not offered. A group with nothing
   // left is not offered either. The active-group lookup runs on the full
@@ -129,15 +135,21 @@ export function AppNav({
     .map((g) => ({ ...g, children: g.children.filter((c) => visible(c.seg)) }))
     .filter((g) => g.children.length > 0);
   const activeGroup =
-    scoped.find((g) => g.children.some((c) => c.seg === currentSeg)) ??
-    groups.find((g) => g.children.some((c) => c.seg === currentSeg)) ??
+    scoped.find((g) => g.children.some(inGroup)) ??
+    groups.find((g) => g.children.some(inGroup)) ??
     scoped[0] ??
     groups[0]!;
+  const activeSeg =
+    activeGroup.children
+      .filter(matches)
+      .sort((a, b) => b.seg.length - a.seg.length)[0]?.seg ??
+    activeGroup.fallbackSeg ??
+    currentSeg;
   const hidden = new Set<string>(activeGroup.hiddenSegs ?? []);
   // Keep a hidden child visible while you are standing on it, otherwise the row
   // would render without the current page in it.
   const visibleChildren = activeGroup.children.filter(
-    (c) => !hidden.has(c.seg) || c.seg === currentSeg,
+    (c) => (!c.navHidden && !hidden.has(c.seg)) || c.seg === activeSeg,
   );
   const hasSubRow = visibleChildren.length > 1;
 
@@ -190,11 +202,18 @@ export function AppNav({
             ref={subRowRef}
             className="flex items-center gap-1 border-b border-[var(--color-border)] overflow-x-auto px-6"
           >
-            {visibleChildren.map((c) => {
-              const isActive = c.seg === currentSeg;
+            {visibleChildren.map((c, i) => {
+              const isActive = c.seg === activeSeg;
               return (
+                <React.Fragment key={c.seg || 'index'}>
+                {c.divideBefore && i > 0 && (
+                  <span
+                    role="separator"
+                    aria-orientation="vertical"
+                    className="mx-2 h-5 w-px shrink-0 bg-[var(--color-border)]"
+                  />
+                )}
                 <Link
-                  key={c.seg || 'index'}
                   href={hrefFor(c.seg)}
                   aria-current={isActive ? 'page' : undefined}
                   className={`-mb-px shrink-0 whitespace-nowrap rounded-t border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)] ${
@@ -205,6 +224,7 @@ export function AppNav({
                 >
                   <LinkPending>{c.label}</LinkPending>
                 </Link>
+                </React.Fragment>
               );
             })}
           </nav>

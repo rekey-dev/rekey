@@ -79,7 +79,7 @@ export function EngagementTiles({
 /**
  * Nine weeks as a heat grid, one column per week and today bottom right: the
  * whole window the activity bits remember, the same shape as the retention
- * grid on Users > Overview.
+ * grid on Users > Insights.
  */
 function ActivityGrid({ days }: { days: boolean[] }): React.JSX.Element {
   const active = days.filter(Boolean).length;

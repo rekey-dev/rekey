@@ -1,7 +1,8 @@
 /**
  * Operator MCP read tools for billing: what a buyer would be charged, how
  * often a price fell back, whether the log agrees with the records, one
- * payment and its refunds, the reporting currency and the stats per currency.
+ * payment and its refunds, the reporting currency and the stats per currency,
+ * licenses, subscription import runs, unapplied payments and dunning cases.
  *
  * Each calls the function its REST route calls and returns what that route
  * returns, behind `billing:read` in TOOL_SCOPES.
@@ -15,6 +16,11 @@ import { getTenantPayment } from '../billing/tenant-payments.js';
 import { reportingCurrency, reportingCurrencyDto } from '../billing/reporting-currency.js';
 import { previewRouting } from '../billing/routing-preview.js';
 import { billingStatsService } from '../billing/stats.service.js';
+import { listDunningCases } from '../billing/dunning-cases.js';
+import { isApplyStale } from '../billing/import.service.js';
+import { unappliedPaymentsService } from '../billing/unapplied-payments.service.js';
+import { licensesService } from '../licenses/licenses.service.js';
+import { prisma } from '../../lib/prisma.js';
 import type { OperatorTool } from './operator-tools.js';
 import { loadAppInTenant } from './operator-write-tools.js';
 import { ApplicationIdArg, CurrencyArg, MINOR_UNITS, defineTool } from './tool-definition.js';
@@ -54,6 +60,15 @@ const RoutingPreviewArgs = z
   })
   .strict();
 
+const PageArgs = {
+  limit: z.number().int().min(1).max(100).default(25),
+  offset: z.number().int().min(0).max(1_000_000).default(0),
+};
+
+function page<T>(items: T[], total: number, limit: number, offset: number) {
+  return { items, total, limit, offset, hasMore: offset + items.length < total };
+}
+
 export const operatorBillingReadTools: OperatorTool[] = [
   defineTool({
     name: 'preview_checkout_routing',
@@ -69,7 +84,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
     args: RoutingPreviewArgs,
     annotations: READ_ONLY,
     run: async (ctx, { applicationId, ...request }) => {
-      const app = await loadAppInTenant(ctx, applicationId);
+      const app = await loadAppInTenant(ctx, applicationId, 'read');
       return previewRouting(app, request);
     },
   }),
@@ -83,7 +98,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
     args: PeriodArgs,
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       return priceFallbackSummary(app.id, reconciliationPeriod({ from: input.from, to: input.to }));
     },
   }),
@@ -98,7 +113,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
     args: PeriodArgs,
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       return reconcileApplication(app.id, reconciliationPeriod({ from: input.from, to: input.to }));
     },
   }),
@@ -119,7 +134,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
       .strict(),
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       return getTenantPayment(app.id, input.paymentId);
     },
   }),
@@ -140,7 +155,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
       .strict(),
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       const { items, page } = await refundsService.listForPayment(app.id, input.paymentId, {
         limit: input.limit,
         offset: input.offset,
@@ -157,7 +172,7 @@ export const operatorBillingReadTools: OperatorTool[] = [
     args: z.object({ applicationId: ApplicationIdArg }).strict(),
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       return reportingCurrencyDto(reportingCurrency(app));
     },
   }),
@@ -176,8 +191,96 @@ export const operatorBillingReadTools: OperatorTool[] = [
     args: z.object({ applicationId: ApplicationIdArg }).strict(),
     annotations: READ_ONLY,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       return billingStatsService.cached(app.id);
+    },
+  }),
+  defineTool({
+    name: 'list_licenses',
+    description:
+      "An application's licenses, newest first: holder, plan, kind, status, `keyPrefix`, expiry and seats. " +
+      'The license key itself is never returned.',
+    args: z.object({ applicationId: ApplicationIdArg, ...PageArgs }).strict(),
+    annotations: READ_ONLY,
+    run: async (ctx, input) => {
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
+      const [items, total] = await Promise.all([
+        licensesService.listForApplication(app.id, { take: input.limit, skip: input.offset }),
+        licensesService.countForApplication(app.id),
+      ]);
+      return page(items, total, input.limit, input.offset);
+    },
+  }),
+  defineTool({
+    name: 'list_subscription_imports',
+    description:
+      "An application's subscription import runs, newest first: provider, mode (dry_run or applied), status, " +
+      'match strategy, `counts` per outcome and `error`. `stale` is an `applying` run with no heartbeat for ' +
+      'five minutes, which applying again resumes. Starting or applying an import stays in the panel and REST.',
+    args: z.object({ applicationId: ApplicationIdArg, ...PageArgs }).strict(),
+    annotations: READ_ONLY,
+    run: async (ctx, input) => {
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
+      const where = { applicationId: app.id };
+      const [runs, total] = await Promise.all([
+        prisma.subscriptionImportRun.findMany({ where, take: input.limit, skip: input.offset, orderBy: { createdAt: 'desc' } }),
+        prisma.subscriptionImportRun.count({ where }),
+      ]);
+      const now = new Date();
+      const items = runs.map(({ applyLease: _lease, ...run }) => ({ ...run, stale: isApplyStale(run, now) }));
+      return page(items, total, input.limit, input.offset);
+    },
+  }),
+  defineTool({
+    name: 'list_unapplied_payments',
+    description:
+      'Money a provider took that Rekey never applied (a succeeded payment with no subscription, usually a ' +
+      'checkout that completed after Rekey stopped waiting), OLDEST first because refund windows close. Each ' +
+      `has \`amount\` and \`refundedAmount\` (each an ${MINOR_UNITS}), \`currency\`, \`status\`, the end user, ` +
+      '`ageDays` and `refundable`. Resolving one stays in the panel and REST.',
+    args: z
+      .object({
+        applicationId: ApplicationIdArg,
+        status: z.enum(['OPEN', 'REFUNDED', 'ENTITLEMENT_GRANTED', 'DISMISSED']).optional(),
+        ...PageArgs,
+      })
+      .strict(),
+    annotations: READ_ONLY,
+    run: async (ctx, input) => {
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
+      const { items, total } = await unappliedPaymentsService.list(app.id, {
+        ...(input.status && { status: input.status }),
+        limit: input.limit,
+        offset: input.offset,
+      });
+      return page(items, total, input.limit, input.offset);
+    },
+  }),
+  defineTool({
+    name: 'get_dunning_status',
+    description:
+      "An application's failed-payment recovery cases, newest first. A case opens when a subscription goes " +
+      'PAST_DUE, sends reminders on day 0, 3 and 7 and is EXHAUSTED (subscription canceled) on day 14. Each has ' +
+      'the subscription, end user, plan, `status`, `failedAttempts`, `remindersSent` and `nextActionAt`. ' +
+      'Pass `subscriptionId` for one subscription.',
+    args: z
+      .object({
+        applicationId: ApplicationIdArg,
+        status: z.enum(['OPEN', 'RECOVERED', 'EXHAUSTED', 'CANCELED']).optional(),
+        subscriptionId: z.string().min(1).max(200).optional().describe('Only cases on this subscription.'),
+        ...PageArgs,
+      })
+      .strict(),
+    annotations: READ_ONLY,
+    run: async (ctx, input) => {
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
+      const { items, total } = await listDunningCases(app.id, {
+        status: input.status,
+        subscriptionId: input.subscriptionId,
+        take: input.limit,
+        skip: input.offset,
+      });
+      return page(items, total, input.limit, input.offset);
     },
   }),
 ];

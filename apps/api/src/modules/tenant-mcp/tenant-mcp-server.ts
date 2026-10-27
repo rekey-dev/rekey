@@ -27,6 +27,9 @@ import { operatorPlanTools } from './operator-plan-tools.js';
 import { operatorCouponTools } from './operator-coupon-tools.js';
 import { operatorBillingReadTools } from './operator-billing-read-tools.js';
 import { operatorBillingWriteTools } from './operator-billing-write-tools.js';
+import { operatorEndUserReadTools } from './operator-end-user-read-tools.js';
+import { operatorWebhookReadTools } from './operator-webhook-read-tools.js';
+import { operatorMemberReadTools } from './operator-member-read-tools.js';
 import { assertOperatorVerifiedForCredential } from '../tenant-auth/operator-confirmation.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
@@ -48,6 +51,9 @@ export const allOperatorTools: readonly OperatorTool[] = [
   ...operatorCouponTools,
   ...operatorBillingReadTools,
   ...operatorBillingWriteTools,
+  ...operatorEndUserReadTools,
+  ...operatorWebhookReadTools,
+  ...operatorMemberReadTools,
 ];
 
 /**
@@ -71,6 +77,11 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   list_payment_refunds: 'billing:read',
   get_reporting_currency: 'billing:read',
   get_billing_stats: 'billing:read',
+  list_licenses: 'billing:read',
+  list_subscription_imports: 'billing:read',
+  list_unapplied_payments: 'billing:read',
+  get_dunning_status: 'billing:read',
+  get_end_user_credits: 'billing:read',
   list_coupons: 'billing:read',
   create_coupon: 'billing:write',
   update_coupon: 'billing:write',
@@ -92,12 +103,14 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   recent_security_events: 'activity:read',
   recent_webhook_events: 'developer:read',
   recent_failed_webhook_deliveries: 'developer:read',
+  list_webhook_deliveries: 'developer:read',
   create_webhook_endpoint: 'developer:write',
   update_webhook_endpoint: 'developer:write',
   list_api_keys: 'developer:read',
   revoke_api_key: 'developer:write',
   mint_api_key: 'developer:write',
   get_end_user: 'end-users:read',
+  list_end_users: 'end-users:read',
   list_devices: 'end-users:read',
   release_device: 'end-users:write',
   block_device: 'end-users:write',
@@ -109,6 +122,7 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   update_organization_role: 'organizations:write',
   delete_organization_role: 'organizations:write',
   list_organizations: 'organizations:read',
+  get_organization: 'organizations:read',
   add_organization_member: 'organizations:write',
   set_organization_member_role: 'organizations:write',
   update_auth_config: 'auth-config:write',
@@ -133,6 +147,7 @@ export const WORKSPACE_TOOLS: ReadonlySet<string> = new Set([
   'list_applications',
   'list_members',
   'list_invitations',
+  'list_member_grants',
   'invite_member',
   'revoke_invitation',
   'change_member_role',

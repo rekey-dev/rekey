@@ -7,7 +7,6 @@
  */
 
 import * as React from 'react';
-import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, api, PanelApiError } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
@@ -130,16 +129,9 @@ export default async function PasskeysPage({
   });
 
   return (
-    <section className="mx-auto max-w-7xl space-y-5 px-6 py-8 lg:px-8">
+    <section className="space-y-5">
       <PageHeader
-        eyebrow={
-          <Link
-            href="/account/security"
-            className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-          >
-            ← Security
-          </Link>
-        }
+        level={2}
         title="Passkeys"
         description="Sign into the panel without a password using your device's biometric (Touch ID, Windows Hello) or a hardware key. Stronger than TOTP and phishing-resistant."
       />
@@ -196,7 +188,7 @@ export default async function PasskeysPage({
                   </TD>
                   <TD align="right">
                     <ActionForm action={deletePasskey.bind(null, p.id)} className="inline">
-                      <ConfirmButton confirm={`Remove the passkey "${p.deviceName ?? 'Unnamed device'}"? You will need to register a new one to use passkey sign-in from this device.`}>
+                      <ConfirmButton title="Remove passkey?" confirm={`Remove the passkey "${p.deviceName ?? 'Unnamed device'}"? You will need to register a new one to use passkey sign-in from this device.`}>
                         Remove
                       </ConfirmButton>
                     </ActionForm>

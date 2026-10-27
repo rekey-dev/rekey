@@ -63,7 +63,7 @@ import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '.
 import { TENANT_PAYMENT_JSON_SCHEMA, TENANT_PAYMENT_SELECT, toTenantPayments } from '../billing/tenant-payments.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import type { LicenseKind } from '@prisma/client';
-import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema, ONBOARDING_STATUSES, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema, onboardingStatus } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema, ONBOARDING_STATUSES, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { isPlainHttp, plainHttpRefused, urlNotHttps } from '../../lib/ssrf-guard.js';
 import { hashPassword } from '../../lib/passwords.js';
@@ -77,10 +77,8 @@ import { applicationRolesService } from '../application-roles/application-roles.
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
-import {
-  requireTenantSession,
-  requireTenantRole,
-} from '../../middleware/tenant-session.js';
+import { requireTenantRole } from '../../middleware/tenant-session.js';
+import { requireSessionOrOptedInToken } from '../../middleware/operator-auth.js';
 import {
   ensureAppAccess,
   appAccessScope,
@@ -124,6 +122,8 @@ import { positiveBoundedInt } from '../../lib/bounded-int.js';
 import { ok, okPage, okArray, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 import { endUserListOrder } from '../end-users/list-order.js';
+import { END_USER_LIST_SELECT, endUserListRow } from '../end-users/list-rows.js';
+import { listDunningCases } from '../billing/dunning-cases.js';
 import { mayReadRawIps, operatorIpProjection } from '../../lib/ip-mask.js';
 import { END_USER_LIST_FILTER_JSON_SCHEMA, EndUserListFilterQuery, endUserListWhere } from '../end-users/list-filters.js';
 import { billingEventsForExport, eraseEndUserFromBillingLog } from '../billing-log/index.js';
@@ -785,17 +785,17 @@ async function requireOrganizationsEnabled(applicationId: string): Promise<void>
 }
 
 export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireSessionOrOptedInToken);
 
   // ---------- Applications ----------
 
   app.get(
     '/',
     {
-      config: { access: { open: true } },
+      config: { access: { open: true }, operatorToken: true },
       schema: {
         tags: ['Tenant · Applications'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List Applications in the active workspace',
         description:
           'Every filter is optional and they combine. Without `status` the page holds running and ' +
@@ -976,10 +976,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id',
     {
-      config: { access: { project: 'application' } },
+      config: { access: { project: 'application' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Applications'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Get one Application (must belong to the active workspace)',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -1838,7 +1838,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Only when the value actually CHANGES. Patching the config for an
       // unrelated reason must not be blocked by a subject that is staying put.
       if (body.billingSubject !== undefined) {
-        const current = await applicationsService.get(id);
+        const current = await applicationsService.get(id, { tenantId: req.tenantId! });
         const currentSubject =
           BillingConfigSchema.parse(current.billingConfig).billingSubject ?? 'user';
         if (body.billingSubject !== currentSubject) {
@@ -2045,10 +2045,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/plans',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Plans'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List Plans',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -2087,10 +2087,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     '/:id/plans',
     {
       // Generic Idempotency-Key header support (scoped to the workspace).
-      config: { access: { scope: 'billing:write' }, idempotency: true },
+      config: { access: { scope: 'billing:write' }, operatorToken: true, idempotency: true },
       schema: {
         tags: ['Tenant · Plans'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Create a Plan',
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
@@ -2196,10 +2196,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.patch(
     '/:id/plans/:slug',
     {
-      config: { access: { scope: 'billing:write' } },
+      config: { access: { scope: 'billing:write' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Plans'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Update a Plan',
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
@@ -2608,10 +2608,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/billing/providers',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Discover all registered billing provider modules (+ per-app status)',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -2755,10 +2755,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/billing-credentials',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List all billing providers configured for this Application',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -3253,10 +3253,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/billing/stats',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Revenue / subscription stats for this Application (Billing Overview tiles)',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -3287,10 +3287,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/payments',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List payments for this Application (newest first)',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -3401,10 +3401,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/unapplied-payments',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List unapplied payments for this Application (OLDEST first)',
         description:
           'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
@@ -3701,61 +3701,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .merge(PaginationQuery)
         .parse(req.query);
       const { take, skip } = parsePagination(q);
-      const order = q.order ?? 'desc';
-      const primaryOrder =
-        q.sort === 'nextActionAt'
-          ? { nextActionAt: order }
-          : q.sort === 'status'
-            ? { status: order }
-            : { openedAt: order };
-      const where = { applicationId: id, ...(q.status && { status: q.status }) };
-      const [cases, total] = await Promise.all([
-        prisma.dunningCase.findMany({
-          where,
-          include: { subscription: { select: { plan: { select: { slug: true, name: true } } } } },
-          // Stable secondary order by id so pages never overlap/skip.
-          orderBy: [primaryOrder, { id: 'desc' }],
-          take,
-          skip,
-        }),
-        prisma.dunningCase.count({ where }),
-      ]);
-      // DunningCase.endUserId is a plain column (like Payment), join the
-      // emails with a second bounded query.
-      const userIds = [
-        ...new Set(cases.map((c) => c.endUserId).filter((v): v is string => v !== null)),
-      ];
-      const users = userIds.length
-        ? await prisma.endUser.findMany({
-            where: { id: { in: userIds } },
-            select: { id: true, email: true },
-          })
-        : [];
-      const emailById = new Map(users.map((u) => [u.id, u.email]));
-      return {
-        success: true,
-        data: paged(
-          cases.map((c) => ({
-            id: c.id,
-            subscriptionId: c.subscriptionId,
-            endUserId: c.endUserId,
-            endUserEmail: c.endUserId ? (emailById.get(c.endUserId) ?? null) : null,
-            organizationId: c.organizationId,
-            status: c.status,
-            planSlug: c.subscription.plan.slug,
-            planName: c.subscription.plan.name,
-            failedAttempts: c.failedAttempts,
-            remindersSent: c.remindersSent,
-            lastFailureAt: c.lastFailureAt?.toISOString() ?? null,
-            nextActionAt: c.nextActionAt?.toISOString() ?? null,
-            openedAt: c.openedAt.toISOString(),
-            closedAt: c.closedAt?.toISOString() ?? null,
-          })),
-          total,
-          take,
-          skip,
-        ),
-      };
+      const { items, total } = await listDunningCases(id, { status: q.status, sort: q.sort, order: q.order, take, skip });
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -4033,22 +3980,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           orderBy: [endUserListOrder(q.sort, order), { id: 'desc' }],
           take,
           skip,
-          select: {
-            id: true, email: true, emailVerified: true, role: true, metadata: true, bannedAt: true, erasedAt: true,
-            createdAt: true, lastSignedInAt: true, lastActiveOn: true, lastPlatform: true, lastCountry: true, profile: true,
-            onboardingCompletedAt: true, onboardingSkippedAt: true, createdVia: true,
-          },
+          select: END_USER_LIST_SELECT,
         }),
         prisma.endUser.count({ where }),
       ]);
-      const rows = users.map(({ erasedAt, bannedAt, onboardingCompletedAt, onboardingSkippedAt, createdVia, lastActiveOn, ...user }) => ({
-        ...user,
-        bannedAt: erasedAt ? null : bannedAt,
-        lastActiveOn: lastActiveOn ? lastActiveOn.toISOString().slice(0, 10) : null,
-        onboardingStatus: onboardingStatus({ onboardingCompletedAt, onboardingSkippedAt }),
-        createdVia: createdVia ?? 'unknown',
-      }));
-      return { success: true, data: paged(rows, total, take, skip) };
+      return { success: true, data: paged(users.map(endUserListRow), total, take, skip) };
     },
   );
 

@@ -1,18 +1,28 @@
 import * as React from 'react';
 import { Badge } from '@/components/Badge';
+import { ActionForm } from '@/components/ActionForm';
+import { SubmitButton } from '@/components/SubmitButton';
+import { setOnboardingOutcome } from './actions';
 import { formatDate, formatDateTime, formatRelative } from '@/lib/date';
 import { describeSource, signInViaLabel, type EndUserInsightsDto } from './insights';
+
+const ONBOARDING_BUTTON =
+  'rounded-md border border-[var(--color-border)] px-2 py-1 text-xs font-medium hover:bg-[var(--color-surface-muted)] disabled:opacity-60';
 
 /**
  * The sign-in lines of the Profile card: first and last sign-in, and
  * onboarding. "Has not signed in" is only said when insights were read.
+ * `onboardingActions` carries the ids for the complete and skip buttons; leave
+ * it out when the operator may not write.
  */
 export function SignInSummary({
   insights,
   createdAt,
+  onboardingActions,
 }: {
   insights: EndUserInsightsDto | null;
   createdAt: string;
+  onboardingActions?: { applicationId: string; euid: string } | undefined;
 }): React.JSX.Element | null {
   if (!insights) return null;
   const { signIns, profile, sources } = insights;
@@ -69,6 +79,24 @@ export function SignInSummary({
             </Badge>
           ) : (
             <span className="text-sm">{onboarding}</span>
+          )}
+          {onboardingActions && profile.onboardingStatus === 'pending' && (
+            <div className="mt-1.5 flex flex-wrap gap-2">
+              <ActionForm
+                action={setOnboardingOutcome.bind(null, onboardingActions.applicationId, onboardingActions.euid, 'complete')}
+              >
+                <SubmitButton pendingLabel="Marking…" className={ONBOARDING_BUTTON}>
+                  Mark complete
+                </SubmitButton>
+              </ActionForm>
+              <ActionForm
+                action={setOnboardingOutcome.bind(null, onboardingActions.applicationId, onboardingActions.euid, 'skip')}
+              >
+                <SubmitButton pendingLabel="Recording…" className={ONBOARDING_BUTTON}>
+                  Record skip
+                </SubmitButton>
+              </ActionForm>
+            </div>
           )}
         </dd>
       </div>

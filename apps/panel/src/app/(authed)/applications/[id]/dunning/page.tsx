@@ -121,7 +121,7 @@ export default async function DunningPage({
             href={`/applications/${id}/billing/settings`}
             className="underline hover:text-[var(--color-fg)]"
           >
-            Turn it on in Billing, Setup, Settings
+            Turn it on in Billing, Setup, Defaults
           </Link>
           .
         </div>
@@ -140,7 +140,7 @@ export default async function DunningPage({
               href={`/applications/${id}/billing/settings`}
               className="rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:opacity-90"
             >
-              Go to Billing, Setup, Settings
+              Go to Billing, Setup, Defaults
             </Link>
           }
         />

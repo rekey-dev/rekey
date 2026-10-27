@@ -8,7 +8,7 @@ import * as React from 'react';
 import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import type { ContactListMemberRowDto } from '@rekey.dev/shared-types';
-import { api, apiGet, errorQuery, getApplication, readErrorFlash, unlessBusy, PanelApiError } from '@/lib/api';
+import { api, apiGet, errorQuery, getApplication, getMe, readErrorFlash, unlessBusy, PanelApiError } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { formatDateTime } from '@/lib/date';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
@@ -17,11 +17,14 @@ import { Banner } from '@/components/Banner';
 import { EmptyState } from '@/components/EmptyState';
 import { ActionForm } from '@/components/ActionForm';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { TypedConfirmButton } from '@/components/TypedConfirmButton';
+import { dangerButtonClass } from '@/components/Button';
 import { FilterChips } from '@/components/FilterChips';
 import { Pager, readOffset, readPageSize } from '@/components/Pager';
 import { ApiErrorText } from '@/components/api-error';
 import { fieldInputCls } from '@/components/Field';
-import { getList } from './shared';
+import { getList, membersHref } from './shared';
+import { eraseContact } from './actions';
 
 const SOURCE_LABEL: Record<string, string> = {
   publishable: 'Browser',
@@ -34,21 +37,22 @@ const ERR: Record<string, string> = {
   CONTACT_LIST_QUOTA_EXCEEDED: 'This workspace is at its list limit, so this list cannot be restored. Archive another list first.',
   SCOPE_INSUFFICIENT: 'Your access does not let you change lists.',
   APP_ACCESS_DENIED: 'Your access to this Application is read-only.',
+  CONTACT_NOT_FOUND: 'That contact was already erased.',
+  TENANT_ROLE_INSUFFICIENT: 'Only a workspace owner can erase a contact.',
 };
 
-async function unsubscribeMember(applicationId: string, listId: string, memberId: string): Promise<void> {
+async function unsubscribeMember(applicationId: string, listId: string, memberId: string, view: string): Promise<void> {
   'use server';
-  const base = `/applications/${applicationId}/lists/${listId}`;
   try {
     await api({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/lists/${encodeURIComponent(listId)}/members/${encodeURIComponent(memberId)}/unsubscribe`,
     });
   } catch (err) {
-    if (err instanceof PanelApiError) redirect(`${base}?${await errorQuery(err)}`);
+    if (err instanceof PanelApiError) redirect(membersHref(applicationId, listId, view, await errorQuery(err)));
     throw err;
   }
-  redirect(`${base}?unsubscribed=1`);
+  redirect(membersHref(applicationId, listId, view, 'unsubscribed=1'));
 }
 
 export default async function ListMembersPage({
@@ -72,9 +76,10 @@ export default async function ListMembersPage({
   if (status) qs.set('status', status);
   if (search) qs.set('search', search);
 
-  const [list, application, page] = await Promise.all([
+  const [list, application, me, page] = await Promise.all([
     getList(id, listId),
     getApplication(id),
+    getMe(),
     apiGet<Page<ContactListMemberRowDto>>(
       `/api/v1/tenant/applications/${encodeURIComponent(id)}/lists/${encodeURIComponent(listId)}/members?${qs.toString()}`,
       { interruptOnAccessError: false },
@@ -82,10 +87,16 @@ export default async function ListMembersPage({
   ]);
   const base = `/applications/${id}/lists/${listId}`;
   const canExport = application.access.level === 'workspace-admin';
+  const isOwner = me.activeRole === 'OWNER';
   const filterParams: Record<string, string> = {
     ...(status ? { status } : {}),
     ...(search ? { search } : {}),
   };
+  const view = new URLSearchParams({
+    ...filterParams,
+    ...(offset ? { offset: String(offset) } : {}),
+    ...(typeof sp.ps === 'string' ? { ps: String(pageSize) } : {}),
+  }).toString();
   const hrefFor = (value: string | undefined): string => {
     const p = new URLSearchParams({ ...(search ? { search } : {}), ...(value ? { status: value } : {}) });
     const s = p.toString();
@@ -95,6 +106,7 @@ export default async function ListMembersPage({
   return (
     <div className="space-y-4">
       {sp.unsubscribed === '1' && <Banner tone="success">Taken off the list.</Banner>}
+      {sp.contactErased === '1' && <Banner tone="success">Contact erased from every list in this app.</Banner>}
       {sp.done === 'archived' && <Banner tone="success">List archived. Restore it any time from the header.</Banner>}
       {sp.done === 'restored' && <Banner tone="success">List restored. Forms can subscribe people again.</Banner>}
       {error && (
@@ -217,17 +229,32 @@ export default async function ListMembersPage({
                   {formatDateTime(m.subscribedAt)}
                 </TD>
                 <TD align="right">
-                  {m.status === 'subscribed' && (
-                    <ActionForm action={unsubscribeMember.bind(null, id, listId, m.memberId)} className="inline">
-                      <ConfirmButton
-                        title={`Take ${m.email} off this list?`}
-                        confirm="They stop being a member and your webhook gets contact.unsubscribed. Only they can join again, through your site."
-                        confirmLabel="Take off the list"
-                      >
-                        Unsubscribe
-                      </ConfirmButton>
-                    </ActionForm>
-                  )}
+                  <div className="inline-flex items-center gap-2">
+                    {m.status === 'subscribed' && (
+                      <ActionForm action={unsubscribeMember.bind(null, id, listId, m.memberId, view)} className="inline">
+                        <ConfirmButton
+                          title={`Take ${m.email} off this list?`}
+                          confirm="They stop being a member and your webhook gets contact.unsubscribed. Only they can join again, through your site."
+                          confirmLabel="Take off the list"
+                        >
+                          Unsubscribe
+                        </ConfirmButton>
+                      </ActionForm>
+                    )}
+                    {isOwner && (
+                      <ActionForm action={eraseContact.bind(null, id, listId, m.contactId, view)} className="inline">
+                        <TypedConfirmButton
+                          expected={m.email}
+                          title={`Erase ${m.email}?`}
+                          description="This permanently deletes the contact from every list in this app, with their submissions and consent records, and blanks their details in stored webhook deliveries. An end user with the same address is not touched. This cannot be undone."
+                          triggerLabel="Erase"
+                          confirmLabel="Erase contact"
+                          pendingLabel="Erasing…"
+                          triggerClassName={dangerButtonClass('xs')}
+                        />
+                      </ActionForm>
+                    )}
+                  </div>
                 </TD>
               </TR>
             ))}

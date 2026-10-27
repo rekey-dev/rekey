@@ -211,7 +211,7 @@ describe('rekey doctor', () => {
       const check = checks.find((each) => each.name === name)!;
       expect(check.status).toBe('skipped');
       expect(check.fix).toContain('REKEY_OPERATOR_TOKEN');
-      expect(check.fix).toContain('billing:read');
+      expect(check.fix).toContain('with the read scope');
     }
     expect(checks.find((check) => check.name === 'billing-outbox')?.status).toBe('ok');
     expect(stub.requests.map((q) => q.key).sort()).toEqual(['GET /health', OUTBOX].sort());
@@ -232,7 +232,7 @@ describe('rekey doctor', () => {
     const { code, named } = await doctor(operator);
     expect(code).toBe(1);
     expect(named('coupon-coverage')).toMatchObject({ status: 'skipped', message: expect.stringContaining('SCOPE_INSUFFICIENT') });
-    expect(named('coupon-coverage').fix).toContain('billing:read');
+    expect(named('coupon-coverage').fix).toContain('with the read scope');
     expect(named('reconciliation')).toMatchObject({
       status: 'fail',
       message: expect.stringContaining('ANALYTICS_TIMEOUT'),

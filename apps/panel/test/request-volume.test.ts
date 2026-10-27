@@ -82,7 +82,7 @@ describe('sub-tab switches have a loading boundary', () => {
   it.each([
     'app/(authed)/applications/[id]/end-users/[euid]/loading.tsx',
     'app/(authed)/applications/[id]/email/loading.tsx',
-    'app/(authed)/account/loading.tsx',
+    'app/(authed)/account/(home)/loading.tsx',
   ])('%s exists', (rel) => {
     expect(existsSync(path.join(srcDir, rel))).toBe(true);
   });

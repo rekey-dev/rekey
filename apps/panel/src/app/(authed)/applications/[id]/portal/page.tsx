@@ -6,6 +6,7 @@ import { ApiErrorText } from '@/components/api-error';
 import { SectionHeader } from '@/components/Card';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
+import { ConfirmButton } from '@/components/ConfirmButton';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
 import { dangerButtonClass } from '@/components/Button';
 import { savedStateKey } from '@/lib/saved-state-key';
@@ -166,12 +167,18 @@ export default async function PortalPage({
             <p className="text-xs text-[var(--color-muted-fg)]">{STATUS_COPY[status].body}</p>
           </div>
           <ActionForm action={setPortalEnabled.bind(null, id, !enabled)}>
-            <SubmitButton
-              pendingLabel={enabled ? 'Disabling…' : 'Enabling…'}
-              {...(enabled ? { className: dangerButtonClass('sm') } : {})}
-            >
-              {enabled ? 'Disable portal' : 'Enable portal'}
-            </SubmitButton>
+            {enabled ? (
+              <ConfirmButton
+                title="Disable hosted portal?"
+                confirm="Your end users lose the hosted billing portal until you enable it again."
+                triggerClassName={dangerButtonClass('sm')}
+                pendingLabel="Disabling…"
+              >
+                Disable portal
+              </ConfirmButton>
+            ) : (
+              <SubmitButton pendingLabel="Enabling…">Enable portal</SubmitButton>
+            )}
           </ActionForm>
         </div>
         {status === 'unserved' && (

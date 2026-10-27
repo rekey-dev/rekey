@@ -4,6 +4,99 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.3.1
+
+Operator access tokens reach billing and analytics, the panel's navigation and
+webhook pages are reworked, sign-in links ask before they sign you in, and
+secrets are encrypted at rest in every environment. No migration: deploy the
+API, panel and portal together and upgrade the `@rekey.dev/*` packages with
+them.
+
+### Before you upgrade
+
+- **`ENCRYPTION_KEY` is required outside the test suite.** The API refuses to
+  boot without it in development too, not only in production. Docker and
+  compose deployments already required it. A source checkout run with
+  `pnpm dev`, or a host that never sets `NODE_ENV`, must add one:
+  `openssl rand -hex 32`. Credentials such a deployment stored without a key
+  stay readable; save them again to encrypt them.
+- **The self-host compose file requires `REDIS_PASSWORD`.** An unset password
+  used to start Redis with no authentication at all.
+- **`NODE_ENV=test` refuses to boot outside the test suite.** Test mode lifts
+  the sign-in rate limits and returns reset tokens in responses.
+- **Calls an operator token could never make are removed.** On 2.3.0 they
+  always answered `401 TENANT_SESSION_INVALID`; issue a refund and change the
+  unavailable-currency default in the panel instead.
+  - `@rekey.dev/node`: `operator.payments.refunds.create`,
+    `operator.billing.updateConfig` and the `OperatorBillingConfigUpdate` type.
+  - `@rekey.dev/cli`: `rekey refunds create` and
+    `rekey billing unavailable-currency set`.
+  - `@rekey.dev/mcp`: the `create_refund` tool. The operator MCP server keeps
+    its own `create_refund` for admin connections.
+- **Token scopes are named correctly.** Mint operator tokens with `read`, and
+  add `applications:write` to change plans, plan prices, coupons or the
+  reporting currency. `billing:read` and `billing:write` were never token
+  scopes.
+
+### Added
+
+- **Operator tokens reach billing and analytics.** `RekeyOperator`, the
+  operator CLI commands and the stdio MCP billing tools now work with
+  `Authorization: Bearer rp_op_…`: plans, plan prices, coupons, payments and
+  their refunds, the billing log, reconciliation, price fallbacks, the
+  reporting currency, the routing preview, billing stats and user insights.
+  Refunds, provider credentials, cancellations and billing settings stay
+  session-only and answer `403 OPERATOR_TOKEN_NOT_ACCEPTED` to a token.
+- **Operator MCP read tools:** `list_end_users`, `get_end_user_credits`,
+  `list_licenses`, `list_webhook_deliveries`, `list_subscription_imports`,
+  `list_unapplied_payments`, `get_dunning_status`, `get_organization` and
+  `list_member_grants`. `invite_member` takes `appGrants`, which needs admin
+  access.
+- **Find an end user from the command palette.** Inside an Application, type
+  an email to jump to that end user.
+- **Panel:** Mark complete and Record skip on an end user whose onboarding is
+  pending; an owner-only Erase on a list member that removes the contact from
+  every list; organization member roles confirm what each role can do.
+
+### Changed
+
+- **Webhook deliveries** filter by status and page through every delivery,
+  and show the payload and response. Retry all failed works through every
+  failed delivery in batches of 100 and stops cleanly at the rate limit.
+  Incoming provider events expand to the full error.
+- **Account** is one page with Security, Passkeys, API tokens, AI assistants
+  (MCP) and My requests tabs, opened from the account menu.
+- **Email** has its own tabs in the Application nav: Settings, Templates,
+  Custom templates, Delivery and Suppressions.
+- **Billing** tabs list what happened first (Overview, Payments, Unapplied,
+  Dunning, Billing log), then what a buyer is offered (Setup, Plans, Coupons,
+  Meters, Licenses, Portal). Imports is reached from Setup.
+- Users, Overview is now **Users, Insights**, and Billing, Setup, Settings is
+  now **Billing, Setup, Defaults**.
+- Confirm buttons show that they are working and cannot be pressed twice;
+  every confirm dialog names what it does. Disabling the hosted portal asks
+  first.
+
+### Fixed
+
+- The panel Docker image ships its `public/` directory, so a self-hosted panel
+  shows its logo and brand fonts.
+- An organization owner can no longer leave by removing their own membership;
+  the leave rule applies to both paths.
+
+### Security
+
+- A sign-in link opens a Continue signing in page and is spent only when you
+  confirm, so a mail scanner or a forwarded link signs nothing in.
+- A sign-in handed over from another site waits on a confirm page that names
+  the account, and says when it would replace the current session.
+- An operator MCP write tool checks the caller's grant on the Application, so
+  an `APP_VIEWER` cannot write through it.
+- PayPal refusals are logged without the payer's name, email or address.
+- The API warns at boot when `ADMIN_IP_ALLOWLIST` is set and `TRUSTED_PROXIES`
+  is a hop count, which lets a direct caller spoof the allowlisted address. The
+  super-admin key comparison no longer reveals the key's length.
+
 ## 2.3.0
 
 Lifecycle email, cancellation reasons, self-service account deletion and team

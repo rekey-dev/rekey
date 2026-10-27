@@ -536,7 +536,7 @@ export const subscriptionGrantsService = {
         statusCode: 400,
         code: 'BILLING_ORGANIZATION_REQUIRED',
         message: 'This Application bills per organization, but no organization was named for the grant.',
-        fix: "Pass `organizationId` of a team in this Application, or change the model in Panel → Application → Billing → Setup → Settings.",
+        fix: "Pass `organizationId` of a team in this Application, or change the model in Panel → Application → Billing → Setup → Defaults.",
       });
     }
     if (input.organizationId !== undefined) {

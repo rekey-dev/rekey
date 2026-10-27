@@ -14,7 +14,7 @@ import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
 import { MemberRoleSelect } from '@/components/MemberRoleSelect';
 import { savedStateKey } from '@/lib/saved-state-key';
-import { assignableRoles, roleLabel } from '@/lib/workspace-roles';
+import { assignableRoles, roleLabel, workspaceRoleOptions } from '@/lib/workspace-roles';
 import { changeRole, removeMember, resendInvite, revokeInvite } from './actions';
 import { InviteDialog } from './invite-dialog';
 import { RoleGuide } from './role-guide';
@@ -172,7 +172,7 @@ export default async function TeamPeoplePage({
                         <MemberRoleSelect
                           email={m.email}
                           currentRole={m.role}
-                          roles={assignableRoles(me.activeRole)}
+                          roles={workspaceRoleOptions(assignableRoles(me.activeRole))}
                         />
                       </ActionForm>
                     ) : (

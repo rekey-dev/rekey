@@ -94,7 +94,6 @@ export async function createPaypalOrder(
   });
   if (!res.ok) {
     const body = await res.text();
-    console.error('paypal order failed', res.status, body);
     throw paypalError('order', res.status, body);
   }
   const order = (await res.json()) as { id: string; links: Array<{ rel: string; href: string }> };
@@ -115,7 +114,6 @@ export async function readPaypalOrder(api: PaypalApi, providerOrderId: string): 
   if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.text();
-    console.error('paypal order read failed', res.status, body);
     throw paypalError('order read', res.status, body);
   }
   const order = (await res.json()) as {
@@ -166,7 +164,6 @@ export async function capturePaypalOrder(api: PaypalApi, orderId: string): Promi
   if (!res.ok) {
     const text = await res.text();
     if (res.status === 422 && text.includes('ORDER_ALREADY_CAPTURED')) return { captured: true };
-    console.error('paypal capture failed', res.status, text);
     throw paypalError('capture', res.status, text);
   }
   const data = (await res.json()) as { status?: string };

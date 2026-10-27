@@ -681,3 +681,23 @@ export async function saveProfileAnswers(
   }
   redirect(`${base}?profileSaved=1`);
 }
+
+/**
+ * Mark the user's onboarding complete, or record that they skipped it. The
+ * API refuses completion with PROFILE_INCOMPLETE while a required answer is
+ * missing, and the Overview shows that as a banner.
+ */
+export async function setOnboardingOutcome(
+  applicationId: string,
+  euid: string,
+  outcome: 'complete' | 'skip',
+): Promise<void> {
+  const base = tabBase(applicationId, euid);
+  try {
+    await api({ method: 'POST', path: `${apiBase(applicationId, euid)}/onboarding/${outcome}` });
+  } catch (err) {
+    if (err instanceof PanelApiError) redirect(`${base}?onboardingError=${encodeURIComponent(err.code)}`);
+    throw err;
+  }
+  redirect(`${base}?onboarding=${outcome === 'complete' ? 'completed' : 'skipped'}`);
+}

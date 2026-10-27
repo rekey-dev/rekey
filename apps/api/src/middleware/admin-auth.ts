@@ -25,7 +25,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from "fastify";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { env } from "../config/env.js";
 import { RekeyError } from "../lib/error.js";
 import { ipMatchesAllowlist } from "../lib/ip-allowlist.js";
@@ -74,15 +74,23 @@ export function assertAdminIpAllowlistValid(): void {
 }
 
 /**
- * The one startup warning for an allowlist the deployment cannot enforce:
- * configured, but with no way to identify a proxy, so every admin call from
- * behind one is refused. Null when there is no allowlist or the deployment has
- * said how its proxy identifies itself.
+ * The one startup warning for an allowlist the deployment cannot enforce. A
+ * hop count believes X-Forwarded-For from any peer, so the allowlist can be
+ * spoofed. Without a way to identify a proxy, every admin call from behind one
+ * is refused. Null when there is no allowlist or the proxy is identified by
+ * address or secret.
  */
 export function adminIpAllowlistWarning(policy: ClientIpPolicy): string | null {
   if (adminIpAllowlist().length === 0) return null;
+  if (typeof policy.internalCallers === "number") {
+    return (
+      "[admin] ADMIN_IP_ALLOWLIST is set, but TRUSTED_PROXIES is a hop count, which believes " +
+      "X-Forwarded-For from any peer. Anyone who can reach the API port directly can claim an " +
+      "allowed address in that header and pass the allowlist. Set TRUSTED_PROXIES to the " +
+      'addresses or CIDRs of your proxies (e.g. "10.0.0.0/8") instead of a count; see DEPLOY.md.'
+    );
+  }
   if (policy.proxySecret) return null;
-  if (typeof policy.internalCallers === "number") return null;
   return (
     "[admin] ADMIN_IP_ALLOWLIST is set, but API_PROXY_SECRET is not, so a request arriving " +
     "through a proxy on a private network cannot be traced to its client. The allowlist cannot " +
@@ -143,12 +151,11 @@ export async function requireSuperAdmin(
     });
   }
 
-  const expected = Buffer.from(env.SUPER_ADMIN_KEY, "utf8");
-  const actual = Buffer.from(presented, "utf8");
+  // Digests are a fixed length, so the comparison leaks neither the key nor its length.
+  const expected = createHash("sha256").update(env.SUPER_ADMIN_KEY, "utf8").digest();
+  const actual = createHash("sha256").update(presented, "utf8").digest();
 
-  // Length pre-check is safe, leaking that the wrong-length key was wrong is
-  // not material (an attacker already knows their guess length).
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+  if (!timingSafeEqual(expected, actual)) {
     throw new RekeyError({
       statusCode: 401,
       code: "ADMIN_AUTH_INVALID",

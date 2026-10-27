@@ -283,7 +283,7 @@ export function brandingCheck(app: Pick<Application, 'name' | 'portalBranding'>)
       provider: null,
       status: 'WARN',
       message: `Buyers will see "${named ? String(branding.displayName) : app.name}"${logo ? '' : ' and no logo'}.`,
-      fix: 'Set a Display name and Logo URL in Panel → Application → Portal → Branding.',
+      fix: 'Set a Display name and Logo URL in Panel → Application → Billing → Portal → Branding.',
     };
   }
   return pass('branding', null, 'The checkout page shows your display name and logo.');

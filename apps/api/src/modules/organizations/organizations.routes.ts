@@ -630,8 +630,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
             403:
               `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
               "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller's role " +
-              'cannot remove the target (self-removal is always allowed).',
-            409: 'ORGANIZATION_LAST_OWNER: cannot remove the only OWNER; transfer ownership first.',
+              'cannot remove the target. Removing yourself is the same as /leave.',
+            409:
+              'ORGANIZATION_LAST_OWNER: cannot remove the only OWNER; transfer ownership first. ' +
+              'Or ORGANIZATION_OWNER_CANNOT_LEAVE: the caller targeted themselves while an OWNER.',
           }),
         },
       },

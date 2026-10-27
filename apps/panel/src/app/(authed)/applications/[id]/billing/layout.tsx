@@ -6,7 +6,7 @@
  *   Checkout page  where buyers pay, and whether the Rekey page is ready
  *   Provider webhooks  what the providers have posted to Rekey
  *   Routing preview    which price and provider one buyer would get
- *   Settings       who pays, and whether Rekey chases failed payments
+ *   Defaults       who pays, and whether Rekey chases failed payments
  *
  * These used to be one scroll in which the provider table sat below a tall
  * checkout readiness report. Tabs are route segments, as on the end-user
@@ -51,7 +51,7 @@ export default async function BillingLayout({
             { href: `${base}/checkout`, label: 'Checkout page' },
             { href: `${base}/events`, label: 'Provider webhooks' },
             { href: `${base}/preview`, label: 'Routing preview' },
-            { href: `${base}/settings`, label: 'Settings' },
+            { href: `${base}/settings`, label: 'Defaults' },
           ]}
         />
       </div>

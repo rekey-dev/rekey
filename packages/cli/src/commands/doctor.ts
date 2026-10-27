@@ -9,7 +9,7 @@
  * `fail`. A `skipped` check did not run, usually for want of a credential: it
  * is not a pass, and it does not fail the run.
  *
- * The money checks read with the operator token (`billing:read`), one
+ * The money checks read with the operator token (`read` scope), one
  * Application at a time, and the billing outbox with the super-admin key.
  * See `doctor/money-checks.ts` for what each one looks for.
  */

@@ -1,5 +1,5 @@
 /**
- * The Users overview reading the daily rollup: 366-day ranges, the
+ * The Insights page reading the daily rollup: 366-day ranges, the
  * dimension breakdown, zone segments that never mix, and the fall back to
  * the live path's limits when the filters need it.
  */

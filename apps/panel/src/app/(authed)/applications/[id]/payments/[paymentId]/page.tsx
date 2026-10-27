@@ -4,6 +4,7 @@ import { getApplication, readErrorFlash } from '@/lib/api';
 import { ApiErrorText } from '@/components/api-error';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
+import { RecordHeader } from '@/components/RecordHeader';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { BillingLogTable } from '@/components/BillingLogTable';
 import { Card, SectionHeader } from '@/components/Card';
@@ -80,20 +81,16 @@ export default async function PaymentPage({
 
   return (
     <div className="space-y-6">
-      <p className="text-xs">
-        <Link href={back} className="text-[var(--color-muted-fg)] underline underline-offset-2 hover:text-[var(--color-fg)]">
-          All payments
-        </Link>
-      </p>
+      <RecordHeader
+        crumbs={[{ label: 'Payments', href: back }, { label: paymentId }]}
+        title={payment ? `Payment of ${formatMoney(payment.amount, payment.currency)}` : 'Payment'}
+        action={<CopyButton value={paymentId} label="Copy payment ID" />}
+      />
       {refunded !== null && payment && (
         <SavedBanner params={['refunded']} message={`Refunded ${formatMoney(refunded, payment.currency)}.`} />
       )}
 
       <section className="space-y-3">
-        <SectionHeader
-          title={payment ? `Payment of ${formatMoney(payment.amount, payment.currency)}` : 'Payment'}
-          action={<CopyButton value={paymentId} label="Copy payment ID" />}
-        />
         {payment && verification ? (
           <Card>
             <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-[11rem_1fr]">

@@ -180,9 +180,10 @@ WORKDIR /app
 # node_modules. No pnpm install, no full dependency tree. The bundle is rooted
 # at the workspace root (outputFileTracingRoot), so it lands at /app as-is.
 COPY --from=build --chown=node:node /app/apps/panel/.next/standalone ./
-# Static assets + the server's runtime chunks aren't part of standalone — copy
-# them to the path Next expects. (panel has no public/ dir.)
+# Static assets and public/ (logo, brand fonts) aren't part of standalone, so
+# copy them to the paths Next expects.
 COPY --from=build --chown=node:node /app/apps/panel/.next/static apps/panel/.next/static
+COPY --from=build --chown=node:node /app/apps/panel/public apps/panel/public
 
 # The commit this image was built from, shown in the sidebar next to the API's
 # (apps/panel/src/lib/build-info.ts). Unset reads as `unknown`.

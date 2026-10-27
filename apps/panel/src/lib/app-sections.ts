@@ -7,17 +7,25 @@
 import type { Scope } from '@/lib/operator-scopes';
 
 export interface AppSection {
-  /** Path segment under `/applications/{id}`. Empty string = the Application landing. */
+  /** Path under `/applications/{id}`, one or more segments. Empty string = the Application landing. */
   seg: string;
   label: string;
   /** Extra words the command palette matches on. */
   keywords?: string;
+  /** Active only on this exact path, not on the paths below it. */
+  exact?: boolean;
+  /** In the command palette but not in AppNav's row, unless you are standing on it. */
+  navHidden?: boolean;
+  /** AppNav draws a divider before this tab. */
+  divideBefore?: boolean;
 }
 
 export interface AppSectionGroup {
   key: string;
   label: string;
   sections: AppSection[];
+  /** The tab marked active on a path in this group that no section matches. */
+  fallbackSeg?: string;
 }
 
 /**
@@ -65,6 +73,10 @@ export const SEG_SCOPE: Record<string, Scope | null> = {
   settings: null,
   lifecycle: null,
   email: 'developer:read',
+  'email/templates': 'developer:read',
+  'email/custom': 'developer:read',
+  'email/logs': 'developer:read',
+  'email/suppressions': 'developer:read',
 };
 
 /**
@@ -93,7 +105,7 @@ export const APP_SECTION_GROUPS: AppSectionGroup[] = [
     key: 'users',
     label: 'Users',
     sections: [
-      { seg: 'users', label: 'Overview', keywords: 'analytics active users dau mau retention funnel' },
+      { seg: 'users', label: 'Insights', keywords: 'analytics active users dau mau retention funnel' },
       { seg: 'end-users', label: 'End-users', keywords: 'users customers accounts' },
       { seg: 'support', label: 'Support mode', keywords: 'support cases capabilities diagnostics debug' },
       { seg: 'onboarding', label: 'Onboarding', keywords: 'profile fields questions schema skip complete' },
@@ -123,25 +135,29 @@ export const APP_SECTION_GROUPS: AppSectionGroup[] = [
       // paste a client id into the provider form.
       { seg: 'oauth', label: 'Sign-in providers', keywords: 'oauth google microsoft github social' },
       { seg: 'oauth-clients', label: 'OAuth clients', keywords: 'oidc identity provider inbound' },
-      { seg: 'mcp', label: 'MCP', keywords: 'model context protocol agents' },
+      { seg: 'mcp', label: 'MCP', keywords: 'model context protocol agents end-users' },
     ],
   },
   {
     key: 'billing',
     label: 'Billing',
     sections: [
+      // Operate: what happened and what needs an answer.
       { seg: 'revenue', label: 'Overview', keywords: 'revenue mrr chart billing' },
-      { seg: 'billing', label: 'Setup', keywords: 'billing providers stripe paypal razorpay credentials' },
-      { seg: 'plans', label: 'Plans', keywords: 'pricing subscription' },
-      { seg: 'coupons', label: 'Coupons', keywords: 'discounts promo' },
-      { seg: 'usage', label: 'Meters', keywords: 'usage meters credits metered' },
-      { seg: 'licenses', label: 'Licenses', keywords: 'license keys seats' },
       { seg: 'payments', label: 'Payments', keywords: 'charges refunds invoices' },
       { seg: 'unapplied-payments', label: 'Unapplied', keywords: 'unmatched payments' },
       { seg: 'dunning', label: 'Dunning', keywords: 'failed payments retries' },
       { seg: 'billing-log', label: 'Billing log', keywords: 'history trail events fallback default price reconciliation refunds why' },
-      { seg: 'imports', label: 'Imports', keywords: 'migrate subscriptions import' },
+      // Configure: what a buyer is offered and how they pay.
+      { seg: 'billing', label: 'Setup', keywords: 'billing providers stripe paypal razorpay credentials', divideBefore: true },
+      { seg: 'plans', label: 'Plans', keywords: 'pricing subscription' },
+      { seg: 'coupons', label: 'Coupons', keywords: 'discounts promo' },
+      { seg: 'usage', label: 'Meters', keywords: 'usage meters credits metered' },
+      { seg: 'licenses', label: 'Licenses', keywords: 'license keys seats' },
       { seg: 'portal', label: 'Portal', keywords: 'customer billing portal' },
+      // A one-off migration, linked from Setup's Status tab. It stays in the
+      // group so its path still resolves to Billing.
+      { seg: 'imports', label: 'Imports', keywords: 'migrate subscriptions import', navHidden: true },
     ],
   },
   {
@@ -157,7 +173,15 @@ export const APP_SECTION_GROUPS: AppSectionGroup[] = [
   {
     key: 'email',
     label: 'Email',
-    sections: [{ seg: 'email', label: 'Email', keywords: 'templates smtp resend sender delivery suppressions' }],
+    // The per-event editor at `email/{eventKey}` matches no tab, so it marks Templates.
+    fallbackSeg: 'email/templates',
+    sections: [
+      { seg: 'email', label: 'Settings', keywords: 'smtp resend sender transport', exact: true },
+      { seg: 'email/templates', label: 'Templates', keywords: 'event emails copy' },
+      { seg: 'email/custom', label: 'Custom templates', keywords: 'send by key' },
+      { seg: 'email/logs', label: 'Delivery', keywords: 'sent bounced log' },
+      { seg: 'email/suppressions', label: 'Suppressions', keywords: 'bounces complaints unsubscribed' },
+    ],
   },
   {
     key: 'settings',

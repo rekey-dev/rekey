@@ -458,7 +458,7 @@ It also supports a controlled `value` + `onChange` pair, an optional `label`, an
 
 ### Org-billing (`billingSubject='org'`)
 
-When your Application bills **per team** (Panel → Application → Billing → Setup → Settings, Who pays = Organizations), an individual can't hold a subscription — the user must be inside a team first, and the org id must ride along to checkout.
+When your Application bills **per team** (Panel → Application → Billing → Setup → Defaults, Who pays = Organizations), an individual can't hold a subscription — the user must be inside a team first, and the org id must ride along to checkout.
 
 - `<OrganizationSwitcher billingSubject="org">` hides the personal option and nudges the user to select/create a team when none is active.
 - `<PricingTable orgGateBlocking={...}>` renders a **"team required"** gate instead of dead upgrade buttons.

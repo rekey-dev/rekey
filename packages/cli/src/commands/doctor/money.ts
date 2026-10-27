@@ -48,9 +48,9 @@ const OUTBOX = 'billing-outbox';
 const MAX_PAGES = 50;
 
 const TOKEN_FIX =
-  'Set REKEY_OPERATOR_TOKEN (or pass --operator-token) to an operator personal access token with the billing:read scope. Create one in the panel under Account, API tokens.';
+  'Set REKEY_OPERATOR_TOKEN (or pass --operator-token) to an operator personal access token with the read scope. Create one in the panel under Account, API tokens.';
 const SCOPE_FIX =
-  'The operator token is not allowed this read. Use a token with the billing:read scope whose workspace membership can read this Application.';
+  'The operator token is not allowed this read. Use a token with the read scope whose workspace membership can read billing on this Application.';
 const ADMIN_KEY_FIX =
   'Set SUPER_ADMIN_KEY (or pass --admin-key) to check the billing outbox. Only whoever runs the deployment holds it; a Rekey Cloud workspace has none.';
 

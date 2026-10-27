@@ -178,7 +178,7 @@ export * from './created-via.js';
 // An Application's reporting timezone and the settings route that sets it.
 export * from './timezone.js';
 
-// The Users overview analytics endpoint: query, sections and response shapes.
+// The Insights page analytics endpoint: query, sections and response shapes.
 export * from './analytics.js';
 import { ONBOARDING_STATUSES, type EndUserProfile } from './profile.js';
 

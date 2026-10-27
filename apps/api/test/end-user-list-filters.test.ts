@@ -1,6 +1,6 @@
 /**
  * The operator end-user list's activity, audience and billing filters, and
- * the `lastActiveOn` sort the Users overview tables link into.
+ * the `lastActiveOn` sort the Insights page tables link into.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

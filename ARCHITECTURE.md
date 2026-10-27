@@ -355,7 +355,7 @@ reachable Redis. Everything else is optional or has a default.
 | `JWT_SECRET` | signs end-user + operator + MFA-challenge JWTs (≥32 chars) | **required** |
 | `SUPER_ADMIN_KEY` | bootstrap admin path (≥32 chars) | **required** |
 | `REDIS_URL` | outbound-webhook delivery queue + rate-limit/lockout state | **required infra** — the API refuses to boot if Redis is unreachable; the URL itself defaults to `localhost` |
-| `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest (64 hex chars) | **required in production** (boot fails without it) |
+| `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest (64 hex chars) | **required** outside the test suite (boot fails without it) |
 | `CORS_ALLOWED_ORIGINS` | allowlist for browser callers | schema-optional, so the API boots without it — but an empty value in production denies **every** cross-origin caller (dev permits localhost) |
 | `RESEND_DEFAULT_API_KEY` + `RESEND_DEFAULT_FROM` | shared Resend pool; without it the API returns raw tokens to the caller | optional |
 | `WEBHOOK_ALLOW_PRIVATE_TARGETS` | opt out of the outbound-webhook SSRF guard for intra-VPC URLs | optional (self-host) |

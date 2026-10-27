@@ -26,6 +26,7 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { SavedBanner } from '@/components/SavedBanner';
 import { SupportFeedback } from './support-feedback';
 import { StatTile } from '@/components/StatTile';
 import { EngagementTiles, SignInSources } from './overview-engagement';
@@ -61,6 +62,11 @@ import {
 const LIVE_SUBSCRIPTION = new Set(['ACTIVE', 'PAST_DUE', 'TRIALING']);
 
 const OVERVIEW_EVENTS_SHOWN = 5;
+
+const ONBOARDING_ERROR_COPY: Record<string, string> = {
+  PROFILE_INCOMPLETE: 'Onboarding cannot be marked complete while a required answer is missing. Fill it in with Edit under Onboarding answers first.',
+  END_USER_ERASED: 'This end-user has been erased, so their onboarding cannot be changed.',
+};
 
 const NOT_VISIBLE = 'not visible to your role';
 
@@ -188,7 +194,18 @@ export default async function EndUserOverviewPage({
             </dd>
           </div>
         </dl>
-        <SignInSummary insights={insights} createdAt={detail.endUser.createdAt} />
+        <SignInSummary
+          insights={insights}
+          createdAt={detail.endUser.createdAt}
+          onboardingActions={canWrite && !erased ? { applicationId: id, euid } : undefined}
+        />
+        {sp.onboarding === 'completed' && <SavedBanner params={['onboarding']} message="Onboarding marked complete." />}
+        {sp.onboarding === 'skipped' && <SavedBanner params={['onboarding']} message="Skip recorded." />}
+        {typeof sp.onboardingError === 'string' && (
+          <Banner tone="error">
+            {ONBOARDING_ERROR_COPY[sp.onboardingError] ?? `Onboarding was not updated (${sp.onboardingError}).`}
+          </Banner>
+        )}
         {provenance && (
           <p className="text-[11px] text-[var(--color-muted-fg)]">
             Created from a billing event rather than a sign-up, so it may carry no password and an

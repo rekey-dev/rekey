@@ -1,5 +1,5 @@
 /**
- * Users > Overview: who uses this application, how often, and how they got
+ * Users > Insights: who uses this application, how often, and how they got
  * here. Aggregates only; per-person detail stays on End-users.
  *
  * Two API calls, in parallel, each behind its own Suspense boundary so the
@@ -30,7 +30,7 @@ import { KpiRow, ActivitySection } from './top-sections';
 import { RestSkeleton, TopSkeleton } from './skeletons';
 import { MixSection, MoneySections, OnboardingSection, PeopleLinks, RetentionSection, SecuritySection } from './rest-sections';
 
-export default async function UsersOverviewPage({
+export default async function UsersInsightsPage({
   params,
   searchParams,
 }: {
@@ -46,7 +46,7 @@ export default async function UsersOverviewPage({
     return (
       <EmptyState
         variant="inline"
-        title="Users overview is not visible to your role"
+        title="User insights are not visible to your role"
         description="It needs the Overview scope on this application. End-users is still open to you if your access includes it."
       />
     );
@@ -58,7 +58,7 @@ export default async function UsersOverviewPage({
   return (
     <div className="space-y-5">
       <SectionHeader
-        title="Users overview"
+        title="User insights"
         description="How many people use this application, how often they come back, and how they got here."
       />
       <FilterBar

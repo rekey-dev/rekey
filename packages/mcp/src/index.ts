@@ -14,7 +14,7 @@
  *   - `REKEY_OPERATOR_TOKEN` (an `rp_op_…` token, scoped to one workspace)
  *     authenticates the billing tools of one Application and every WRITE
  *     tool. The server refuses a call whose token lacks the scope the route
- *     asks for (`billing:read`, `billing:write`, `keys:mint`): default-deny,
+ *     asks for (`read`, `applications:write`, `keys:mint`): default-deny,
  *     so an agent cannot change production unless explicitly granted.
  *
  * At least ONE credential is required. With the operator token alone the

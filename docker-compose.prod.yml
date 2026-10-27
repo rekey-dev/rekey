@@ -87,16 +87,14 @@ services:
         "--appendonly",
         "yes",
         "--requirepass",
-        "${REDIS_PASSWORD}",
+        "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env (openssl rand -hex 24)}",
       ]
     environment:
       # valkey-cli reads this, so the healthcheck doesn't put the password in an
       # argv element visible via `docker inspect`.
       #
-      # Plain ${VAR} rather than ${VAR:?err}: the fail-fast form is reserved for
-      # the three hostnames, where a wrong value is silently wrong rather than
-      # loudly broken. A missing password fails the container start with a clear
-      # Postgres/Redis error of its own.
+      # The --requirepass above uses ${VAR:?err} because Valkey treats an empty
+      # password as no password and boots open, with nothing to notice.
       #
       # NOTE: the password lands in REDIS_URL unencoded, so keep it URL-safe.
       # `openssl rand -hex 24` is; a password containing @ : / or # would not be.

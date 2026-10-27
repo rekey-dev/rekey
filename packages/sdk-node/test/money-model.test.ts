@@ -364,24 +364,6 @@ describe('operator.payments', () => {
     expect(sentBy(spy).url).toBe(`${APP}/payments/pay_1/refunds?limit=5`);
     expect(refunds).toEqual(F.REFUNDS);
   });
-
-  it('refunds.create posts the amount and reason', async () => {
-    const spy = vi.fn().mockResolvedValue(ok(F.REFUND_RESULT));
-    const result = await operator(spy).payments.refunds.create('pay_1', { amount: 500, reason: 'Duplicate charge' });
-
-    const sent = sentBy(spy);
-    expect(sent.method).toBe('POST');
-    expect(sent.url).toBe(`${APP}/payments/pay_1/refunds`);
-    expect(sent.body).toEqual({ amount: 500, reason: 'Duplicate charge' });
-    expect(result).toEqual(F.REFUND_RESULT);
-  });
-
-  it('refunds.create with no input posts an empty body: refund everything that remains', async () => {
-    const spy = vi.fn().mockResolvedValue(ok(F.REFUND_RESULT));
-    await operator(spy).payments.refunds.create('pay_1');
-
-    expect(sentBy(spy).body).toEqual({});
-  });
 });
 
 describe('operator.billingLog', () => {
@@ -530,17 +512,6 @@ describe('operator.billing', () => {
     expect(sentBy(spy).url).toBe(APP);
     expect(config).toEqual(billingConfig);
     expect(config.onUnavailableCurrency).toBe('fallback');
-  });
-
-  it('updateConfig PATCHes the setting named and returns the settings as saved', async () => {
-    const billingConfig = { ...F.BILLING_CONFIG, onUnavailableCurrency: 'refuse' as const };
-    const spy = vi.fn().mockResolvedValue(ok({ billingConfig }));
-    const config = await operator(spy).billing.updateConfig({ onUnavailableCurrency: 'refuse' });
-
-    expect(sentBy(spy).method).toBe('PATCH');
-    expect(sentBy(spy).url).toBe(`${APP}/billing-config`);
-    expect(sentBy(spy).body).toEqual({ onUnavailableCurrency: 'refuse' });
-    expect(config.onUnavailableCurrency).toBe('refuse');
   });
 
   it('stats returns one row per currency and the unverified money apart', async () => {

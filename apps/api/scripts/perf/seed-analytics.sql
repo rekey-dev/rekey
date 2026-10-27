@@ -1,4 +1,4 @@
--- Seed one large Application (plus 200 small ones) for the Users overview
+-- Seed one large Application (plus 200 small ones) for the Insights page
 -- load test. Run against a DISPOSABLE database only:
 --
 --   psql "$PERF_DATABASE_URL" -v app="$APP_ID" -v tenant="$TENANT_ID" -f seed-analytics.sql

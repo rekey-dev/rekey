@@ -289,7 +289,7 @@ export function planLocalPricesChoices(defaultCurrency: string): PlanLocalPrices
       value: 'INHERIT',
       label: 'Follow the Application setting',
       consequence:
-        'This plan does what Billing, Setup, Settings says about local prices. When that setting changes, this plan changes with it.',
+        'This plan does what Billing, Setup, Defaults says about local prices. When that setting changes, this plan changes with it.',
     },
     {
       value: 'TRUSTED',

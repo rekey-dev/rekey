@@ -63,7 +63,7 @@ export const operatorSupportTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(ListArgs, 'list_support_cases', raw);
-      const app = await loadAppInTenant(ctx, args.applicationId);
+      const app = await loadAppInTenant(ctx, args.applicationId, 'read');
       const { items, total } = await supportCasesService.list(app.id, {
         status: args.status === 'open' ? 'OPEN' : 'CLOSED',
         endUserId: args.endUserId,
@@ -89,7 +89,7 @@ export const operatorSupportTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(CloseArgs, 'close_support_case', raw);
-      const app = await loadEndUserInApp(ctx, args.applicationId, args.endUserId);
+      const app = await loadEndUserInApp(ctx, args.applicationId, args.endUserId, 'write');
       return supportCasesService.end({ applicationId: app.id, endUserId: args.endUserId, actor: actorOf(ctx) });
     },
   },

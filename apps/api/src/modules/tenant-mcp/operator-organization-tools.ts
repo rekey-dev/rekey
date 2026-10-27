@@ -1,6 +1,7 @@
 /**
- * Operator MCP tools for organization MEMBERSHIP: find an organization, add an
- * end-user to it, and set their role from the Application's catalog.
+ * Operator MCP tools for organization MEMBERSHIP: find an organization and
+ * read its members, add an end-user to it, and set their role from the
+ * Application's catalog.
  *
  * The catalog tools (`*_organization_role`) live in `operator-write-tools.ts`;
  * these assign from it. Both reuse the operator REST routes' services, so the
@@ -27,6 +28,7 @@ import { assertOrganizationsEnabled, loadAppInTenant } from './operator-write-to
 import { assertAdminTierFor } from './admin-tier.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { prisma } from '../../lib/prisma.js';
+import { defineTool } from './tool-definition.js';
 
 const LIST_ORGANIZATIONS_MAX = 100;
 const ROLE_NAME_MAX = 40;
@@ -174,7 +176,7 @@ export const operatorOrganizationTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(ListArgs, 'list_organizations', raw);
-      const app = await loadAppInTenant(ctx, args.applicationId);
+      const app = await loadAppInTenant(ctx, args.applicationId, 'read');
       const take = args.limit ?? LIST_ORGANIZATIONS_MAX;
       const skip = args.offset ?? 0;
       const [organizations, total] = await Promise.all([
@@ -198,6 +200,24 @@ export const operatorOrganizationTools: OperatorTool[] = [
       };
     },
   },
+  defineTool({
+    name: 'get_organization',
+    description:
+      'One organization in an application: its name, slug and metadata, every member (end-user id, email, ' +
+      'catalog role and its base tier OWNER, ADMIN or MEMBER), and its pending invitations. Organization ids ' +
+      'come from list_organizations. Readable even when organizations are disabled.',
+    args: z
+      .object({
+        applicationId: z.string().min(1).max(ID_MAX),
+        organizationId: z.string().min(1).max(ID_MAX).describe('The organization id, from list_organizations.'),
+      })
+      .strict(),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    run: async (ctx, input) => {
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
+      return organizationsService.adminGet({ applicationId: app.id, organizationId: input.organizationId });
+    },
+  }),
   {
     name: 'add_organization_member',
     description:
@@ -219,7 +239,7 @@ export const operatorOrganizationTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(AddArgs, 'add_organization_member', raw);
-      const app = await loadAppInTenant(ctx, args.applicationId);
+      const app = await loadAppInTenant(ctx, args.applicationId, 'write');
       assertOrganizationsEnabled(app);
       await assertWriteTierMayAssign(ctx, { ...args, applicationId: app.id, role: args.role });
       const membership = await withMcpFix(() =>
@@ -255,7 +275,7 @@ export const operatorOrganizationTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(SetRoleArgs, 'set_organization_member_role', raw);
-      const app = await loadAppInTenant(ctx, args.applicationId);
+      const app = await loadAppInTenant(ctx, args.applicationId, 'write');
       assertOrganizationsEnabled(app);
       await assertWriteTierMayAssign(ctx, { ...args, applicationId: app.id });
       const membership = await withMcpFix(() =>

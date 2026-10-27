@@ -57,7 +57,7 @@ export async function applicationSettingsRoutes(app: FastifyInstance): Promise<v
           'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an `APP_ADMIN` grant ' +
           'holding `overview:write`.\n\n`reportingTimezone` is an IANA zone name (`UTC`, `Europe/Berlin`, ' +
           '`Asia/Kolkata`). The daily analytics rollup counts days in it from the next computation on; days ' +
-          'already rolled up keep the zone they were computed in, and the Users overview labels every series ' +
+          'already rolled up keep the zone they were computed in, and the Insights page labels every series ' +
           'with its zone. See docs/analytics.md.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {

@@ -184,7 +184,7 @@ export default async function RoutingPreviewPage({
               Local prices on this Application are open to{' '}
               {outcome.data.localPrices === 'any' ? 'any country a buyer states' : 'a verified country only'}.{' '}
               <Link href={`/applications/${id}/billing/settings`} className="underline hover:text-[var(--color-fg)]">
-                Change it in Settings
+                Change it in Defaults
               </Link>
               .
               {request.kind === 'ready' && request.body.currency !== undefined && (

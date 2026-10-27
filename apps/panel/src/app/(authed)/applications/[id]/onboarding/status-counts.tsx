@@ -14,7 +14,7 @@ const HINT = {
 
 /**
  * How many users completed, skipped or have yet to do either, from the
- * Users overview's onboarding section: one aggregate read, never a page
+ * Insights page's onboarding section: one aggregate read, never a page
  * through every user. Renders nothing when the read is unavailable, since the
  * questions on this page are the point of it.
  */
@@ -58,7 +58,7 @@ export async function OnboardingStatusCounts({ applicationId }: { applicationId:
         <Link href={`/applications/${applicationId}/users`} className="underline underline-offset-2 hover:text-[var(--color-fg)]">
           The funnel and answers by sign-up date
         </Link>{' '}
-        are on Users &gt; Overview.
+        are on Users &gt; Insights.
       </p>
     </section>
   );

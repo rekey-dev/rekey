@@ -31,6 +31,22 @@ export const ROLE_SUMMARY: Record<WorkspaceRole, string> = {
   MEMBER: 'Works only in the apps you give them access to.',
 };
 
+const ROLE_CHANGE_CONSEQUENCE: Record<WorkspaceRole, string> = {
+  OWNER: 'Owners control billing, other owners and can delete the workspace. Only choose this for people you fully trust.',
+  ADMIN: 'Admins can see and change every app and invite members.',
+  MEMBER: 'Members only see the apps you give them on the App access tab, so check that after this change.',
+};
+
+/**
+ * The workspace roles as options for `MemberRoleSelect`.
+ *
+ * @example
+ * <MemberRoleSelect email={m.email} currentRole={m.role} roles={workspaceRoleOptions(assignableRoles('OWNER'))} />
+ */
+export function workspaceRoleOptions(roles: readonly WorkspaceRole[]): { value: string; label: string; title: string; consequence: string }[] {
+  return roles.map((r) => ({ value: r, label: ROLE_LABEL[r], title: ROLE_SUMMARY[r], consequence: ROLE_CHANGE_CONSEQUENCE[r] }));
+}
+
 /** What each role can and cannot do, for the role guide. */
 export const ROLE_ABILITIES: Record<WorkspaceRole, { can: string[]; cannot: string[] }> = {
   OWNER: {

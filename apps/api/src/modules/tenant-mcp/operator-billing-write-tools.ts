@@ -29,7 +29,7 @@ export const operatorBillingWriteTools: OperatorTool[] = [
     args: z.object({ applicationId: ApplicationIdArg, reportingCurrency: CurrencyArg }).strict(),
     annotations: { idempotentHint: true },
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'write');
       const result = await setReportingCurrency({
         applicationId: app.id,
         currency: input.reportingCurrency,
@@ -68,7 +68,7 @@ export const operatorBillingWriteTools: OperatorTool[] = [
       })
       .strict(),
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'write');
       return refundsService.issue({
         application: app,
         paymentId: input.paymentId,

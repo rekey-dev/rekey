@@ -246,7 +246,7 @@ export function registerPlansCommand(program: Command): void {
         method: 'PATCH',
         path: appPath(opts.app, `/plans/${encodeURIComponent(slug)}`),
         body,
-        scope: 'billing:write',
+        scope: 'applications:write',
       });
       ok(ctx, data, (d) => {
         process.stdout.write(`✓ ${d.slug}  local prices: ${d.localPrices.toLowerCase()}\n`);

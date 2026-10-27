@@ -8,11 +8,12 @@
  *   rekey billing reporting-currency get --app <id>
  *   rekey billing reporting-currency set <CODE> --app <id>
  *   rekey billing unavailable-currency get --app <id>
- *   rekey billing unavailable-currency set fallback|refuse --app <id>
  *   rekey billing reconciliation --app <id> [--from ISO] [--to ISO]
  *   rekey billing price-fallbacks --app <id> [--from ISO] [--to ISO]
  *
- * These call the operator routes, so they need REKEY_OPERATOR_TOKEN.
+ * These call the operator routes, so they need REKEY_OPERATOR_TOKEN. Changing
+ * the unavailable-currency default needs an operator session, so it is done in
+ * the panel.
  */
 
 import type { Command } from 'commander';
@@ -192,7 +193,7 @@ export function registerBillingCommand(program: Command): void {
         method: 'POST',
         path: appPath(opts.app, '/billing/checkout/preview'),
         body,
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, (preview) => {
         if (body.currency !== undefined) process.stdout.write(unavailableRuleLine(preview, body.onUnavailableCurrency !== undefined));
@@ -216,7 +217,7 @@ export function registerBillingCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, '/billing/reporting-currency'),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, printReporting);
     });
@@ -234,7 +235,7 @@ export function registerBillingCommand(program: Command): void {
         method: 'PUT',
         path: appPath(opts.app, '/billing/reporting-currency'),
         body: { reportingCurrency },
-        scope: 'billing:write',
+        scope: 'applications:write',
       });
       ok(ctx, data, (d) => process.stdout.write(`✓ reporting in ${d.reportingCurrency}  ${d.name}\n`));
     });
@@ -259,33 +260,10 @@ export function registerBillingCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, ''),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, ruleOf(application.billingConfig), (d) =>
         process.stdout.write(`${d.onUnavailableCurrency}  ${RULE_MEANS[d.onUnavailableCurrency]}\n`),
-      );
-    });
-
-  unavailable
-    .command('set')
-    .description("Set the Application's default. A request that sends its own onUnavailableCurrency still wins")
-    .argument('<rule>', 'fallback or refuse')
-    .requiredOption('--app <id>', 'Application id')
-    .action(async function (this: Command, rule: string, opts: { app: string }) {
-      const ctx = readGlobalOpts(this);
-      const onUnavailableCurrency = readChoice(ctx, rule, ON_UNAVAILABLE, {
-        code: 'CLI_BILLING_UNAVAILABLE_CURRENCY_INVALID',
-        what: '<rule>',
-      });
-      const data = await operatorRequest<{ billingConfig: BillingConfig }>({
-        ctx,
-        method: 'PATCH',
-        path: appPath(opts.app, '/billing-config'),
-        body: { onUnavailableCurrency },
-        scope: 'billing:write',
-      });
-      ok(ctx, ruleOf(data.billingConfig), (d) =>
-        process.stdout.write(`✓ a currency nobody can charge: ${d.onUnavailableCurrency}  ${RULE_MEANS[d.onUnavailableCurrency]}\n`),
       );
     });
 
@@ -301,7 +279,7 @@ export function registerBillingCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, `/billing/reconciliation${periodQuery(ctx, opts)}`),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, printReconciliation);
     });
@@ -318,7 +296,7 @@ export function registerBillingCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, `/billing/price-fallbacks${periodQuery(ctx, opts)}`),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, printPriceFallbacks);
     });

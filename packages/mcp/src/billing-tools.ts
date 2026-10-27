@@ -1,22 +1,23 @@
 /**
  * Billing tools of one Application: the billing log, the routing preview,
- * prices, coupons, the reporting currency, payments and refunds.
+ * prices, coupons, the reporting currency, payments and their refunds.
  *
  * These call the operator routes (`/api/v1/tenant/applications/:id/…`), so
  * every one of them authenticates with the scoped operator token and none
- * with the super-admin key. Reads need the `billing:read` scope. The WRITE
- * tools need `billing:write`, and the server refuses them without it.
+ * with the super-admin key. Reads need the `read` scope. The WRITE tools
+ * need `applications:write`, and the server refuses them without it. Issuing
+ * a refund needs an operator session, so there is no tool for it.
  */
 
 import { z } from 'zod';
 import type { AdminClient, OperatorNeed } from './client.js';
 import { MINOR_UNITS, PagingArgs, defineTool, query, type ToolDefinition } from './tool-types.js';
 
-const READ: OperatorNeed = { kind: 'read', scope: 'billing:read' };
-const WRITE: OperatorNeed = { kind: 'write', scope: 'billing:write' };
+const READ: OperatorNeed = { kind: 'read', scope: 'read' };
+const WRITE: OperatorNeed = { kind: 'write', scope: 'applications:write' };
 
 const WRITE_NOTE =
-  'Authenticates as a SCOPED operator via REKEY_OPERATOR_TOKEN (never the admin key); the token must carry the `billing:write` scope and belong to the workspace that owns the Application. ';
+  'Authenticates as a SCOPED operator via REKEY_OPERATOR_TOKEN (never the admin key); the token must carry the `applications:write` scope and belong to the workspace that owns the Application. ';
 
 const applicationId = z.string().describe("Application id. Must belong to the operator token's workspace.");
 const currencyCode = (what: string) => z.string().length(3).describe(`${what} ISO 4217 code, e.g. USD, INR or JPY.`);
@@ -151,26 +152,13 @@ const SetReportingCurrencyArgs = z.object({
   reportingCurrency: currencyCode('A currency a plan can be priced in:'),
 });
 
-const CreateRefundArgs = z.object({
-  applicationId,
-  paymentId: z.string().describe('The payment to refund.'),
-  amount: z
-    .number()
-    .int()
-    .positive()
-    .optional()
-    .describe(`How much to pay back: ${MINOR_UNITS}, in the payment's own currency. Left out, everything not yet refunded.`),
-  reason: z.string().min(1).max(500).optional().describe('Kept on the refund, and sent to the provider where it takes one.'),
-  idempotencyKey: z.string().min(1).max(200).optional().describe('What makes two calls one refund at the provider. Left out, the API derives it from the payment, what was refunded and the amount.'),
-});
-
 export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
   defineTool({
     name: 'recent_billing_events',
     description:
       "Read an Application's billing log, newest first: checkouts opened, completed and refused, a price that fell back to the default because its currency could not be charged, payments recorded, failed, not applied and refunded, subscriptions, coupons, and changes to prices and billing settings. " +
       `Each entry carries \`type\`, \`occurredAt\`, the ids it names, and \`amount\` (${MINOR_UNITS}) with \`currency\` when it is about money. ` +
-      'Returns `{items, nextCursor, actors}`: pass `nextCursor` back as `cursor` for older entries; null means the end. Entries name people by id; with `include: ["actors"]`, `actors` says who those ids are now (an erased end user has `state: "erased"` and no email), and it is null otherwise. Uses REKEY_OPERATOR_TOKEN (`billing:read`).',
+      'Returns `{items, nextCursor, actors}`: pass `nextCursor` back as `cursor` for older entries; null means the end. Entries name people by id; with `include: ["actors"]`, `actors` says who those ids are now (an erased end user has `state: "erased"` and no email), and it is null otherwise. Uses REKEY_OPERATOR_TOKEN (`read`).',
     inputSchema: RecentBillingEventsArgs,
     execute: (c, args) =>
       read(
@@ -198,7 +186,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     description:
       'Answer, for a buyer in a country, which price and currency each plan would be charged at, which provider would charge it and why, with the functions checkout itself runs. Opens no checkout, writes nothing and calls no provider. ' +
       `Each item has \`price\` (\`amount\`: ${MINOR_UNITS}; \`formatted\` is the same amount written for a person), \`priceFallback\` when the buyer's currency cannot be charged and the default price is charged instead, \`refusal\` when checkout would refuse, and a one-sentence \`summary\`. ` +
-      'With `couponCode`, each item also carries `coupon`: the `discount` it takes off, or the `refusal` a checkout carrying it would get (for example COUPON_CURRENCY_NOT_COVERED). Uses REKEY_OPERATOR_TOKEN (`billing:read`).',
+      'With `couponCode`, each item also carries `coupon`: the `discount` it takes off, or the `refusal` a checkout carrying it would get (for example COUPON_CURRENCY_NOT_COVERED). Uses REKEY_OPERATOR_TOKEN (`read`).',
     inputSchema: PreviewArgs,
     execute: (c, args) =>
       c.requestAsOperator('POST', app(args.applicationId, '/billing/checkout/preview'), bodyOf(args, ['applicationId']), READ),
@@ -207,7 +195,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'get_price_fallbacks',
     description:
       "Count the checkouts that charged a plan's default price because no enabled provider could charge the price selected for the buyer, grouped by plan, the currency asked for, the currency charged and the buyer's country, most frequent first. " +
-      'The last 7 days unless `from` and `to` say otherwise, at most 31. To stop a group recurring, add its `requestedCurrency` to a provider that can charge it. Uses REKEY_OPERATOR_TOKEN (`billing:read`).',
+      'The last 7 days unless `from` and `to` say otherwise, at most 31. To stop a group recurring, add its `requestedCurrency` to a provider that can charge it. Uses REKEY_OPERATOR_TOKEN (`read`).',
     inputSchema: PeriodOfApplicationArgs,
     execute: (c, args) => read(c, app(args.applicationId, `/billing/price-fallbacks${query({ from: args.from, to: args.to })}`)),
   }),
@@ -215,7 +203,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'get_billing_reconciliation',
     description:
       "Compare an Application's billing log with its payments, refunds and subscriptions for one period: a payment with no log entry, a log entry naming a payment that does not exist, refunds that add up differently, a subscription with no activation entry. " +
-      `\`counts\` is per kind and all zero when they agree; each finding's \`amount\` is ${MINOR_UNITS}. The last 7 days unless \`from\` and \`to\` say otherwise, at most 31. It compares Rekey's own records with each other, not with the provider's list of charges. Uses REKEY_OPERATOR_TOKEN (\`billing:read\`).`,
+      `\`counts\` is per kind and all zero when they agree; each finding's \`amount\` is ${MINOR_UNITS}. The last 7 days unless \`from\` and \`to\` say otherwise, at most 31. It compares Rekey's own records with each other, not with the provider's list of charges. Uses REKEY_OPERATOR_TOKEN (\`read\`).`,
     inputSchema: PeriodOfApplicationArgs,
     execute: (c, args) => read(c, app(args.applicationId, `/billing/reconciliation${query({ from: args.from, to: args.to })}`)),
   }),
@@ -223,7 +211,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'get_payment',
     description:
       `Read one payment by id: \`amount\` and \`refundedAmount\` (each ${MINOR_UNITS}), \`currency\`, \`status\`, \`verification\`, the \`provider\` that took it and the paying end user. ` +
-      '`refundable` says whether create_refund would reach that provider, and `refundBlockedReason` why not (`payment_not_succeeded`, `no_provider_charge_id`, `already_refunded`, `provider_unknown`, `provider_cannot_refund` or `provider_not_configured`): the judgement the refund makes before it asks a provider. Read it before promising a refund. Uses REKEY_OPERATOR_TOKEN (`billing:read`).',
+      '`refundable` says whether a refund issued from the Panel would reach that provider, and `refundBlockedReason` why not (`payment_not_succeeded`, `no_provider_charge_id`, `already_refunded`, `provider_unknown`, `provider_cannot_refund` or `provider_not_configured`): the judgement the refund makes before it asks a provider. Read it before promising a refund. Uses REKEY_OPERATOR_TOKEN (`read`).',
     inputSchema: GetPaymentArgs,
     execute: (c, args) => read(c, app(args.applicationId, `/payments/${encodeURIComponent(args.paymentId)}`)),
   }),
@@ -231,7 +219,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'list_refunds',
     description:
       'List every refund recorded against one payment, oldest first: those a provider reported and those issued through Rekey. ' +
-      `Each refund's \`amount\` is ${MINOR_UNITS}, in the payment's currency. A \`failed\` refund counts for nothing. Returns \`{items, page}\`. Uses REKEY_OPERATOR_TOKEN (\`billing:read\`).`,
+      `Each refund's \`amount\` is ${MINOR_UNITS}, in the payment's currency. A \`failed\` refund counts for nothing. Returns \`{items, page}\`. Uses REKEY_OPERATOR_TOKEN (\`read\`).`,
     inputSchema: ListRefundsArgs,
     execute: (c, args) =>
       read(
@@ -242,7 +230,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
   defineTool({
     name: 'get_reporting_currency',
     description:
-      'Read the currency an Application reports in: the one its stats lead with and the one offered first for a new price or coupon. Nothing is converted into it. Returns `{reportingCurrency, name}`. Uses REKEY_OPERATOR_TOKEN (`billing:read`).',
+      'Read the currency an Application reports in: the one its stats lead with and the one offered first for a new price or coupon. Nothing is converted into it. Returns `{reportingCurrency, name}`. Uses REKEY_OPERATOR_TOKEN (`read`).',
     inputSchema: ApplicationArgs,
     execute: (c, args) => read(c, app(args.applicationId, '/billing/reporting-currency')),
   }),
@@ -250,7 +238,7 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'get_billing_stats',
     description:
       "One Application's revenue and subscription stats: subscription counters, MRR, 30-day revenue, unverified payments still held and a 12-month revenue series. " +
-      `Money is reported per currency and never added across currencies: \`mrr\`, \`revenueLast30d\`, \`unverified\` and \`monthlyRevenue\` each hold one entry per currency, the reporting currency first, and every \`…Cents\` field is an ${MINOR_UNITS} despite its name. There is no converted total. \`unpricedLiveSubscriptions\` counts live subscriptions on a plan with a flat price that record no price of their own, zero on a healthy Application. Uses REKEY_OPERATOR_TOKEN (\`billing:read\`).`,
+      `Money is reported per currency and never added across currencies: \`mrr\`, \`revenueLast30d\`, \`unverified\` and \`monthlyRevenue\` each hold one entry per currency, the reporting currency first, and every \`…Cents\` field is an ${MINOR_UNITS} despite its name. There is no converted total. \`unpricedLiveSubscriptions\` counts live subscriptions on a plan with a flat price that record no price of their own, zero on a healthy Application. Uses REKEY_OPERATOR_TOKEN (\`read\`).`,
     inputSchema: ApplicationArgs,
     execute: (c, args) => read(c, app(args.applicationId, '/billing/stats')),
   }),
@@ -325,22 +313,6 @@ export const billingTools: Array<ToolDefinition<z.ZodRawShape>> = [
         'PUT',
         app(args.applicationId, '/billing/reporting-currency'),
         { reportingCurrency: args.reportingCurrency.toUpperCase() },
-        WRITE,
-      ),
-  }),
-  defineTool({
-    name: 'create_refund',
-    description:
-      'WRITE, MOVES MONEY: Ask the provider that took a payment to pay money back, in full or in part, then record the refund. A payment can be refunded more than once, up to its amount. ' +
-      'Refunding does not cancel a subscription or take back credits or licences. Repeating the same call is one refund. Returns `{refund, payment}` with the payment\'s new `refundedAmount`. ' +
-      WRITE_NOTE +
-      'Use this only when the user explicitly asks to refund this payment, and confirm the payment id and the amount with them first.',
-    inputSchema: CreateRefundArgs,
-    execute: (c, args) =>
-      c.requestAsOperator(
-        'POST',
-        app(args.applicationId, `/payments/${encodeURIComponent(args.paymentId)}/refunds`),
-        bodyOf(args, ['applicationId', 'paymentId']),
         WRITE,
       ),
   }),

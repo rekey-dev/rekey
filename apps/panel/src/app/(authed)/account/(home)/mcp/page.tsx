@@ -1,5 +1,5 @@
 /**
- * Account → MCP (operator-side).
+ * Account → AI assistants (MCP), the operator-side MCP.
  *
  * Connection guide for the hosted operator MCP server at
  * `/api/v1/tenant/mcp`, the JSON-RPC surface that exposes the
@@ -180,10 +180,11 @@ export default async function OperatorMcpPage(): Promise<React.JSX.Element> {
   ];
 
   return (
-    <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
+    <section className="space-y-6">
       <PageHeader
-        title="Operator MCP"
+        title="AI assistants (MCP)"
         description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health (write and admin tools exist but need explicitly granted scopes) and never sees any customer's individual data."
+        level={2}
       />
 
       {known === null && (

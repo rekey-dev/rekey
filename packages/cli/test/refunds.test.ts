@@ -34,13 +34,13 @@ describe('rekey refunds', () => {
     await stub.close();
   });
 
-  it('refunds create needs an operator token with billing:write', async () => {
+  it('refunds list needs an operator token with the read scope', async () => {
     stub.reset();
-    const r = await runCli(['refunds', 'create', 'pay_1', '--app', 'app_1', '--json'], { REKEY_URL: stub.url });
+    const r = await runCli(['refunds', 'list', 'pay_1', '--app', 'app_1', '--json'], { REKEY_URL: stub.url });
     expect(r.code).toBe(1);
     const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
-    expect(error.fix).toContain('billing:write');
+    expect(error.fix).toContain('with the read scope');
     expect(stub.requests).toEqual([]);
   });
 
@@ -69,63 +69,6 @@ describe('rekey refunds', () => {
     const error = { code: 'PAYMENT_NOT_FOUND', message: 'no such payment', fix: 'List the payments.' };
     stub.error(`GET ${APP}/payments/nope/refunds`, 404, error);
     const r = await runCli(['refunds', 'list', 'nope', '--app', 'app_1', '--json'], env);
-    expect(r.code).toBe(1);
-    expect(JSON.parse(r.stderr)).toEqual({ success: false, error });
-  });
-
-  const RESULT = valid('RefundResultDtoSchema', {
-    refund: refund(),
-    payment: { id: 'pay_1', amount: 1900, currency: 'USD', refundedAmount: 500, status: 'PARTIALLY_REFUNDED' },
-  });
-
-  it('refunds create posts the amount, reason and idempotency key', async () => {
-    stub.reset();
-    stub.ok(`POST ${APP}/payments/pay_1/refunds`, RESULT);
-    const r = await runCli(
-      ['refunds', 'create', 'pay_1', '--app', 'app_1', '--amount', '500', '--reason', 'Duplicate charge', '--idempotency-key', 'k1', '--json'],
-      env,
-    );
-    expect(r.code, r.stderr).toBe(0);
-    expect(stub.requests).toEqual([
-      {
-        key: `POST ${APP}/payments/pay_1/refunds`,
-        auth: AUTH,
-        body: valid('CreateRefundRequestSchema', { amount: 500, reason: 'Duplicate charge', idempotencyKey: 'k1' }),
-      },
-    ]);
-    expect(JSON.parse(r.stdout)).toEqual(RESULT);
-  });
-
-  it('refunds create with no flags sends an empty body, and prints what was refunded', async () => {
-    stub.reset();
-    stub.ok(`POST ${APP}/payments/pay_1/refunds`, RESULT);
-    const r = await runCli(['refunds', 'create', 'pay_1', '--app', 'app_1'], env);
-    expect(r.code, r.stderr).toBe(0);
-    expect(stub.requests.map((q) => q.body)).toEqual([{}]);
-    expect(r.stdout).toBe(
-      [
-        '✓ rf_1  $5.00  succeeded  by operator  2026-10-02T10:00:00.000Z  Duplicate charge',
-        '    pay_1: $5.00 of $19.00 refunded, PARTIALLY_REFUNDED',
-        '',
-      ].join('\n'),
-    );
-  });
-
-  it.each([['5.00'], ['0'], ['-5']])('refunds create --amount %s is refused before any request', async (amount) => {
-    stub.reset();
-    const r = await runCli(['refunds', 'create', 'pay_1', '--app', 'app_1', '--amount', amount, '--json'], env);
-    expect(r.code).toBe(1);
-    const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
-    expect(error.code).toBe('CLI_REFUNDS_AMOUNT_INVALID');
-    expect(error.fix).toBeTruthy();
-    expect(stub.requests).toEqual([]);
-  });
-
-  it('refunds create passes the API refusal through', async () => {
-    stub.reset();
-    const error = { code: 'BILLING_REFUND_AMOUNT_EXCEEDED', message: 'more than remains', fix: 'Refund at most 1400.' };
-    stub.error(`POST ${APP}/payments/pay_1/refunds`, 400, error);
-    const r = await runCli(['refunds', 'create', 'pay_1', '--app', 'app_1', '--amount', '5000', '--json'], env);
     expect(r.code).toBe(1);
     expect(JSON.parse(r.stderr)).toEqual({ success: false, error });
   });

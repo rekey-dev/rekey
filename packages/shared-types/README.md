@@ -67,7 +67,7 @@ Each DTO ships as both a Zod schema (`…Schema`) and an inferred type. Highligh
 - **Coupon discounts**: a PERCENT coupon carries `basisPoints` (`1500` = 15%). An AMOUNT coupon carries `amounts`, one `{ currency, amountOff }` per currency in that currency's smallest unit, and is refused in a currency it has no amount for.
 - **Discriminated unions**: branch on the discriminator before reading fields — `SignInOutcomeDto` on `mfaRequired`, `LicenseVerifyResultDto` on `ok`.
 - **`WEBHOOK_EVENTS` mirrors the API registry exactly** (names + order). Use it to render event pickers or autocomplete the `events` array when registering webhook endpoints; dedupe inbound deliveries on the envelope's `eventId`.
-- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT or a scoped `rp_op_…` operator token, not an Application secret key. `RekeyOperator` in `@rekey.dev/node` wraps the billing ones (prices, coupons, refunds, the billing log, stats, the routing preview). The types are here for the rest, and for panel-like consumers and agents.
+- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT or a scoped `rp_op_…` operator token, not an Application secret key. `RekeyOperator` in `@rekey.dev/node` wraps the billing ones (prices, coupons, payments and their refunds, the billing log, stats, the routing preview). The types are here for the rest, and for panel-like consumers and agents.
 
 ## Links
 

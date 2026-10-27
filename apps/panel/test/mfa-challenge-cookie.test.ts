@@ -66,11 +66,18 @@ describe('mfaVerifyPath', () => {
 });
 
 describe('first-factor route handlers hand the challenge over in a cookie', () => {
-  it('magic link: 303 to /mfa-verify with no token in the Location', async () => {
+  it('cloud handoff: 303 to /mfa-verify with no token in the Location', async () => {
     vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
     publicPost.mockResolvedValue({ mfaRequired: true, mfaChallengeToken: TOKEN });
-    const { GET } = await import('@/app/login/magic-link/route');
-    const res = await GET(new NextRequest('http://panel.test/login/magic-link?token=ml_1'));
+    const { POST } = await import('@/app/login/cloud/route');
+    const body = new URLSearchParams({ id_token: 'idt' });
+    const res = await POST(
+      new NextRequest('http://panel.test/login/cloud', {
+        method: 'POST',
+        body,
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-site' },
+      }),
+    );
     vi.useRealTimers();
 
     expect(res.status).toBe(303);
@@ -82,21 +89,6 @@ describe('first-factor route handlers hand the challenge over in a cookie', () =
     expect(cookie).toMatch(/Secure/);
     expect(cookie).toMatch(/SameSite=lax/i);
     expect(cookie).toMatch(/Max-Age=300/);
-  });
-
-  it('cloud handoff: 303 to /mfa-verify with no token in the Location', async () => {
-    publicPost.mockResolvedValue({ mfaRequired: true, mfaChallengeToken: TOKEN });
-    const { POST } = await import('@/app/login/cloud/route');
-    const body = new URLSearchParams({ id_token: 'idt' });
-    const res = await POST(
-      new NextRequest('http://panel.test/login/cloud', {
-        method: 'POST',
-        body,
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      }),
-    );
-    expect(res.headers.get('location')).toBe('/mfa-verify');
-    expect(challengeCookie(res)).toContain(`${MFA_CHALLENGE_COOKIE}=${TOKEN}`);
   });
 
   it('OAuth callback: keeps next, and the token stays out of the Location', async () => {
@@ -122,8 +114,14 @@ describe('first-factor route handlers hand the challenge over in a cookie', () =
       accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       refreshTokenExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
-    const { GET } = await import('@/app/login/magic-link/route');
-    const res = await GET(new NextRequest('http://panel.test/login/magic-link?token=ml_1'));
+    const { POST } = await import('@/app/login/cloud/route');
+    const res = await POST(
+      new NextRequest('http://panel.test/login/cloud', {
+        method: 'POST',
+        body: new URLSearchParams({ id_token: 'idt' }),
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-site' },
+      }),
+    );
     const cookie = challengeCookie(res);
     expect(cookie).toMatch(/Path=\/mfa-verify/);
     expect(cookie).toMatch(/Expires=Thu, 01 Jan 1970/);

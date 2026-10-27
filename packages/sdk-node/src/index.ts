@@ -404,7 +404,6 @@ export {
   type BillingLogListOptions,
   type BillingLogTrailOptions,
   type BillingLogPeriod,
-  type OperatorBillingConfigUpdate,
   type OperatorPaymentsListOptions,
   type RoutingPreviewInput,
 } from './operator/index.js';
@@ -3277,7 +3276,7 @@ class BillingClient {
    * the trial the next checkout was about to grant.
    *
    * If the Application's billing subject is **org** (Panel → Application →
-   * Billing → Setup → Settings), an individual can't hold a subscription, you MUST
+   * Billing → Setup → Defaults), an individual can't hold a subscription, you MUST
    * pass `organizationId` of a team the user owns/admins. Omitting it throws
    * `RekeyError` `code: "BILLING_ORGANIZATION_REQUIRED"`.
    *

@@ -1,4 +1,4 @@
-# Users overview load test
+# User insights load test
 
 Manual and nightly, never per-PR CI. Run it against a disposable database.
 

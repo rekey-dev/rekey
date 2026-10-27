@@ -41,8 +41,6 @@ interface NavItem {
   href: string;
   label: string;
   icon: React.JSX.Element;
-  /** Optional hover tooltip, for items whose label needs a one-line gloss. */
-  title?: string;
   /**
    * Hide this item below this role.
    *
@@ -101,18 +99,6 @@ const ICONS = {
       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
     </svg>
   ),
-  activity: (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-    </svg>
-  ),
-  apiKey: (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="7.5" cy="15.5" r="5.5" />
-      <path d="m21 2-9.6 9.6" />
-      <path d="m15.5 7.5 3 3L22 7l-3-3" />
-    </svg>
-  ),
   signout: (
     <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -129,12 +115,6 @@ const ICONS = {
     <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
       <circle cx="12" cy="12" r="3" />
-    </svg>
-  ),
-  mcp: (
-    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="16 18 22 12 16 6" />
-      <polyline points="8 6 2 12 8 18" />
     </svg>
   ),
   chevrons: (
@@ -196,19 +176,6 @@ const NAV: NavSection[] = [
       { href: '/email-logs', label: 'Email delivery', icon: ICONS.mail, minRole: 'ADMIN' },
     ],
   },
-  {
-    heading: 'Developers',
-    items: [
-      { href: '/account/api-tokens', label: 'API tokens', icon: ICONS.apiKey },
-      {
-        href: '/account/mcp',
-        label: 'AI assistants (MCP)',
-        icon: ICONS.mcp,
-        title: 'Connect an AI assistant such as Claude or Cursor to your workspace.',
-      },
-      { href: '/account/activity', label: 'My requests', icon: ICONS.activity },
-    ],
-  },
 ];
 
 const SETTINGS: NavItem = { href: '/workspace', label: 'Workspace settings', icon: ICONS.settings };
@@ -220,7 +187,6 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }): React.JS
   return (
     <Link
       href={item.href}
-      title={item.title}
       aria-current={active ? 'page' : undefined}
       className={
         `flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors ${FOCUS_RING} ` +
@@ -237,7 +203,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }): React.JS
 
 /**
  * The signed-in operator at the foot of the sidebar, opening upward into
- * their own settings, the theme and sign-out.
+ * their Account pages, the theme and sign-out.
  */
 function AccountMenu({
   userEmail,
@@ -272,10 +238,10 @@ function AccountMenu({
           {userEmail}
         </p>
         <DropdownMenuSeparator />
-        <DropdownMenuItem href="/account/security">
+        <DropdownMenuItem href="/account">
           <span className="flex items-center gap-2">
             <span className="text-[var(--color-faint-fg)]">{ICONS.security}</span>
-            Account security
+            Account
           </span>
         </DropdownMenuItem>
         <div className="flex items-center justify-between px-2 py-1">
@@ -383,7 +349,7 @@ export function Sidebar({
             Get help on Discord
           </a>
         )}
-        <AccountMenu userEmail={userEmail} signOutAction={signOutAction} active={isActive('/account/security')} />
+        <AccountMenu userEmail={userEmail} signOutAction={signOutAction} active={isActive('/account')} />
       </div>
     </aside>
   );

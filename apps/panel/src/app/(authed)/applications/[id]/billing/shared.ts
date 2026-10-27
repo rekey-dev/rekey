@@ -43,10 +43,13 @@ export async function getBillingProviders(applicationId: string): Promise<Billin
   return res.providers;
 }
 
-export function getWebhookEvents(applicationId: string): Promise<Page<WebhookEventRow>> {
+export function getWebhookEvents(
+  applicationId: string,
+  { limit, offset }: { limit: number; offset: number },
+): Promise<Page<WebhookEventRow>> {
   return apiGet<Page<WebhookEventRow>>(
-    `${appPath(applicationId)}/billing-credentials/webhook-events?limit=25`,
-  ).catch(unlessBusy(() => emptyPage<WebhookEventRow>(25)));
+    `${appPath(applicationId)}/billing-credentials/webhook-events?limit=${limit}&offset=${offset}`,
+  ).catch(unlessBusy(() => emptyPage<WebhookEventRow>(limit)));
 }
 
 /** Null when the plans could not be read, so a page never reports "no active plans" for a failed request. */

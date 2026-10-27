@@ -6,7 +6,7 @@ For a scheduled nudge you can cancel, such as an onboarding sequence, follow the
 
 ## Built-in account emails
 
-The built-in emails (password reset, email verification, magic link, welcome, two-factor enabled, password changed, payment failed) carry your Application's name and look, not Rekey's. They read the branding set in **Panel → Application → Portal**:
+The built-in emails (password reset, email verification, magic link, welcome, two-factor enabled, password changed, payment failed) carry your Application's name and look, not Rekey's. They read the branding set in **Panel → Application → Billing → Portal**:
 
 | Branding field | Used for |
 |---|---|

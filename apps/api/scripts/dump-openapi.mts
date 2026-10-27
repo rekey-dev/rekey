@@ -17,6 +17,7 @@ import { writeFileSync } from 'node:fs';
 process.env.DATABASE_URL ??= 'postgresql://rekey:rekey@localhost:5432/rekey';
 process.env.JWT_SECRET ??= '0'.repeat(48);
 process.env.SUPER_ADMIN_KEY ??= '0'.repeat(48);
+process.env.ENCRYPTION_KEY ??= '0'.repeat(64);
 process.env.NODE_ENV ??= 'development';
 
 // `servers` is now `[{ url: env.API_URL }]`, a deployment's own `/docs` must

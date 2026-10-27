@@ -150,7 +150,7 @@ describe('rekey plans', () => {
     expect(r.code).toBe(1);
     const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
-    expect(error.fix).toContain('billing:write');
+    expect(error.fix).toContain('with the applications:write scope');
     expect(error.fix).toContain('REKEY_OPERATOR_TOKEN');
     expect(stub.requests).toEqual([]);
   });

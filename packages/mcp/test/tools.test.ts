@@ -59,7 +59,6 @@ describe('@rekey.dev/mcp tool registry', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'archive_plan_price',
       'create_coupon',
-      'create_refund',
       'get_application',
       'get_billing_outbox_status',
       'get_billing_reconciliation',

@@ -1,5 +1,5 @@
 /**
- * `rekey analytics users`, the Users overview of one Application.
+ * `rekey analytics users`, the Insights page of one Application.
  *
  *   rekey analytics users --app <id> [--range 30d] [--from YYYY-MM-DD --to YYYY-MM-DD]
  *     [--compare prev|none] [--sections kpis,activity] [--platform ios,web] [--country DE]
@@ -67,7 +67,7 @@ export function registerAnalyticsCommand(program: Command): void {
 
   analytics
     .command('users')
-    .description("An Application's Users overview: KPIs, activity, mix, onboarding, retention, health")
+    .description("An Application's user insights: KPIs, activity, mix, onboarding, retention, health")
     .requiredOption('--app <id>', 'Application id')
     .option('--range <range>', '7d, 30d, 90d, 12m or custom (default 30d)')
     .option('--from <day>', 'First day, YYYY-MM-DD, with --range custom')
@@ -81,9 +81,9 @@ export function registerAnalyticsCommand(program: Command): void {
     .option('--onboarding <status>', 'pending, completed or skipped')
     .option('--verified <bool>', 'true or false')
     .option('--mfa <bool>', 'true or false')
-    .option('--plan <id>', 'Plan id (needs billing:read)')
-    .option('--paying <bool>', 'true or false (needs billing:read)')
-    .option('--org <id>', 'Organization id (needs organizations:read)')
+    .option('--plan <id>', 'Plan id (your membership needs billing:read)')
+    .option('--paying <bool>', 'true or false (your membership needs billing:read)')
+    .option('--org <id>', 'Organization id (your membership needs organizations:read)')
     .action(async function (this: Command) {
       const ctx = readGlobalOpts(this);
       const opts = this.opts<Record<string, string | undefined> & { app: string }>();

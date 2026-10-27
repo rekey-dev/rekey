@@ -29,7 +29,10 @@ interface Ruling {
  * credential, or another person's data?
  */
 const WRITE_TIER_RULINGS: Readonly<Record<string, Ruling>> = {
-  invite_member: { tier: 'capped', why: 'An OWNER or ADMIN invitation is a new admin seat for an address the caller picks.' },
+  invite_member: {
+    tier: 'capped',
+    why: 'An OWNER or ADMIN invitation is a new admin seat for an address the caller picks, and appGrants hand that address apps.',
+  },
   remove_member: { tier: 'capped', why: 'Removing the other owners and admins leaves the token holder in sole control.' },
   create_organization_role: { tier: 'capped', why: 'A role above MEMBER tier is authority over customer organizations.' },
   update_organization_role: { tier: 'capped', why: 'Raising a tier promotes every holder at once.' },
@@ -99,9 +102,11 @@ type Attempt = Record<string, unknown>;
 
 /** Every way a capped tool could hand out or take away OWNER or ADMIN authority. The first of each also runs with an admin token. */
 const ESCALATIONS: Readonly<Record<string, (f: Fixture) => Attempt[]>> = {
-  invite_member: () => [
+  invite_member: (f) => [
     { email: 'accomplice-owner@example.com', role: 'OWNER' },
     { email: 'accomplice-admin@example.com', role: 'ADMIN' },
+    { email: 'accomplice-apps@example.com', role: 'MEMBER', appGrants: [{ applicationId: f.appId, role: 'APP_ADMIN' }] },
+    { email: 'accomplice-viewer@example.com', role: 'MEMBER', appGrants: [{ applicationId: f.appId, role: 'APP_VIEWER' }] },
   ],
   remove_member: (f) => [{ tenantUserId: f.adminUserId }, { tenantUserId: f.secondOwnerUserId }],
   create_organization_role: (f) => [
@@ -242,9 +247,10 @@ describe('operator MCP write tier cannot reach admin tier', () => {
 
   /** Everything that carries authority, a credential or a data stream in the workspace. */
   async function authoritySnapshot(f: Fixture): Promise<unknown> {
-    const [memberships, invitations, roles, orgMemberships, application, endpoints, apiKeys, pats, credentials] = await Promise.all([
+    const [memberships, invitations, invitationGrants, roles, orgMemberships, application, endpoints, apiKeys, pats, credentials] = await Promise.all([
       prisma.tenantMembership.findMany({ where: { tenantId: f.tenantId }, select: { tenantUserId: true, role: true }, orderBy: { tenantUserId: 'asc' } }),
       prisma.tenantInvitation.findMany({ where: { tenantId: f.tenantId, role: { not: 'MEMBER' } }, select: { email: true, role: true } }),
+      prisma.tenantInvitationGrant.count({ where: { invitation: { tenantId: f.tenantId } } }),
       prisma.organizationRoleDef.findMany({ where: { applicationId: f.appId }, select: { name: true, baseRole: true, isDefault: true }, orderBy: { name: 'asc' } }),
       prisma.organizationMembership.findMany({ where: { organizationId: f.orgId }, select: { endUserId: true, role: true }, orderBy: { endUserId: 'asc' } }),
       prisma.application.findUniqueOrThrow({ where: { id: f.appId }, select: { authConfig: true } }),
@@ -253,7 +259,7 @@ describe('operator MCP write tier cannot reach admin tier', () => {
       prisma.tenantApiToken.count({ where: { tenantId: f.tenantId } }),
       prisma.billingCredentials.count({ where: { applicationId: f.appId } }),
     ]);
-    return { memberships, invitations, roles, orgMemberships, authConfig: application.authConfig, endpoints, apiKeys, pats, credentials };
+    return { memberships, invitations, invitationGrants, roles, orgMemberships, authConfig: application.authConfig, endpoints, apiKeys, pats, credentials };
   }
 
   it('every write tool has a ruling, and the admin tier is exactly the ruled set', () => {
@@ -346,6 +352,8 @@ describe('operator MCP write tier cannot reach admin tier', () => {
       const done = await call(f.adminToken, tool, args);
       expect(done.isError, `${tool} ${JSON.stringify(args)} ${JSON.stringify(done.data)}`).toBe(false);
     }
+    const withApps = await call(f.adminToken, 'invite_member', ESCALATIONS.invite_member!(f)[2]!);
+    expect(withApps).toMatchObject({ isError: false, data: { appGrants: [{ applicationId: f.appId, role: 'APP_ADMIN' }] } });
     const promoted = await call(f.adminToken, 'change_member_role', { tenantUserId: f.memberUserId, newRole: 'ADMIN' });
     expect(promoted).toMatchObject({ isError: false, data: { role: 'ADMIN' } });
     const hook = await call(f.adminToken, 'create_webhook_endpoint', {
@@ -365,19 +373,19 @@ describe('operator MCP write tier cannot reach admin tier', () => {
     const before = await authoritySnapshot(f);
 
     const attempts = [
-      { method: 'POST', url: '/api/v1/tenant/workspace/invitations', payload: { email: 'rest-owner@example.com', role: 'OWNER' } },
-      { method: 'PATCH', url: `/api/v1/tenant/workspace/members/${membership.id}`, payload: { role: 'OWNER' } },
-      { method: 'PATCH', url: `/api/v1/tenant/applications/${f.appId}/auth-config`, payload: { appUrl: 'https://attacker.example' } },
-      { method: 'POST', url: `/api/v1/tenant/applications/${f.appId}/webhooks`, payload: { url: 'https://attacker.example/hook', events: ['*'] } },
+      { method: 'POST', url: '/api/v1/tenant/workspace/invitations', payload: { email: 'rest-owner@example.com', role: 'OWNER' }, refusal: [401, 'TENANT_SESSION_INVALID'] },
+      { method: 'PATCH', url: `/api/v1/tenant/workspace/members/${membership.id}`, payload: { role: 'OWNER' }, refusal: [401, 'TENANT_SESSION_INVALID'] },
+      { method: 'PATCH', url: `/api/v1/tenant/applications/${f.appId}/auth-config`, payload: { appUrl: 'https://attacker.example' }, refusal: [403, 'OPERATOR_TOKEN_NOT_ACCEPTED'] },
+      { method: 'POST', url: `/api/v1/tenant/applications/${f.appId}/webhooks`, payload: { url: 'https://attacker.example/hook', events: ['*'] }, refusal: [401, 'TENANT_SESSION_INVALID'] },
     ] as const;
-    for (const attempt of attempts) {
+    for (const { refusal, ...attempt } of attempts) {
       const res = await app.inject({ ...attempt, headers: { authorization: `Bearer ${pat}` } });
-      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(401);
-      expect(res.json().error.code).toBe('TENANT_SESSION_INVALID');
+      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(refusal[0]);
+      expect(res.json().error.code).toBe(refusal[1]);
     }
     expect(await authoritySnapshot(f)).toEqual(before);
 
-    for (const attempt of attempts.slice(0, 2)) {
+    for (const { refusal: _refusal, ...attempt } of attempts.slice(0, 2)) {
       const withSession = await app.inject({ ...attempt, headers: { authorization: `Bearer ${f.session}` } });
       expect(withSession.statusCode, `session ${attempt.method} ${attempt.url}`).toBeLessThan(300);
     }

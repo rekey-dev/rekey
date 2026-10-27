@@ -323,7 +323,7 @@ export default async function EmailPage({
           </div>
           {config.hasCustomCredentials && (
             <ActionForm action={removeCredsBound}>
-              <ConfirmButton
+              <ConfirmButton title="Remove email credentials?"
                 confirm="Remove BYO credentials? The Application will fall back to the default transport."
                 triggerClassName={dangerButtonClass('sm')}
               >

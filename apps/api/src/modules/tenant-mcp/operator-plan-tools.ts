@@ -131,7 +131,7 @@ export const operatorPlanTools: OperatorTool[] = [
     args: z.object({ applicationId: ApplicationIdArg }).strict(),
     annotations: { readOnlyHint: true, openWorldHint: false },
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       const plans = await plansService.listForApplication(app.id, true);
       return { plans: await toolPlans(app.id, plans) };
     },
@@ -155,7 +155,7 @@ export const operatorPlanTools: OperatorTool[] = [
     args: CreatePlanArgs,
     refuse: refuseRemovedPlanFields('create_plan'),
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const kind = input.kind ?? 'SUBSCRIPTION';
       const plan = await plansService.create({
         applicationId: app.id,
@@ -192,7 +192,7 @@ export const operatorPlanTools: OperatorTool[] = [
     write: true,
     args: z.object({ applicationId: ApplicationIdArg, slug: SlugArg, active: z.boolean() }).strict(),
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const plan = await plansService.setActive(app.id, input.slug, input.active);
       auditOperatorWrite(ctx, 'app.plan_active_changed', app.id, { planSlug: plan.slug, active: plan.active });
       return { slug: plan.slug, active: plan.active };
@@ -212,7 +212,7 @@ export const operatorPlanTools: OperatorTool[] = [
     write: true,
     args: UpdatePlanArgs,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const patch = {
         ...(input.name !== undefined && { name: input.name }),
         ...(input.licenseSeatsAllowed !== undefined && { licenseSeatsAllowed: input.licenseSeatsAllowed }),
@@ -240,7 +240,7 @@ export const operatorPlanTools: OperatorTool[] = [
     write: true,
     args: PlanRefArgs,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const plan = await plansService.registerWithProvider(app.id, input.planSlug);
       auditOperatorWrite(ctx, 'app.plan_updated', app.id, {
         planSlug: plan.slug,

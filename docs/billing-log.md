@@ -163,7 +163,8 @@ Rekey did about it, and why.
 ### With the API
 
 All routes are under `/api/v1/tenant/applications/:id`, take an operator
-session or an operator token, and need the `billing:read` scope.
+session or an operator token with the `read` scope, and need the
+`billing:read` scope on the caller's membership.
 
 | Route | Returns |
 |---|---|

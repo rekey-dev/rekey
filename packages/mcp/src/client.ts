@@ -73,7 +73,7 @@ export class AdminClient {
    * closed, and never fall back to the admin key.
    *
    * @example
-   * await client.requestAsOperator('PUT', path, body, { kind: 'write', scope: 'billing:write' });
+   * await client.requestAsOperator('PUT', path, body, { kind: 'write', scope: 'applications:write' });
    */
   async requestAsOperator<T>(method: string, path: string, body?: unknown, need: OperatorNeed = KEYS_MINT): Promise<T> {
     if (!this.cfg.operatorToken) {

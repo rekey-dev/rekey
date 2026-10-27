@@ -1,5 +1,5 @@
 /**
- * The Users overview's filters, read from and written back to the URL, so a
+ * The Insights page's filters, read from and written back to the URL, so a
  * view is shareable and bookmarkable. Values are enums or opaque ids, never
  * emails: page views, query string included, go to analytics.
  *

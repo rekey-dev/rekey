@@ -63,7 +63,7 @@ Ships with the 2.2.0 release line. Everything below in "Implemented" is real and
 
 ### Implemented
 
-`version` needs no environment. `doctor` needs `REKEY_URL`, and reports what it could not check for want of a credential as `skipped`. The **Needs** column names the credential each other command takes: `admin` is `SUPER_ADMIN_KEY`, `operator` is `REKEY_OPERATOR_TOKEN` (scope `billing:read` to read, `billing:write` to change), `secret` is `REKEY_SECRET`.
+`version` needs no environment. `doctor` needs `REKEY_URL`, and reports what it could not check for want of a credential as `skipped`. The **Needs** column names the credential each other command takes: `admin` is `SUPER_ADMIN_KEY`, `operator` is `REKEY_OPERATOR_TOKEN` (scope `read` to read, `applications:write` to change plans, prices, coupons or the reporting currency), `secret` is `REKEY_SECRET`.
 
 | Command | Needs | What it does |
 |---|---|---|
@@ -84,14 +84,13 @@ Ships with the 2.2.0 release line. Everything below in "Implemented" is real and
 | `rekey billing log --app <id> [--type a,b] [--tier permanent\|diagnostic] [--end-user id] [--subscription id] [--payment id] [--currency INR] [--from ISO] [--to ISO] [--limit n] [--cursor c] [--all [--max n]] [--include actors]` | operator | The billing log, newest first: `{ items, nextCursor, actors }` with `--json`. `--all` follows the cursor to the end, or to `--max` entries (default 1000). `--include actors` adds who the end users and operators named are (end users need a token with `end-users:read`); the text output then prints an email or a name in place of an id. |
 | `rekey billing preview --app <id> --country IN [--plan <slug\|id>] [--coupon CODE] [--country-source declared\|vouched\|hint] [--currency INR] [--provider name] [--end-user id] [--on-unavailable-currency fallback\|refuse]` | operator | Which price and provider a buyer in a country would get, and what a coupon would take off, decided by the functions checkout runs. Opens no checkout. |
 | `rekey billing reporting-currency get --app <id>` / `set <CODE> --app <id>` | operator | Read or set the currency the stats lead with. Nothing is converted into it. |
-| `rekey billing unavailable-currency get --app <id>` / `set fallback\|refuse --app <id>` | operator | Read or set what a checkout does when the server names a currency no provider can charge and the request does not say: charge the plan's default price, or refuse. |
+| `rekey billing unavailable-currency get --app <id>` | operator | What a checkout does when the server names a currency no provider can charge and the request does not say: charge the plan's default price, or refuse. Change it in the panel. |
 | `rekey billing reconciliation --app <id> [--from ISO] [--to ISO]` | operator | Compare the billing log with payments, refunds and subscriptions. Last 7 days by default, at most 31. |
 | `rekey billing price-fallbacks --app <id> [--from ISO] [--to ISO]` | operator | Count the checkouts that charged a default price because the buyer's currency could not be charged. |
 | `rekey payments show <paymentId> --app <id>` | operator | One payment: amount, refunded total, provider, and whether it can be refunded through Rekey, with the reason when it cannot. |
-| `rekey refunds list <paymentId> --app <id>` | operator | The refunds of a payment, oldest first. |
-| `rekey refunds create <paymentId> --app <id> [--amount n] [--reason "..."] [--idempotency-key k]` | operator | Refund a payment at its provider. Without `--amount`, everything not yet refunded. |
+| `rekey refunds list <paymentId> --app <id>` | operator | The refunds of a payment, oldest first. Issue a refund in the panel. |
 | `rekey lists ls` / `rekey lists export <key> [--format csv\|jsonl] [--status subscribed\|unsubscribed\|all] [--out <file>]` | secret | Read an Application's lists and their members. `export` needs a key minted with `contacts:read`. |
-| `rekey analytics users --app <id> [--range 30d] [--sections kpis,activity]` | operator | The Users overview of one Application. |
+| `rekey analytics users --app <id> [--range 30d] [--sections kpis,activity]` | operator | The Insights page of one Application. |
 
 #### What `rekey doctor` checks
 

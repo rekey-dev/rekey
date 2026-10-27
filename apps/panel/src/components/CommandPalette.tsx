@@ -17,6 +17,8 @@
  *  3. Section jumps for the *current* application when the route is under
  *     /applications/{id} (AppNav's groups from lib/app-sections, flattened;
  *     billing-gated sections are left out while billing is off).
+ *  4. On the same routes, that application's end users matching the query,
+ *     via /api/palette/end-users (debounced, at most 5).
  *
  * Filtering is a case-insensitive includes-then-subsequence match. Keyboard:
  * arrows + Enter, Home/End. A11y: role="combobox" input controlling a
@@ -41,6 +43,11 @@ export function openCommandPalette(): void {
 
 const RECENTS_KEY = 'rekey.palette.recents';
 const RECENTS_MAX = 5;
+const END_USER_SEARCH_DEBOUNCE_MS = 250;
+
+function isEndUserQuery(q: string): boolean {
+  return q.length >= 3 || q.includes('@');
+}
 
 interface PaletteApp {
   id: string;
@@ -62,7 +69,7 @@ interface PaletteItem {
   keywords?: string;
 }
 
-/** Mirrors Sidebar's NAV, keep in sync when nav entries change. */
+/** Mirrors Sidebar's NAV and the Account tabs, keep in sync when either changes. */
 const NAV_DESTINATIONS: Array<{ label: string; href: string; keywords?: string }> = [
   { label: 'Applications', href: '/applications', keywords: 'apps' },
   { label: 'Team', href: '/team', keywords: 'members people roles' },
@@ -71,9 +78,10 @@ const NAV_DESTINATIONS: Array<{ label: string; href: string; keywords?: string }
   { label: 'Workspace settings', href: '/workspace', keywords: 'settings tenant workspace' },
   { label: 'Audit log', href: '/audit-log', keywords: 'security events export' },
   { label: 'Email delivery', href: '/email-logs', keywords: 'mail logs sent bounced' },
-  { label: 'Account security', href: '/account/security', keywords: 'account security mfa password sessions passkeys' },
+  { label: 'Account security', href: '/account/security', keywords: 'account security mfa password sessions' },
+  { label: 'Passkeys', href: '/account/passkeys', keywords: 'account passkeys webauthn touch id hardware key' },
   { label: 'API tokens', href: '/account/api-tokens', keywords: 'account keys personal' },
-  { label: 'Operator MCP', href: '/account/mcp', keywords: 'account model context protocol ai agents' },
+  { label: 'AI assistants (MCP)', href: '/account/mcp', keywords: 'account model context protocol ai agents' },
   { label: 'My requests', href: '/account/activity', keywords: 'account activity log' },
 ];
 
@@ -124,6 +132,7 @@ export function CommandPalette(): React.JSX.Element {
   const [activeIndex, setActiveIndex] = React.useState(0);
   const [apps, setApps] = React.useState<PaletteApp[] | null>(null);
   const [recents, setRecents] = React.useState<string[]>([]);
+  const [endUsers, setEndUsers] = React.useState<PaletteItem[]>([]);
 
   // Global shortcut + the custom open event (Sidebar search button).
   React.useEffect(() => {
@@ -181,6 +190,33 @@ export function CommandPalette(): React.JSX.Element {
   const currentAppId = appIdMatch?.[1];
   const currentApp = currentAppId ? apps?.find((a) => a.id === currentAppId) : undefined;
 
+  React.useEffect(() => {
+    setEndUsers([]);
+    const q = query.trim();
+    if (!open || !currentAppId || !isEndUserQuery(q)) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      const qs = new URLSearchParams({ app: currentAppId, q });
+      fetch(`/api/palette/end-users?${qs.toString()}`, { cache: 'no-store', signal: controller.signal })
+        .then((res) => (res.ok ? (res.json() as Promise<Array<{ id: string; email: string }>>) : []))
+        .then((list) =>
+          setEndUsers(
+            (Array.isArray(list) ? list : []).map((u) => ({
+              id: `end-user:${u.id}`,
+              label: u.email,
+              group: 'End users',
+              href: `/applications/${currentAppId}/end-users/${u.id}`,
+            })),
+          ),
+        )
+        .catch(() => {});
+    }, END_USER_SEARCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, query, currentAppId]);
+
   const items = React.useMemo<PaletteItem[]>(() => {
     const out: PaletteItem[] = [];
     if (currentAppId) {
@@ -230,8 +266,8 @@ export function CommandPalette(): React.JSX.Element {
       return [...recentItems, ...items];
     }
     // Keep source order (group-clustered) so group headers don't interleave.
-    return items.filter((i) => itemMatches(q, i));
-  }, [query, items, recents]);
+    return [...items.filter((i) => itemMatches(q, i)), ...endUsers];
+  }, [query, items, recents, endUsers]);
 
   // Clamp / reset the active row whenever the result set changes.
   React.useEffect(() => {

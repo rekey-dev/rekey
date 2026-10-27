@@ -220,6 +220,45 @@ async function withOrganizationMembershipLock<T>(
   });
 }
 
+/**
+ * Delete a membership, refusing to remove the last OWNER. Counted across every
+ * OWNER-tier name, not the literal 'OWNER'. Guard and delete run under the same
+ * row lock as setMemberRole, so a concurrent demotion and removal cannot both
+ * see the same owner count and both win.
+ */
+async function deleteMembership(args: {
+  applicationId: string;
+  organizationId: string;
+  endUserId: string;
+  baseRole: OrganizationBaseRole;
+}): Promise<{ removed: boolean }> {
+  const ownerNames = await organizationRolesService.ownerRoleNames(args.applicationId);
+  await withOrganizationMembershipLock(args.organizationId, async (tx) => {
+    if (args.baseRole === 'OWNER') {
+      const owners = await tx.organizationMembership.count({
+        where: { organizationId: args.organizationId, role: { in: ownerNames } },
+      });
+      if (owners <= 1) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'ORGANIZATION_LAST_OWNER',
+          message: 'Cannot remove the last OWNER. Transfer ownership first.',
+          fix: 'Promote another member to OWNER before leaving or being removed.',
+        });
+      }
+    }
+    await tx.organizationMembership.delete({
+      where: {
+        organizationId_endUserId: {
+          organizationId: args.organizationId,
+          endUserId: args.endUserId,
+        },
+      },
+    });
+  });
+  return { removed: true };
+}
+
 export const organizationsService = {
   /**
    * Create a new Organization with the calling EndUser as its OWNER.
@@ -745,7 +784,7 @@ export const organizationsService = {
 
   /**
    * Remove a member. Caller must `canManage` the target's role. Cannot
-   * remove the last OWNER.
+   * remove the last OWNER. Removing yourself is `leave`, with its rules.
    */
   async removeMember(args: {
     application: { id: string };
@@ -753,6 +792,7 @@ export const organizationsService = {
     organizationId: string;
     targetEndUserId: string;
   }): Promise<{ removed: boolean }> {
+    if (args.actorEndUserId === args.targetEndUserId) return this.leave(args);
     const actor = await this.requireMembership(args);
     const target = await prisma.organizationMembership.findUnique({
       where: {
@@ -767,52 +807,27 @@ export const organizationsService = {
       organizationRolesService.baseRoleOrLeast(args.application.id, actor.role),
       organizationRolesService.baseRoleOrLeast(args.application.id, target.role),
     ]);
-    if (!canManage(actorBase, targetBase) && actor.endUserId !== target.endUserId) {
-      // Self-removal is allowed (= "leave org"); otherwise enforce the
-      // role hierarchy.
+    if (!canManage(actorBase, targetBase)) {
       throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
         message: `Your role (${actor.role}, tier ${actorBase}) cannot remove a ${target.role}.`,
-        fix: 'Self-removal is always allowed; otherwise OWNER manages anyone, ADMIN manages MEMBER.',
+        fix: 'OWNER manages anyone, ADMIN manages MEMBER. To remove yourself, leave the organization instead.',
       });
     }
-    // Counted across every OWNER-tier name, not the literal 'OWNER'. Guard and
-    // delete run under the same row lock as setMemberRole, so a concurrent
-    // demotion and removal cannot both see the same owner count and both win.
-    const ownerNames = await organizationRolesService.ownerRoleNames(args.application.id);
-    await withOrganizationMembershipLock(args.organizationId, async (tx) => {
-      if (targetBase === 'OWNER') {
-        const owners = await tx.organizationMembership.count({
-          where: { organizationId: args.organizationId, role: { in: ownerNames } },
-        });
-        if (owners <= 1) {
-          throw new RekeyError({
-            statusCode: 409,
-            code: 'ORGANIZATION_LAST_OWNER',
-            message: 'Cannot remove the last OWNER. Transfer ownership first.',
-            fix: 'Promote another member to OWNER before leaving or being removed.',
-          });
-        }
-      }
-      await tx.organizationMembership.delete({
-        where: {
-          organizationId_endUserId: {
-            organizationId: args.organizationId,
-            endUserId: args.targetEndUserId,
-          },
-        },
-      });
+    return deleteMembership({
+      applicationId: args.application.id,
+      organizationId: args.organizationId,
+      endUserId: args.targetEndUserId,
+      baseRole: targetBase,
     });
-    return { removed: true };
   },
 
   /**
    * Caller self-leaves. An OWNER cannot leave: billing (payment + benefits) is
    * tied to the owner, and ownership transfer is operator-only (via the Panel /
    * support, see decisions 2026-05-27 22:55). A co-owner must demote themselves
-   * to ADMIN first; a sole owner must have support re-point ownership. Non-owners
-   * leave via removeMember (which keeps the last-OWNER guard for the admin path).
+   * to ADMIN first; a sole owner must have support re-point ownership.
    */
   async leave(args: {
     application: { id: string };
@@ -832,11 +847,11 @@ export const organizationsService = {
         fix: 'Transfer ownership first (via the Panel / Rekey support), or demote yourself to ADMIN if there is another OWNER.',
       });
     }
-    return this.removeMember({
-      application: args.application,
-      actorEndUserId: args.actorEndUserId,
+    return deleteMembership({
+      applicationId: args.application.id,
       organizationId: args.organizationId,
-      targetEndUserId: args.actorEndUserId,
+      endUserId: args.actorEndUserId,
+      baseRole: base,
     });
   },
 

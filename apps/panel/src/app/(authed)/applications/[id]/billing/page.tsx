@@ -116,7 +116,7 @@ export default async function BillingStatusPage({
         {canWrite ? (
           <ActionForm action={setBillingEnabled.bind(null, id, !billingEnabled)} className="shrink-0">
             {billingEnabled ? (
-              <ConfirmButton
+              <ConfirmButton title="Disable billing?"
                 confirm="Disable billing? The public billing API (checkout, subscriptions, plans, coupons, credits, licenses, usage) will immediately return 403 and the Billing tab group will be hidden. Existing subscriptions are not cancelled, and you can re-enable any time."
                 variant="danger"
               >
@@ -206,6 +206,16 @@ export default async function BillingStatusPage({
           />
         </Card>
       </section>
+
+      {billingEnabled && (
+        <p className="text-sm text-[var(--color-muted-fg)]">
+          Moving buyers over from another billing system?{' '}
+          <Link href={`/applications/${id}/imports`} className="underline underline-offset-2 hover:text-[var(--color-fg)]">
+            Import their subscriptions
+          </Link>
+          .
+        </p>
+      )}
     </div>
   );
 }

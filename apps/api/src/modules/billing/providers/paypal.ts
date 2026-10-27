@@ -93,7 +93,6 @@ export class RealPaypalProvider implements BillingProvider {
     if (!res.ok) {
       {
       const body = await res.text();
-      console.error(`paypal token request failed`, res.status, body);
       throw paypalError('token request', res.status, body);
     }
     }
@@ -163,7 +162,6 @@ export class RealPaypalProvider implements BillingProvider {
     if (!planRes.ok && planRes.status !== 422 /* duplicate */) {
       {
       const body = await planRes.text();
-      console.error(`paypal plan creation failed`, planRes.status, body);
       throw paypalError('plan creation', planRes.status, body);
     }
     }
@@ -229,7 +227,6 @@ export class RealPaypalProvider implements BillingProvider {
     if (res.status === 404) return null;
     if (!res.ok) {
       const body = await res.text();
-      console.error('paypal subscription read failed', res.status, body);
       throw paypalError('subscription read', res.status, body);
     }
     const sub = (await res.json()) as { id?: unknown; status?: unknown; plan_id?: unknown; custom_id?: unknown };
@@ -292,7 +289,6 @@ export class RealPaypalProvider implements BillingProvider {
     if (!subRes.ok) {
       {
       const body = await subRes.text();
-      console.error(`paypal subscription failed`, subRes.status, body);
       throw paypalError('subscription', subRes.status, body);
     }
     }
@@ -376,11 +372,9 @@ export class RealPaypalProvider implements BillingProvider {
         });
         if (patch.ok) return { webhookId: match.id };
         const patchText = await patch.text();
-        console.error('paypal webhook event update failed', patch.status, patchText);
         throw paypalError('webhook event update', patch.status, patchText);
       }
     }
-    console.error('paypal webhook register failed', res.status, text);
     throw paypalError('webhook registration', res.status, text);
   }
 
@@ -508,7 +502,6 @@ export class RealPaypalProvider implements BillingProvider {
           fix: 'Nothing to do, the buyer has their money. Resolve the case as refunded.',
         });
       }
-      console.error('paypal refund failed', res.status, text);
       throw paypalError('refund', res.status, text);
     }
 
@@ -609,7 +602,6 @@ export class RealPaypalProvider implements BillingProvider {
     const text = await res.text();
     // Already cancelled/expired at PayPal, the outcome we asked for.
     if (res.status === 422 && text.includes('SUBSCRIPTION_STATUS_INVALID')) return;
-    console.error('paypal cancel failed', res.status, text);
     throw paypalError('cancellation', res.status, text);
   }
 }

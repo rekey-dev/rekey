@@ -133,7 +133,7 @@ export const env = createEnv({
       .optional()
       .transform((v) => v === 'true'),
     // The hourly analytics rollup (modules/analytics/rollup). On unless set to
-    // `false`: without it the Users overview can only answer the last 63 days
+    // `false`: without it the Insights page can only answer the last 63 days
     // and loses a day of per-day history every day. See docs/analytics.md.
     ANALYTICS_ROLLUP_ENABLED: z
       .union([z.literal('true'), z.literal('false'), z.literal('')])
@@ -208,7 +208,7 @@ export const env = createEnv({
     // Public halves are served at GET /.well-known/jwks.json either way.
     JWT_RS256_PRIVATE_KEY: z.string().min(1).optional(),
 
-    // Required in production for token-at-rest encryption. Checked as hex, not
+    // Required outside the test suite for secrets at rest. Checked as hex, not
     // just length: Node's hex decoder stops at the first non-hex character, so
     // a 64-character password-style key would boot and then fail every
     // encrypt with ERR_CRYPTO_INVALID_KEYLEN.
@@ -586,13 +586,12 @@ export const corsAllowedOrigins: string[] = (env.CORS_ALLOWED_ORIGINS ?? '')
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
-if (env.NODE_ENV === 'production' && !env.ENCRYPTION_KEY) {
-  // Fail closed. Booting without ENCRYPTION_KEY would persist provider/OAuth
-  // secrets as plaintext (`plain.` prefix) at rest, a silent, hard-to-spot
-  // data-at-rest exposure. Better to refuse to start than to quietly store
-  // credentials in the clear; operators see the error immediately and fix it.
+// Fail closed everywhere but the test suite. Without a key, provider, OAuth and
+// SMTP secrets are written as readable `plain.` rows, and NODE_ENV defaults to
+// development, so a self-host that never sets it would do that silently.
+if (env.NODE_ENV !== 'test' && !env.ENCRYPTION_KEY) {
   throw new Error(
-    '[SECURITY] ENCRYPTION_KEY is required in production. Refusing to boot. ' +
+    '[SECURITY] ENCRYPTION_KEY is required. Refusing to boot. ' +
       'Without it, provider credentials and tokens are stored in plaintext at rest. ' +
       'Generate one with: openssl rand -hex 32',
   );
@@ -645,6 +644,15 @@ if (
   throw new Error(
     '[SECURITY] REKEY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production. Refusing to boot. ' +
       'It returns raw password-reset and magic-link tokens in API responses. Unset it and configure email transport.',
+  );
+}
+
+if (env.NODE_ENV === 'test' && !process.env.VITEST) {
+  // Test mode lifts the auth rate limits and returns raw reset and confirmation
+  // tokens in responses, so a reachable server started with it hands out accounts.
+  throw new Error(
+    '[SECURITY] NODE_ENV=test is only for the test suite. Refusing to boot. ' +
+      'Set NODE_ENV=production (or development for local work).',
   );
 }
 

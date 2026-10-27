@@ -29,7 +29,7 @@ const PageArgs = {
 };
 
 async function appFor(ctx: OperatorToolContext, applicationId: string, need: 'read' | 'write') {
-  const app = await loadAppInTenant(ctx, applicationId);
+  const app = await loadAppInTenant(ctx, applicationId, need);
   await applicationAccess(accessContextFromTool(ctx), app.id, need, {
     scope: need === 'read' ? 'audience:read' : 'audience:write',
   });

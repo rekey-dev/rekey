@@ -188,7 +188,7 @@ function PriceRow({
           </span>
         ) : (
           <ActionForm action={removePlanPrice.bind(null, applicationId, planRef, price.currency)}>
-            <ConfirmButton
+            <ConfirmButton title="Remove plan price?"
               confirm={`Remove the ${price.currency} price from ${planRef.slug}? New buyers it applied to are charged the default price in ${defaultCurrency} instead. If past subscriptions or payments used this price it is archived, so their records keep what they paid.`}
             >
               Remove

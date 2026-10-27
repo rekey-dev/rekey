@@ -17,6 +17,7 @@ import { ActionForm } from '@/components/ActionForm';
 import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
 import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
+import { MemberRoleSelect } from '@/components/MemberRoleSelect';
 import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
 import { savedStateKey } from '@/lib/saved-state-key';
@@ -29,6 +30,12 @@ import { savedStateKey } from '@/lib/saved-state-key';
 // to the FIRST option, so a member holding a custom role displayed as OWNER and
 // one Save promoted them for real.
 const BUILT_IN_ROLE_NAMES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
+
+const ORG_TIER_CONSEQUENCE: Record<'OWNER' | 'ADMIN' | 'MEMBER', string> = {
+  OWNER: 'This role has the OWNER tier: full control of the organization, including ownership transfer.',
+  ADMIN: 'This role has the ADMIN tier: it manages members below OWNER.',
+  MEMBER: 'This role has the MEMBER tier: read-only in the organization.',
+};
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -330,20 +337,16 @@ export default async function OrganizationDetailPage({
                 <TR key={m.id} hover>
                   <TD>{m.email}</TD>
                   <TD>
-                    <ActionForm
-                      key={savedStateKey(m.role)}
-                      action={setMemberRole.bind(null, id, orgId, m.endUserId)}
-                      className="flex items-center gap-2"
-                    >
-                      <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]">
-                        {roleOptionsFor(m.role).map((r) => (
-                          <option key={r} value={r}>
-                            {r}
-                            {roleNote(r)}
-                          </option>
-                        ))}
-                      </select>
-                      <SubmitButton pendingLabel="Saving…" className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60">Save</SubmitButton>
+                    <ActionForm key={savedStateKey(m.role)} action={setMemberRole.bind(null, id, orgId, m.endUserId)}>
+                      <MemberRoleSelect
+                        email={m.email}
+                        currentRole={m.role}
+                        roles={roleOptionsFor(m.role).map((r) => ({
+                          value: r,
+                          label: `${r}${roleNote(r)}`,
+                          consequence: ORG_TIER_CONSEQUENCE[tierOf(r)],
+                        }))}
+                      />
                     </ActionForm>
                   </TD>
                   <TD muted className="text-xs">
@@ -351,7 +354,7 @@ export default async function OrganizationDetailPage({
                   </TD>
                   <TD align="right">
                     <ActionForm action={removeMember.bind(null, id, orgId, m.endUserId)} className="inline">
-                      <ConfirmButton confirm={`Remove ${m.email} from "${org.name}"? Their end-user account is not deleted.`}>
+                      <ConfirmButton title="Remove organization member?" confirm={`Remove ${m.email} from "${org.name}"? Their end-user account is not deleted.`}>
                         Remove
                       </ConfirmButton>
                     </ActionForm>
@@ -501,7 +504,7 @@ export default async function OrganizationDetailPage({
                       <TD align="right">
                         {l.status === 'ACTIVE' && (
                           <RevealActionForm action={revealOrgLicenseKey.bind(null, id, orgId, l.id)} className="inline">
-                            <ConfirmButton
+                            <ConfirmButton title="Reveal a new license key?"
                               variant="subtle"
                               confirm={`Reveal the key for ${l.keyPrefix}…? This mints a NEW key (shown once) and resets any existing activations, so machines on the old key must re-verify. Org keys are stored hash-only, so this is the only way to obtain one.`}
                             >
@@ -619,7 +622,7 @@ function EditOrgModal({
       title="Edit organization"
       description="Rename the org or replace its metadata. Slug is immutable."
       trigger="Edit"
-      triggerClassName="text-xs text-[var(--color-fg)] font-medium hover:underline cursor-pointer"
+      triggerClassName="inline-block py-1.5 text-xs text-[var(--color-fg)] font-medium hover:underline cursor-pointer"
     >
       <ActionForm action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (

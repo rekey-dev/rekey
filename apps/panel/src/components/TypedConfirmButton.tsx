@@ -35,6 +35,8 @@ interface Props {
   confirmLabel?: string;
   /** Trigger button class (defaults to the shared outlined danger button). */
   triggerClassName?: string;
+  /** Trigger label while the action runs. Defaults to `triggerLabel`. */
+  pendingLabel?: React.ReactNode;
 }
 
 export function TypedConfirmButton({
@@ -44,6 +46,7 @@ export function TypedConfirmButton({
   triggerLabel = 'Delete',
   confirmLabel,
   triggerClassName,
+  pendingLabel,
 }: Props): React.JSX.Element {
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const [typed, setTyped] = React.useState('');
@@ -89,12 +92,11 @@ export function TypedConfirmButton({
       <button
         type="button"
         onClick={open}
+        disabled={pending}
         aria-busy={pending || undefined}
-        className={
-          triggerClassName ?? dangerButtonClass('xs')
-        }
+        className={`${triggerClassName ?? dangerButtonClass('xs')} aria-busy:opacity-60 aria-busy:cursor-wait`}
       >
-        {triggerLabel}
+        {pending ? (pendingLabel ?? triggerLabel) : triggerLabel}
       </button>
       <dialog
         ref={dialogRef}

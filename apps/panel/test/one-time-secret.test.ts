@@ -43,7 +43,7 @@ const MINTS: { action: string; file: string; form: string }[] = [
   { action: 'resendInvite', file: app('team', 'actions.ts'), form: app('team', 'page.tsx') },
   { action: 'issueLicense', file: app('applications', '[id]', 'licenses', 'page.tsx'), form: app('applications', '[id]', 'licenses', 'page.tsx') },
   { action: 'revealOrgLicenseKey', file: app('applications', '[id]', 'organizations', '[orgId]', 'page.tsx'), form: app('applications', '[id]', 'organizations', '[orgId]', 'page.tsx') },
-  { action: 'mintToken', file: app('account', 'api-tokens', 'page.tsx'), form: app('account', 'api-tokens', 'page.tsx') },
+  { action: 'mintToken', file: app('account', '(home)', 'api-tokens', 'page.tsx'), form: app('account', '(home)', 'api-tokens', 'page.tsx') },
   { action: 'impersonate', file: app('applications', '[id]', 'end-users', '[euid]', 'actions.ts'), form: app('applications', '[id]', 'end-users', '[euid]', 'security', 'page.tsx') },
 ];
 

@@ -1,5 +1,5 @@
 /**
- * The Users overview's rate limit counts computations, not requests.
+ * The Insights page's rate limit counts computations, not requests.
  *
  * A cached section costs a Redis read, so reloading the page should not use
  * up an operator's allowance; a cache miss scans the Application's rows, and

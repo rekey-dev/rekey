@@ -3,11 +3,9 @@ import type {
   BillingCredentialDto,
   BillingProviderModulesDto,
   BillingStatsDto,
-  CreateRefundRequest,
   ListPage,
   Paged,
   RefundDto,
-  RefundResultDto,
   ReportingCurrencyDto,
   RoutingPreviewDto,
   TenantPaymentDto,
@@ -45,37 +43,6 @@ export class OperatorRefundsClient {
   list(paymentId: string, page?: ListPage): Promise<Paged<RefundDto>> {
     return this.transport.send('GET', `${this.path(paymentId)}${queryString(pageQuery(page))}`);
   }
-
-  /**
-   * Refund a payment, in full or in part. Rekey asks the provider that took
-   * the payment to pay the money back, then records the refund.
-   *
-   * `amount` is an integer in the minor unit of the payment's currency. Leave
-   * it out to refund everything that has not been refunded. A payment can be
-   * refunded more than once, up to its amount.
-   *
-   * Repeating a request is safe: without `idempotencyKey`, the key sent to the
-   * provider is derived from the payment, what was already refunded and the
-   * amount, so the same call made twice is one refund.
-   *
-   * Refunding does not cancel a subscription or take back credits or licences.
-   *
-   * @example
-   * ```ts
-   * const { refund, payment } = await operator.payments.refunds.create('pay_123', {
-   *   amount: 500,
-   *   reason: 'Duplicate charge',
-   * });
-   * console.log(refund.status, formatMoney(payment.refundedAmount, payment.currency));
-   * ```
-   *
-   * @throws {RekeyError} `BILLING_REFUND_AMOUNT_EXCEEDED` (400); `BILLING_PAYMENT_NOT_REFUNDABLE`,
-   * `BILLING_PAYMENT_ALREADY_REFUNDED`, `BILLING_REFUND_UNSUPPORTED`, `BILLING_REFUND_REJECTED`,
-   * `BILLING_REFUND_EXCEEDS_PAYMENT` (409); `PAYMENT_NOT_FOUND` (404).
-   */
-  create(paymentId: string, input: CreateRefundRequest = {}): Promise<RefundResultDto> {
-    return this.transport.send('POST', this.path(paymentId), input);
-  }
 }
 
 /** Every payment of the Application, as its operator reads them. */
@@ -110,15 +77,16 @@ export class OperatorPaymentsClient {
 
   /**
    * One payment by id, as {@link list} returns it. `refundable` says whether
-   * {@link OperatorRefundsClient.create} would reach the provider that took
-   * it, and `refundBlockedReason` why not: the judgement the refund makes
-   * before it asks a provider. The provider can still refuse a refund.
+   * a refund issued from the panel would reach the provider that took it, and
+   * `refundBlockedReason` why not: the judgement the refund makes before it
+   * asks a provider. The provider can still refuse a refund. Issuing one needs
+   * an operator session, so this client cannot.
    *
    * @example
    * ```ts
    * const payment = await operator.payments.get('pay_123');
    * if (payment.refundable) {
-   *   await operator.payments.refunds.create(payment.id);
+   *   console.log(`Refund ${payment.id} from the panel, under Payments.`);
    * } else if (payment.refundBlockedReason !== null) {
    *   console.log(refundBlockedMessage(payment.refundBlockedReason));
    * }
@@ -154,16 +122,6 @@ export interface RoutingPreviewInput {
   couponCode?: string;
 }
 
-/** The billing settings {@link OperatorBillingClient.updateConfig} changes. A setting left out stays as it is. */
-export interface OperatorBillingConfigUpdate {
-  /**
-   * What a checkout does when your server names a `currency` no provider can
-   * charge and the request does not say: `fallback` charges the plan's
-   * default price, `refuse` answers `BILLING_NO_PROVIDER_FOR_CURRENCY`.
-   */
-  onUnavailableCurrency?: 'fallback' | 'refuse';
-}
-
 /** Billing settings, reporting, the reporting currency, the routing preview and the providers' currencies. */
 export class OperatorBillingClient {
   constructor(private readonly transport: OperatorTransport) {}
@@ -182,30 +140,6 @@ export class OperatorBillingClient {
   async getConfig(): Promise<BillingConfig> {
     const application = await this.transport.send<{ billingConfig: BillingConfig }>('GET', this.transport.base);
     return application.billingConfig;
-  }
-
-  /**
-   * Change the Application's billing settings and return them all.
-   * `onUnavailableCurrency` is the default for every checkout, coupon quote
-   * and routing preview that names a `currency` and sends no
-   * `onUnavailableCurrency` of its own. A change is written to the billing
-   * log as `settings.unavailable_currency_changed`. Needs `billing:write`.
-   *
-   * @example
-   * ```ts
-   * const config = await operator.billing.updateConfig({ onUnavailableCurrency: 'refuse' });
-   * config.onUnavailableCurrency; // 'refuse'
-   * ```
-   *
-   * @throws {RekeyError} `VALIDATION_ERROR` (400); `APPLICATION_NOT_FOUND` (404).
-   */
-  async updateConfig(update: OperatorBillingConfigUpdate): Promise<BillingConfig> {
-    const answer = await this.transport.send<{ billingConfig: BillingConfig }>(
-      'PATCH',
-      `${this.transport.base}/billing-config`,
-      update,
-    );
-    return answer.billingConfig;
   }
 
   /**

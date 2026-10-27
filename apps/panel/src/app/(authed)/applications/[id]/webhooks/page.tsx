@@ -52,9 +52,8 @@ const ALL_EVENTS: readonly string[] = KNOWN_WEBHOOK_EVENTS;
  * There is no tenant-side aggregate to read. `/admin/metrics/webhook-endpoint-
  * health` computes exactly this, but it is `requireSuperAdmin` and
  * deployment-wide, so an operator cannot call it. The only tenant source is
- * `GET .../webhooks/:endpointId/deliveries`, which takes no query parameters at
- * all: no status filter, no time window, no limit (the route pins the service's
- * page size to 50). So the panel fans out one request per endpoint, bounded by
+ * `GET .../webhooks/:endpointId/deliveries`, which has no time window. So the
+ * panel fans out one request per endpoint for its newest 50 rows, bounded by
  * the endpoint count, not by volume, and counts the rows inside the window.
  *
  * The 50-row cap is a real limit and the UI does not hide it: when the page is
@@ -277,7 +276,12 @@ export default async function WebhooksPage({
           <>
             Events Rekey sends to your backend when things happen (sign-ups, payments, dunning).
             Each endpoint gets a signing secret, and deliveries carry an HMAC-SHA256 signature in{' '}
-            <code className="font-mono">X-Rekey-Signature</code>.
+            <code className="font-mono">X-Rekey-Signature</code>. What payment providers send to
+            Rekey is under{' '}
+            <Link href={`/applications/${id}/billing/events`} className="underline hover:text-[var(--color-fg)]">
+              Incoming provider events
+            </Link>
+            .
           </>
         }
         action={
@@ -429,20 +433,20 @@ export default async function WebhooksPage({
                   <div className="flex items-center justify-end gap-3">
                     <Link
                       href={`/applications/${id}/webhooks/${e.id}`}
-                      className="text-xs font-medium text-[var(--color-fg)] hover:underline"
+                      className="inline-block py-1.5 text-xs font-medium text-[var(--color-fg)] hover:underline"
                     >
                       Details
                     </Link>
                     <ActionForm action={toggleEndpoint.bind(null, id, e.id, !e.enabled)} className="inline">
                       <SubmitButton
                         pendingLabel={e.enabled ? 'Disabling…' : 'Enabling…'}
-                        className="text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline disabled:opacity-60"
+                        className="inline-block py-1.5 text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline disabled:opacity-60"
                       >
                         {e.enabled ? 'Disable' : 'Enable'}
                       </SubmitButton>
                     </ActionForm>
                     <ActionForm action={deleteEndpoint.bind(null, id, e.id)} className="inline">
-                      <ConfirmButton confirm="Delete this webhook endpoint? Pending deliveries are cancelled and history is removed.">
+                      <ConfirmButton title="Delete webhook endpoint?" confirm="Delete this webhook endpoint? Pending deliveries are cancelled and history is removed.">
                         Delete
                       </ConfirmButton>
                     </ActionForm>

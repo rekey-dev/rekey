@@ -30,7 +30,7 @@ const READ_TOOLS = [
   'get_reporting_currency',
   'get_billing_stats',
 ];
-const WRITE_TOOLS = ['set_plan_price', 'archive_plan_price', 'create_coupon', 'update_coupon', 'set_reporting_currency', 'create_refund'];
+const WRITE_TOOLS = ['set_plan_price', 'archive_plan_price', 'create_coupon', 'update_coupon', 'set_reporting_currency'];
 
 /** Arguments that pass each tool's schema, for the tests that only need the call to be made. */
 const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
@@ -47,7 +47,6 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   create_coupon: { applicationId: 'app_1', code: 'LAUNCH', discountType: 'PERCENT', basisPoints: 1500 },
   update_coupon: { applicationId: 'app_1', code: 'launch', active: false },
   set_reporting_currency: { applicationId: 'app_1', reportingCurrency: 'EUR' },
-  create_refund: { applicationId: 'app_1', paymentId: 'pay_1' },
 };
 
 function tool(name: string) {
@@ -114,15 +113,15 @@ describe('@rekey.dev/mcp billing tools', () => {
       name: 'AdminApiError',
       code: 'OPERATOR_TOKEN_MISSING',
       message: 'This write tool requires an operator personal-access-token.',
-      fix: expect.stringContaining('billing:write'),
+      fix: expect.stringContaining('applications:write'),
     });
     expect(requests).toEqual([]);
   });
 
-  it.each(READ_TOOLS)('%s is refused without an operator token, naming billing:read', async (name) => {
+  it.each(READ_TOOLS)('%s is refused without an operator token, naming the read scope', async (name) => {
     await expect(call(name, MINIMAL_ARGS[name]!, adminOnly)).rejects.toMatchObject({
       code: 'OPERATOR_TOKEN_MISSING',
-      fix: expect.stringContaining('billing:read'),
+      fix: expect.stringContaining('scoped to read)'),
     });
     expect(requests).toEqual([]);
   });
@@ -131,7 +130,7 @@ describe('@rekey.dev/mcp billing tools', () => {
     const { description } = tool(name);
     expect(description.startsWith('WRITE')).toBe(true);
     expect(description).toContain('REKEY_OPERATOR_TOKEN');
-    expect(description).toContain('billing:write');
+    expect(description).toContain('applications:write');
     expect(description).toContain('only when the user explicitly asks');
   });
 
@@ -336,21 +335,6 @@ describe('@rekey.dev/mcp billing tools', () => {
     ]);
   });
 
-  it('create_refund posts the amount, reason and idempotency key, or an empty body for a full refund', async () => {
-    const result = {
-      refund: { id: 'rf_1', paymentId: 'pay_1', amount: 500, currency: 'USD', status: 'succeeded' },
-      payment: { id: 'pay_1', amount: 1900, currency: 'USD', refundedAmount: 500, status: 'PARTIALLY_REFUNDED' },
-    };
-    answers.set(`POST ${APP}/payments/pay_1/refunds`, { status: 200, body: { success: true, data: result } });
-    const out = await call('create_refund', { applicationId: 'app_1', paymentId: 'pay_1', amount: 500, reason: 'Duplicate charge', idempotencyKey: 'k1' });
-    expect(out).toEqual(result);
-    await call('create_refund', { applicationId: 'app_1', paymentId: 'pay_1' });
-    expect(requests).toEqual([
-      { key: `POST ${APP}/payments/pay_1/refunds`, auth: `Bearer ${OPERATOR_TOKEN}`, body: { amount: 500, reason: 'Duplicate charge', idempotencyKey: 'k1' } },
-      { key: `POST ${APP}/payments/pay_1/refunds`, auth: `Bearer ${OPERATOR_TOKEN}`, body: {} },
-    ]);
-  });
-
   // ---------- input schemas ----------
 
   it.each([
@@ -359,7 +343,6 @@ describe('@rekey.dev/mcp billing tools', () => {
     ['set_plan_price', { applicationId: 'app_1', plan: 'pro', currency: 'RUPEE', amount: 100 }],
     ['create_coupon', { applicationId: 'app_1', code: 'X', discountType: 'AMOUNT', amounts: [{ currency: 'USD', amountOff: 5.5 }] }],
     ['create_coupon', { applicationId: 'app_1', code: 'X', discountType: 'PERCENT', basisPoints: 10001 }],
-    ['create_refund', { applicationId: 'app_1', paymentId: 'pay_1', amount: -5 }],
     ['preview_checkout_routing', { applicationId: 'app_1', country: 'IND' }],
     ['recent_billing_events', { applicationId: 'app_1', tier: 'forever' }],
   ])('%s refuses %j', (name, args) => {
@@ -370,9 +353,6 @@ describe('@rekey.dev/mcp billing tools', () => {
     const price = zodToJsonSchema(tool('set_plan_price').inputSchema).properties!.amount!;
     expect(price.type).toBe('integer');
     expect(price.description).toContain(UNITS);
-    const refund = zodToJsonSchema(tool('create_refund').inputSchema).properties!.amount!;
-    expect(refund.type).toBe('integer');
-    expect(refund.description).toContain(UNITS);
     for (const name of ['create_coupon', 'update_coupon']) {
       const amountOff = zodToJsonSchema(tool(name).inputSchema).properties!.amounts!.items!.properties!.amountOff!;
       expect(amountOff.type).toBe('integer');

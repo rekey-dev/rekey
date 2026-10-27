@@ -31,7 +31,7 @@ The server reads three env vars (set them in your MCP client config, not your sh
 | --- | --- | --- | --- |
 | `REKEY_URL` | yes | Base URL of the deployment, e.g. `https://api.rekey.dev`. | Your Rekey deployment |
 | `SUPER_ADMIN_KEY` | for the **deployment-wide read** tools | Authenticates the global read/introspection tools. | Deployment admin |
-| `REKEY_OPERATOR_TOKEN` | for the **billing** tools and every **write** tool | A scoped operator **personal-access-token** (`rp_op_…`). | Panel, operator API tokens (or `POST /api/v1/tenant/auth/api-tokens`), with the scopes the agent should have: `billing:read` for the billing reads, `billing:write` for the billing writes, `keys:mint` for `mint_api_key` |
+| `REKEY_OPERATOR_TOKEN` | for the **billing** tools and every **write** tool | A scoped operator **personal-access-token** (`rp_op_…`). | Panel, operator API tokens (or `POST /api/v1/tenant/auth/api-tokens`), with the scopes the agent should have: `read` for the billing reads, `applications:write` for the billing writes, `keys:mint` for `mint_api_key` |
 
 `REKEY_URL` plus **at least one** credential is required. Set `SUPER_ADMIN_KEY` for the deployment-wide read tools, `REKEY_OPERATOR_TOKEN` for the billing and write tools, or both. With the operator token alone (no master key) the deployment-wide read tools fail closed with `READ_REQUIRES_ADMIN_KEY`; with the admin key alone the operator tools fail closed with `OPERATOR_TOKEN_MISSING`. The server exits with a clear stderr message if `REKEY_URL` or every credential is missing.
 
@@ -40,7 +40,7 @@ The server reads three env vars (set them in your MCP client config, not your sh
 > scope the tool needs and belong to the workspace that owns the target
 > Application: default-deny, so an agent cannot change production unless you
 > explicitly grant it. To give an agent read-only billing access, mint the
-> token with `billing:read` and nothing else.
+> token with `read` and nothing else.
 
 ## Quickstart
 
@@ -98,7 +98,7 @@ or omit `SUPER_ADMIN_KEY` if the agent only needs the billing and write tools.
 | `get_payment_stats_by_app` | Per-application payment health over the last 30 days: succeeded/failed/pending/refunded counts, success rate, and `volumeByCurrency`, one `{currency, volumeCents, payments}` entry per currency. There is no total across currencies. |
 | `get_billing_outbox_status` | Billing events waiting to reach the billing log, across every Application: `pending`, `due`, `failing`, and the `stuck` rows with their last error. |
 
-**Billing read tools of one Application** (authenticated with `REKEY_OPERATOR_TOKEN`, scope `billing:read`):
+**Billing read tools of one Application** (authenticated with `REKEY_OPERATOR_TOKEN`, scope `read`):
 
 | Tool | What it does |
 | --- | --- |
@@ -116,12 +116,11 @@ or omit `SUPER_ADMIN_KEY` if the agent only needs the billing and write tools.
 | Tool | What it does |
 | --- | --- |
 | `mint_api_key` | Mint a new secret key for an Application. Args: `applicationId`, `name`, `scopes?`. Scope `keys:mint`. The prefix follows the Application's environment (`PRODUCTION` gives `rp_live_…`, otherwise `rp_test_…`) and is not selectable. The raw key is returned **exactly once**: surface it immediately and warn it is unrecoverable. |
-| `set_plan_price` | Add a price in another currency to a plan, or change one. Args: `applicationId`, `plan` (id or slug), `currency`, `amount?`, `countries?`. Scope `billing:write`. `amount` is required to add a price and can change only until a provider has registered it. |
-| `archive_plan_price` | Stop selling a plan in one currency. Args: `applicationId`, `plan`, `currency`. Scope `billing:write`. The row is kept, archived, when a subscription, a payment or a credit grant names it, and deleted when nothing does. |
-| `create_coupon` | Create a coupon. Args: `applicationId`, `code`, `discountType` (`PERCENT`/`AMOUNT`), `basisPoints?`, `amounts?` (`[{currency, amountOff}]`), `currencies?`, `planSlugs?`, `startsAt?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `billing:write`. |
-| `update_coupon` | Change a coupon. Args: `applicationId`, `code`, `active?`, `basisPoints?`, `amounts?`, `currencies?`, `planSlugs?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `billing:write`. `amounts` replaces the whole set. `endsAt` and the two caps take a value or `null` to remove it; a cap below what is already redeemed is refused with `COUPON_LIMIT_BELOW_REDEEMED`. |
-| `set_reporting_currency` | Set the currency an Application reports in. Args: `applicationId`, `reportingCurrency`. Scope `billing:write`. Converts nothing. |
-| `create_refund` | Refund a payment at its provider, in full or in part. Args: `applicationId`, `paymentId`, `amount?`, `reason?`, `idempotencyKey?`. Scope `billing:write`. **Moves money**: confirm the payment and the amount with the user first. |
+| `set_plan_price` | Add a price in another currency to a plan, or change one. Args: `applicationId`, `plan` (id or slug), `currency`, `amount?`, `countries?`. Scope `applications:write`. `amount` is required to add a price and can change only until a provider has registered it. |
+| `archive_plan_price` | Stop selling a plan in one currency. Args: `applicationId`, `plan`, `currency`. Scope `applications:write`. The row is kept, archived, when a subscription, a payment or a credit grant names it, and deleted when nothing does. |
+| `create_coupon` | Create a coupon. Args: `applicationId`, `code`, `discountType` (`PERCENT`/`AMOUNT`), `basisPoints?`, `amounts?` (`[{currency, amountOff}]`), `currencies?`, `planSlugs?`, `startsAt?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `applications:write`. |
+| `update_coupon` | Change a coupon. Args: `applicationId`, `code`, `active?`, `basisPoints?`, `amounts?`, `currencies?`, `planSlugs?`, `endsAt?`, `maxRedemptions?`, `maxRedemptionsPerUser?`. Scope `applications:write`. `amounts` replaces the whole set. `endsAt` and the two caps take a value or `null` to remove it; a cap below what is already redeemed is refused with `COUPON_LIMIT_BELOW_REDEEMED`. |
+| `set_reporting_currency` | Set the currency an Application reports in. Args: `applicationId`, `reportingCurrency`. Scope `applications:write`. Converts nothing. |
 
 ### Write-tool failure modes (default-deny)
 
@@ -139,7 +138,7 @@ Every tool error is a JSON object — `error: { code, message, fix?, statusCode?
 ## Gotchas
 
 - **Money is an integer in minor units of its currency** (cents for USD, whole yen for JPY). `1900` with `USD` is $19.00; `5000` with `JPY` is ¥5,000, not ¥50. Always read an amount with its currency, and never add amounts in different currencies: nothing is converted. A field named `…Cents` (`volumeCents`, `mrrCents`) is minor units of its own currency too.
-- **Only call a write tool when the user explicitly asks** for that change. `create_refund` moves money: confirm the payment and the amount first. For a mutation this server has no tool for, use the read tools to work out what to do, then the `rekey` CLI or the Panel. A hosted deployment also runs a separate operator MCP server at `/api/v1/tenant/mcp` with a far larger tool set; this package does not reach it.
+- **Only call a write tool when the user explicitly asks** for that change. Refunds need an operator session: point the user at the Panel. For a mutation this server has no tool for, use the read tools to work out what to do, then the `rekey` CLI or the Panel. A hosted deployment also runs a separate operator MCP server at `/api/v1/tenant/mcp` with a far larger tool set; this package does not reach it.
 - **Coupon discounts**: PERCENT uses basis points (`1500` = 15%). AMOUNT carries one amount per currency, in that currency's minor units, and works only in those currencies. `update_coupon` with `amounts` replaces the whole set.
 - **Stats are per currency.** `get_payment_stats_by_app` and `get_billing_stats` return one entry per currency and no scalar total.
 

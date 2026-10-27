@@ -26,6 +26,7 @@ import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookie
 import { cookieSecure } from '@/lib/cookie-secure';
 import { clearMfaChallenge, mfaVerifyPath, writeMfaChallenge } from '@/lib/mfa-challenge';
 import { loginErrorCode } from '../error-messages';
+import { CLOUD_HANDOFF_CONFIRM_PATH, writeCloudHandoff } from './handoff-cookie';
 
 type AssertResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -36,6 +37,8 @@ type AssertResult =
 // (panel.rekey.dev), NOT `req.url`, which behind a proxy is the internal bind
 // address. NextResponse.redirect requires an absolute URL, so emit the header
 // directly. Same reasoning as the OAuth callback next door.
+const SAME_SITE = new Set(['same-origin', 'same-site']);
+
 function seeOther(path: string): NextResponse {
   return new NextResponse(null, { status: 303, headers: { Location: path } });
 }
@@ -50,6 +53,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return seeOther('/login?error=cloud_handoff');
   }
   if (!idToken) return seeOther('/login?error=cloud_handoff');
+
+  // rekey.dev is same-site with the panel. Any other post could be a site
+  // signing the browser in to its own account, so it waits for the operator
+  // to confirm. The session cookies are SameSite=Lax and never arrive on a
+  // cross-site POST, so whether someone is signed in cannot be the test here.
+  if (!SAME_SITE.has(req.headers.get('sec-fetch-site') ?? '')) {
+    const confirm = seeOther(CLOUD_HANDOFF_CONFIRM_PATH);
+    await writeCloudHandoff(confirm.cookies, idToken);
+    return confirm;
+  }
 
   let result: AssertResult;
   try {

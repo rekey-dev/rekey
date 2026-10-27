@@ -235,7 +235,7 @@ export default async function EndUsersPage({
       : '';
   const onboarding =
     typeof sp.onboarding === 'string' && ['pending', 'completed', 'skipped'].includes(sp.onboarding) ? sp.onboarding : '';
-  // Filters other pages link here with (Users > Overview's "At risk"), passed
+  // Filters other pages link here with (Users > Insights's "At risk"), passed
   // straight to the API, which validates them.
   const app = await getApplication(id);
   const scopes = app.access.scopes;

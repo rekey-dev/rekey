@@ -410,17 +410,16 @@ they have a live subscription in another, is also refused with
 
 **The Application default.** `billingConfig.onUnavailableCurrency` is
 `fallback` or `refuse`, and `fallback` until you change it. Set it in the
-panel under Billing, Settings, "When a currency cannot be charged", or with:
+panel under Billing, Setup, Defaults, "When a currency cannot be charged", or with:
 
 ```http
 PATCH /api/v1/tenant/applications/:id/billing-config
 { "onUnavailableCurrency": "refuse" }
 ```
 
-From a terminal: `rekey billing unavailable-currency get --app <id>` and
-`rekey billing unavailable-currency set refuse --app <id>`. From the SDK:
-`operator.billing.getConfig()` and
-`operator.billing.updateConfig({ onUnavailableCurrency: 'refuse' })`.
+Changing it needs an operator session, so an operator token cannot. Read it
+from a terminal with `rekey billing unavailable-currency get --app <id>`, or
+from the SDK with `operator.billing.getConfig()`.
 
 It is used by every request that names a `currency` and sends no
 `onUnavailableCurrency` of its own: checkout, the coupon quote and the routing
@@ -529,7 +528,7 @@ in another currency keeps it. A change is written to the
 [billing log](billing-log.md) as `plan.local_prices_changed`, with the value
 before and after; sending the value the plan already has writes nothing.
 
-The Application's setting is Panel → Application → Billing → Setup → Settings → **Local
+The Application's setting is Panel → Application → Billing → Setup → Defaults → **Local
 prices** (`billingConfig.localPrices`). **Verified country only** (`trusted`)
 is the default and behaves as above. **Any country** (`any`) lets a hint select
 a local price too, which means a buyer can choose their price by changing their
@@ -728,7 +727,7 @@ any FAIL; switching back is never refused. The same settings are on the API:
 | Plans ready in this mode | a live paid plan cannot be bought through the provider, or was registered in the other mode | there are no active paid plans to sell; or a registration predates mode recording |
 | Return URL origin registered | the Application has no Application URL and no redirect URLs | |
 | Browser credential | PayPal has no Client ID; Razorpay has no Key ID; Stripe has no publishable key, or its mode differs from the secret key's | |
-| Branding | | no display name or no logo (Panel → Application → Portal → Branding) |
+| Branding | | no display name or no logo (Panel → Application → Billing → Portal → Branding) |
 | CSP reports | | the portal does not receive the page's CSP reports |
 
 A PayPal account that has never sent a verified live webhook fails the live
@@ -835,7 +834,7 @@ form keeps working. A Checkout custom domain works: each click asks Stripe for
 the page's address.
 
 **Links on the page.** Set Terms, Privacy and Refund policy URLs in Panel →
-Application → Portal → Branding to show them in the page's footer. The hosted
+Application → Billing → Portal → Branding to show them in the page's footer. The hosted
 customer portal itself does not need to be switched on for the checkout page
 to work.
 
@@ -1012,6 +1011,11 @@ GET   /api/v1/tenant/applications/:id/payments/:paymentId/refunds    billing:rea
 POST  /api/v1/tenant/applications/:id/payments/:paymentId/refunds    billing:write   { amount?, reason?, idempotencyKey? }
 ```
 
+The reads take an operator session or an operator token with the `read`
+scope. Issuing a refund takes an operator session only: a token is refused
+with `OPERATOR_TOKEN_NOT_ACCEPTED`, so a refund is issued from the panel or
+by a caller signed in as an operator.
+
 ```ts
 import { formatMoney } from '@rekey.dev/node';
 
@@ -1019,16 +1023,7 @@ import { formatMoney } from '@rekey.dev/node';
 const before = await operator.payments.get('pay_123');
 if (!before.refundable) throw new Error(`Not refundable: ${before.refundBlockedReason}`);
 
-// A partial refund: 500 minor units of the payment's own currency.
-const { refund, payment } = await operator.payments.refunds.create('pay_123', {
-  amount: 500,
-  reason: 'Duplicate charge',
-});
-console.log(refund.status); // 'pending' | 'succeeded' | 'failed'
-console.log(formatMoney(payment.refundedAmount, payment.currency), payment.status); // '$5.00' 'PARTIALLY_REFUNDED'
-
-// Leave `amount` out to refund everything that has not been refunded.
-await operator.payments.refunds.create('pay_123');
+console.log(formatMoney(before.refundedAmount, before.currency), before.status); // '$5.00' 'PARTIALLY_REFUNDED'
 
 // Every refund of a payment, oldest first.
 const { items } = await operator.payments.refunds.list('pay_123');
@@ -1078,9 +1073,8 @@ for (const each of items) console.log(each.id, each.initiatedBy, formatMoney(eac
 The refund codes (`BILLING_PAYMENT_NOT_REFUNDABLE`, `BILLING_REFUND_UNSUPPORTED`,
 `BILLING_REFUND_REJECTED`, `BILLING_REFUND_EXCEEDS_PAYMENT`, `PAYMENT_NOT_FOUND`)
 are in [errors.md](errors.md#billing-money-model). From a terminal:
-`rekey payments show <paymentId> --app <id>`, `rekey refunds list <paymentId>
---app <id>` and `rekey refunds create <paymentId> --app <id> [--amount n]
-[--reason "..."]`. On the operator MCP server: `get_payment`,
+`rekey payments show <paymentId> --app <id>` and `rekey refunds list
+<paymentId> --app <id>`. On the operator MCP server: `get_payment`,
 `list_payment_refunds` and `create_refund`. The provider facts under
 [Things that will surprise you](#things-that-will-surprise-you) apply to every
 refund: fees are not returned, the first answer is not the outcome, and refund

@@ -119,7 +119,7 @@ export const operatorCouponTools: OperatorTool[] = [
       .strict(),
     annotations: { readOnlyHint: true, openWorldHint: false },
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'read');
       const [items, total] = await Promise.all([
         couponsService.listWithStats(app.id, true, { take: input.limit, skip: input.offset }),
         couponsService.count(app.id, true),
@@ -139,7 +139,7 @@ export const operatorCouponTools: OperatorTool[] = [
     args: CreateCouponArgs,
     refuse: assertNoRemovedCouponFields,
     run: async (ctx, { applicationId, ...body }) => {
-      const app = await loadAppInTenant(ctx, applicationId);
+      const app = await loadAppInTenant(ctx, applicationId, 'billing-write');
       const coupon = serializeCoupon(
         await couponsService.create(createCouponInput(app.id, body, { operatorId: ctx.tenantUserId })),
       );
@@ -166,7 +166,7 @@ export const operatorCouponTools: OperatorTool[] = [
     args: UpdateCouponArgs,
     refuse: assertNoRemovedCouponFields,
     run: async (ctx, { applicationId, code, ...body }) => {
-      const app = await loadAppInTenant(ctx, applicationId);
+      const app = await loadAppInTenant(ctx, applicationId, 'billing-write');
       const coupon = serializeCoupon(
         await couponsService.update(updateCouponInput(app.id, code, body, { operatorId: ctx.tenantUserId })),
       );

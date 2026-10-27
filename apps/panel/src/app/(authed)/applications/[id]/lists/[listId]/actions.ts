@@ -2,6 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { api, errorQuery, PanelApiError } from '@/lib/api';
+import { membersHref } from './shared';
 
 /**
  * Archive or restore a list. Used by the button in the list header and by the
@@ -20,4 +21,23 @@ export async function setListArchived(applicationId: string, listId: string, arc
     throw err;
   }
   redirect(`${base}?done=${archived ? 'archived' : 'restored'}`);
+}
+
+/** Erase a contact from the whole Application. The API allows only the workspace OWNER. */
+export async function eraseContact(
+  applicationId: string,
+  listId: string,
+  contactId: string,
+  view: string,
+): Promise<void> {
+  try {
+    await api({
+      method: 'DELETE',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/contacts/${encodeURIComponent(contactId)}`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) redirect(membersHref(applicationId, listId, view, await errorQuery(err)));
+    throw err;
+  }
+  redirect(membersHref(applicationId, listId, view, 'contactErased=1'));
 }

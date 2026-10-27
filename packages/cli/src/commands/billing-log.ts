@@ -168,7 +168,7 @@ export function registerBillingLogCommand(billing: Command): void {
           ctx,
           method: 'GET',
           path: appPath(opts.app, `/billing/events${queryString({ ...filters, limit: size, cursor })}`),
-          scope: 'billing:read',
+          scope: 'read',
         });
 
       const readToEnd = async (): Promise<BillingLogPage> => {

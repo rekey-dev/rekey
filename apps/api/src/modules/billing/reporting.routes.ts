@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { RoutingPreviewRequestSchema, SetReportingCurrencyRequestSchema } from '@rekey.dev/shared-types';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, ref } from '../../lib/openapi.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { reportingCurrency, reportingCurrencyDto, setReportingCurrency } from './reporting-currency.js';
 import { previewRouting } from './routing-preview.js';
@@ -28,7 +28,7 @@ const APP_404 =
   'MEMBER who holds no grant on it, so its existence is not disclosed).';
 
 export async function tenantBillingReportingRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/billing/reporting-currency',
@@ -36,7 +36,7 @@ export async function tenantBillingReportingRoutes(app: FastifyInstance): Promis
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Read the currency an Application reports in',
         description:
           'Requires **read** access to this Application and the `billing:read` scope.\n\n' +
@@ -64,7 +64,7 @@ export async function tenantBillingReportingRoutes(app: FastifyInstance): Promis
       config: { access: { scope: 'billing:write' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Set the currency an Application reports in',
         description:
           'Requires **write** access to this Application (OWNER/ADMIN, or a MEMBER with an `APP_ADMIN` ' +
@@ -119,7 +119,7 @@ export async function tenantBillingReportingRoutes(app: FastifyInstance): Promis
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Preview which price and provider a buyer in a country would get',
         description:
           'Requires **read** access to this Application and the `billing:read` scope.\n\n' +

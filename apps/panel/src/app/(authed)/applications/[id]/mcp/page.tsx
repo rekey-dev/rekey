@@ -129,7 +129,7 @@ export default async function McpPage({
         </div>
         <ActionForm action={setMcpEnabled.bind(null, id, !enabled)} className="shrink-0">
           {enabled ? (
-            <ConfirmButton
+            <ConfirmButton title="Disable MCP server?"
               confirm="Disable the MCP server? The MCP and OAuth endpoints immediately return 404 and any connected clients lose access on their next call. Already-issued tokens stop working. You can re-enable any time."
               variant="danger"
             >

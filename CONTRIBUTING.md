@@ -23,10 +23,10 @@ pnpm install
 # Configure — the API refuses to boot without the required secrets.
 cp .env.example .env
 #   Generate each with: openssl rand -hex 32 (24 for the datastore passwords)
-#   Required by the API:     DATABASE_URL, JWT_SECRET (≥32), SUPER_ADMIN_KEY (≥32)
+#   Required by the API:     DATABASE_URL, JWT_SECRET (≥32), SUPER_ADMIN_KEY (≥32),
+#                            ENCRYPTION_KEY (64 hex chars)
 #   Required by compose:     POSTGRES_PASSWORD, REDIS_PASSWORD — then paste both
 #                            into DATABASE_URL / REDIS_URL by hand
-#   Required in production:  ENCRYPTION_KEY (64 hex chars)
 
 # Start the datastores (Postgres + Redis) and apply migrations.
 docker compose up -d postgres redis

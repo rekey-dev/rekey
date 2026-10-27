@@ -213,10 +213,11 @@ export default async function SecurityPage({
   const setupInProgress = !status.enabled && Boolean(otpauth);
 
   return (
-    <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
+    <section className="space-y-6">
       <PageHeader
         title="Account security"
         description="How you sign in to the panel, and where you are signed in right now."
+        level={2}
       />
 
       {/* Outcome banners sit at the top because the card that triggered them
@@ -434,7 +435,7 @@ export default async function SecurityPage({
           action={
             sessions.length > 0 ? (
               <ActionForm action={signOutEverywhere} className="shrink-0">
-                <ConfirmButton confirm="Sign out of every device, including this one?">
+                <ConfirmButton title="Sign out of every device?" confirm="Sign out of every device, including this one?">
                   Sign out everywhere
                 </ConfirmButton>
               </ActionForm>
@@ -465,7 +466,7 @@ export default async function SecurityPage({
                   </div>
                   <ActionForm action={revokeSession} className="shrink-0">
                     <input type="hidden" name="sessionId" value={s.id} />
-                    <ConfirmButton confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
+                    <ConfirmButton title="Revoke session?" confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
                   </ActionForm>
                 </div>
               );

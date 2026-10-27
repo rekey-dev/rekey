@@ -44,7 +44,7 @@ const ALLOWED: Record<string, string> = {
   // FieldRow renders inside the page's one ActionForm, keyed on the saved fields.
   "app/(authed)/applications/[id]/onboarding/questions-form.tsx: field?.type ?? 'text'": 'keyed by caller',
   "app/(authed)/applications/[id]/onboarding/questions-form.tsx: field?.writableBy ?? 'user'": 'keyed by caller',
-  // SelectField renders inside the Users overview's filter form, a GET form: submitting it loads a fresh page.
+  // SelectField renders inside the Insights page's filter form, a GET form: submitting it loads a fresh page.
   "app/(authed)/applications/[id]/users/filter-bar.tsx: value ?? ''": 'GET form',
 };
 

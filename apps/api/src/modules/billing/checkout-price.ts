@@ -203,7 +203,7 @@ export function selectCheckoutPrice(input: SelectCheckoutPriceInput): CheckoutPr
         statusCode: 400,
         code: 'BILLING_NO_PROVIDER_FOR_CURRENCY',
         message: `No provider this checkout can use is set up to charge ${requestedPrice.currency}, the currency requested.`,
-        fix: `${providersPath(input.onlyProvider, requestedPrice.currency)}${input.onlyProvider === undefined ? '' : ', or drop `provider` from the request'}. To charge the plan's default price instead, send \`onUnavailableCurrency: "fallback"\` with this request, or make that the Application's default: PATCH /api/v1/tenant/applications/:id/billing-config with {"onUnavailableCurrency": "fallback"} (Panel → Application → Billing → Settings → When a currency cannot be charged).`,
+        fix: `${providersPath(input.onlyProvider, requestedPrice.currency)}${input.onlyProvider === undefined ? '' : ', or drop `provider` from the request'}. To charge the plan's default price instead, send \`onUnavailableCurrency: "fallback"\` with this request, or make that the Application's default: PATCH /api/v1/tenant/applications/:id/billing-config with {"onUnavailableCurrency": "fallback"} (Panel → Application → Billing → Setup → Defaults → When a currency cannot be charged).`,
       });
     }
     return fallBack(standard, requestedPrice, 'requested');

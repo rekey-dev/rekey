@@ -1,5 +1,5 @@
 /**
- * Users > Overview: URL filter parsing, the request budget, and every state a
+ * Users > Insights: URL filter parsing, the request budget, and every state a
  * section can arrive in. Rendered against a mocked API, because the bugs this
  * guards against are in what the page sends and what it prints.
  */
@@ -329,7 +329,7 @@ beforeEach(() => {
   reply = (p) => (p.includes('/analytics/users') ? both(p) : {});
 });
 
-describe('Users overview page', () => {
+describe('User insights page', () => {
   it('costs at most three API calls: the application and one analytics call per half', async () => {
     await renderPage({ platform: 'ios' });
     expect(calls.length).toBeLessThanOrEqual(3);
@@ -429,7 +429,7 @@ describe('Users overview page', () => {
     scopes = ['end-users:read'];
     const t = text(await renderPage());
     expect(calls.filter((c) => c.includes('/analytics/'))).toEqual([]);
-    expect(t).toContain('Users overview is not visible to your role');
+    expect(t).toContain('User insights are not visible to your role');
   });
 
   it.each([
@@ -568,7 +568,7 @@ describe('AppNav', () => {
     return renderToStaticMarkup(createElement(AppNav, { id: 'app_1', billingEnabled: true, ...props }));
   }
 
-  it('puts Overview first under Users', async () => {
+  it('puts Insights first under Users', async () => {
     const html = await nav({});
     expect(html.indexOf('href="/applications/app_1/users"')).toBeGreaterThan(-1);
     // The sub-tab row, after the group pills.

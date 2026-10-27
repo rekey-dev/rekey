@@ -396,6 +396,15 @@ describe('end-user organizations', () => {
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
 
+    // Removing yourself is leaving, so the same rule holds on the members route.
+    const selfRemove = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
+    });
+    expect(selfRemove.statusCode).toBe(409);
+    expect(selfRemove.json().error.code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
+
     // Self-demote to ADMIN (allowed, a co-owner remains), then leaving works.
     await app.inject({
       method: 'PATCH',
@@ -456,6 +465,40 @@ describe('end-user organizations', () => {
     });
     expect(leave.statusCode).toBe(200);
     expect(leave.json().data.removed).toBe(true);
+  });
+
+  it('a MEMBER can remove themselves through the members route', async () => {
+    const b = await bootstrap('member-self-remove');
+    const org = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/users/me/organizations/',
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
+        payload: { name: 'Acme', slug: 'acme' },
+      })
+      .then((r) => r.json().data as { organization: { id: string } });
+    const member = await createMember(b, 'member-self-remove@example.com');
+    const inv = await app
+      .inject({
+        method: 'POST',
+        url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
+        payload: { email: 'member-self-remove@example.com', role: 'MEMBER' },
+      })
+      .then((r) => r.json().data as { token: string });
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/organizations/accept-invitation',
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': member.access },
+      payload: { token: inv.token },
+    });
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/users/me/organizations/${org.organization.id}/members/${member.id}`,
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': member.access },
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json().data.removed).toBe(true);
   });
 
   // ---------- Revoke ----------

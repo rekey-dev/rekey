@@ -233,9 +233,10 @@ await operator.billing.setReportingCurrency('EUR');
 The HTTP routes are `GET` and `PUT
 /api/v1/tenant/applications/:id/billing/reporting-currency`, with the body
 `{ "reportingCurrency": "EUR" }`. Reading needs the `billing:read` scope and
-writing `billing:write`. The currency must be in the sellable set, or the call
-is refused with `BILLING_REPORTING_CURRENCY_INVALID`. In the panel it is under
-Billing, Setup, Settings. From a terminal: `rekey billing reporting-currency
+writing `billing:write`; a personal access token needs `read` to read it and
+`applications:write` to change it. The currency must be in the sellable set, or
+the call is refused with `BILLING_REPORTING_CURRENCY_INVALID`. In the panel it
+is under Billing, Setup, Defaults. From a terminal: `rekey billing reporting-currency
 get --app <id>` and `rekey billing reporting-currency set EUR --app <id>`. On
 the operator MCP server: `get_reporting_currency` and `set_reporting_currency`.
 

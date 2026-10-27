@@ -131,7 +131,7 @@ Erasure clears all three fields and deletes the sessions.
 ## Filtering the end-user list
 
 `GET /api/v1/tenant/applications/:id/end-users` takes the same audience the
-Users overview counts, so every table there has a "View all" that opens the
+Insights page counts, so every table there has a "View all" that opens the
 same people:
 
 | Parameter | Meaning |
@@ -163,12 +163,12 @@ It needs write access to the Application and the `overview:write` scope, and
 the change is recorded as `app.settings_updated`.
 
 What it changes: the days of the daily analytics rollup and the "today" the
-Users overview resolves its date range against. What it does not change: the
+Insights page resolves its date range against. What it does not change: the
 activity bits above, which are UTC days, and so every number the live path
-computes from them. Every series in the Users overview names its timezone.
+computes from them. Every series in the Insights page names its timezone.
 
 A change applies to days computed after it. Days already rolled up keep the
-zone they were computed in, and the Users overview never joins days from two
+zone they were computed in, and the Insights page never joins days from two
 zones into one series: it returns them as separate segments and says where
 the zone changed.
 
@@ -177,9 +177,9 @@ a value before the next hourly run. Rapid changes coalesce: per Application
 at most one such run is in progress and one more waits, and the waiting one
 reads whatever zone is current when it starts.
 
-## Users overview (`GET /api/v1/tenant/applications/:id/analytics/users`)
+## User insights (`GET /api/v1/tenant/applications/:id/analytics/users`)
 
-Aggregates for the panel's Users → Overview tab, also usable from a PAT. It
+Aggregates for the panel's Users → Insights tab, also usable from a PAT. It
 returns counts, rates and dates only, never a person. It needs `overview:read`;
 the plan and paying filters also need `billing:read`, the organization filter
 `organizations:read`, and `profileField` `end-users:read`.
@@ -366,7 +366,7 @@ which returns the same numbers for your own tooling. The end-user list shows
 **Last sign-in** and **Platform** columns, plus any profile field marked
 `showInList`.
 
-**Users > Overview** (`/applications/:id/users`, needs `overview:read`) is the
+**Users > Insights** (`/applications/:id/users`, needs `overview:read`) is the
 aggregate view: total, new, daily, weekly and monthly active and paying users
 with a change against the previous period, active users over time, sign-ins by
 method and accounts created. Its filters live in the URL (`range`, `compare`,

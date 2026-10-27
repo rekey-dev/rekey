@@ -77,15 +77,15 @@ export function paypalFetch(
  * is the part that decides what the buyer should do. The `message` and
  * `details` are not forwarded: they can name the account, and this reaches a
  * browser.
+ *
+ * The refusal is logged here as status, PayPal's `debug_id`, `name` and
+ * `message` only. The raw body can carry the payer's name, email and address,
+ * and console output skips the logger's redaction.
  */
 export function paypalError(operation: string, status: number, body: string): RekeyError {
-  let name: string | null = null;
-  try {
-    const parsed = JSON.parse(body) as { name?: unknown };
-    if (typeof parsed.name === 'string') name = parsed.name;
-  } catch {
-    // Not JSON. Nothing to forward, so the status carries the meaning.
-  }
+  const refusal = paypalRefusal(body);
+  console.error(`paypal ${operation} failed`, { status, ...refusal });
+  const { name } = refusal;
   return new RekeyError({
     statusCode: 502,
     code: 'BILLING_PROVIDER_REFUSED',
@@ -95,6 +95,29 @@ export function paypalError(operation: string, status: number, body: string): Re
     fix:
       name === 'INSTRUMENT_DECLINED'
         ? 'The payment method was declined. Ask the customer to use another one.'
-        : 'Check the billing credentials configured for this Application, then retry. The full provider response is in the server log.',
+        : "Check the billing credentials configured for this Application, then retry. PayPal's debug_id for the refusal is in the server log.",
   });
+}
+
+interface PaypalRefusal {
+  name: string | null;
+  message: string | null;
+  debugId: string | null;
+}
+
+/** The identifying fields of a PayPal error body, including the OAuth `error` shape. */
+function paypalRefusal(body: string): PaypalRefusal {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value: unknown = JSON.parse(body);
+    if (value && typeof value === 'object') parsed = value as Record<string, unknown>;
+  } catch {
+    // Not JSON. Nothing to forward, so the status carries the meaning.
+  }
+  const text = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  return {
+    name: text(parsed.name) ?? text(parsed.error),
+    message: text(parsed.message) ?? text(parsed.error_description),
+    debugId: text(parsed.debug_id),
+  };
 }

@@ -71,10 +71,10 @@ export async function couponsTenantRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/:id/coupons',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'List Coupons (with redemption stats)',
         description:
           `${READ_ACCESS}\n\n` +
@@ -112,10 +112,10 @@ export async function couponsTenantRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/:id/coupons/:code',
     {
-      config: { access: { scope: 'billing:read' } },
+      config: { access: { scope: 'billing:read' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Get a Coupon',
         description: READ_ACCESS,
         params: CODE_PARAMS,
@@ -139,10 +139,10 @@ export async function couponsTenantRoutes(app: FastifyInstance): Promise<void> {
     '/:id/coupons',
     {
       // Generic Idempotency-Key header support (scoped to the workspace).
-      config: { access: { scope: 'billing:write' }, idempotency: true },
+      config: { access: { scope: 'billing:write' }, operatorToken: true, idempotency: true },
       schema: {
         tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Create a Coupon',
         description: `${BILLING_WRITE_ACCESS}\n\n${CREATE_COUPON_DESCRIPTION}`,
         params: APP_PARAMS,
@@ -186,10 +186,10 @@ export async function couponsTenantRoutes(app: FastifyInstance): Promise<void> {
   app.patch(
     '/:id/coupons/:code',
     {
-      config: { access: { scope: 'billing:write' } },
+      config: { access: { scope: 'billing:write' }, operatorToken: true },
       schema: {
         tags: ['Tenant · Coupons'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Change a Coupon',
         description: `${BILLING_WRITE_ACCESS}\n\n${UPDATE_COUPON_DESCRIPTION}`,
         params: CODE_PARAMS,

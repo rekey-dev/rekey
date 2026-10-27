@@ -20,12 +20,14 @@
 import * as React from 'react';
 import { useActionPending } from './ActionForm';
 import { dangerButtonClass } from './Button';
+import { ModalHeader, dialogChromeCls } from './Modal';
 
 export function ConfirmButton({
   confirm,
   children,
-  title = 'Are you sure?',
+  title,
   confirmLabel,
+  pendingLabel,
   variant = 'danger',
   triggerClassName,
   triggerPressed,
@@ -34,10 +36,12 @@ export function ConfirmButton({
   confirm: string;
   /** Trigger label (and the default confirm-button label). */
   children: React.ReactNode;
-  /** Dialog heading. Defaults to "Are you sure?". */
-  title?: string;
+  /** Dialog heading naming the action and its object, e.g. "Delete webhook endpoint?". */
+  title: string;
   /** Confirm-button label. Defaults to `children`. */
   confirmLabel?: React.ReactNode;
+  /** Trigger label while the action runs. Defaults to `children`. */
+  pendingLabel?: React.ReactNode;
   variant?: 'danger' | 'subtle';
   /** Replaces the trigger's text-link style, for a trigger that should read as a button. */
   triggerClassName?: string;
@@ -52,11 +56,12 @@ export function ConfirmButton({
   const titleId = `${baseId}-title`;
   const descId = `${baseId}-desc`;
 
-  const triggerCls =
+  const triggerCls = `${
     triggerClassName ??
     (variant === 'danger'
       ? dangerButtonClass('xs')
-      : 'text-xs text-[var(--color-muted-fg)] hover:underline');
+      : 'inline-block py-1.5 text-xs text-[var(--color-muted-fg)] hover:underline')
+  } aria-busy:opacity-60 aria-busy:cursor-wait`;
 
   const confirmCls =
     variant === 'danger'
@@ -83,27 +88,23 @@ export function ConfirmButton({
         type="button"
         className={triggerCls}
         onClick={open}
+        disabled={pending}
         aria-busy={pending || undefined}
         aria-pressed={triggerPressed}
       >
-        {children}
+        {pending ? (pendingLabel ?? children) : children}
       </button>
       <dialog
         ref={dialogRef}
         aria-labelledby={titleId}
         aria-describedby={descId}
-        className="m-auto h-fit w-[calc(100vw-2rem)] max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-fg)] backdrop:bg-black/50"
+        className={dialogChromeCls('sm')}
         onClick={(e) => {
           if (e.target === dialogRef.current) close();
         }}
       >
-        <h2 id={titleId} className="text-base font-semibold">
-          {title}
-        </h2>
-        <p id={descId} className="mt-1 text-sm text-[var(--color-muted-fg)]">
-          {confirm}
-        </p>
-        <div className="mt-4 flex items-center justify-end gap-2">
+        <ModalHeader titleId={titleId} descId={descId} title={title} description={confirm} onClose={close} />
+        <div className="flex items-center justify-end gap-2 p-6">
           <button
             type="button"
             onClick={close}

@@ -1,5 +1,5 @@
 /**
- * `GET /api/v1/tenant/applications/:id/analytics/users`: the Users overview.
+ * `GET /api/v1/tenant/applications/:id/analytics/users`: the Insights page.
  * Counts, rates and dates only, never a person. See docs/analytics.md.
  */
 
@@ -9,7 +9,7 @@ import { ANALYTICS_SECTIONS, AnalyticsUsersQuerySchema } from '@rekey.dev/shared
 import { ok, errs } from '../../lib/openapi.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { globalRateLimitKey, globalRateLimitMax } from '../../lib/rate-limit.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { usersAnalytics } from './users-analytics.service.js';
 import { ANALYTICS_REQUESTS_PER_MINUTE } from './compute-limit.js';
 
@@ -75,7 +75,7 @@ const RESPONSE_SCHEMA = {
 } as const;
 
 export async function analyticsTenantRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/analytics/users',
@@ -90,8 +90,8 @@ export async function analyticsTenantRoutes(app: FastifyInstance): Promise<void>
       },
       schema: {
         tags: ['Tenant · Analytics'],
-        security: [{ tenantSession: [] }],
-        summary: 'Users overview: KPIs, activity, mix, onboarding, retention, security, billing counts, usage',
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
+        summary: 'User insights: KPIs, activity, mix, onboarding, retention, security, billing counts, usage',
         description:
           'Requires **read** access to this Application and `overview:read`. Plan and paying filters need ' +
           '`billing:read`, the organization filter `organizations:read`, `profileField` `end-users:read`. A ' +

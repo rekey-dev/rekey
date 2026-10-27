@@ -181,7 +181,7 @@ export default async function TemplateEditorPage({
         </div>
         {template.customised && (
           <ActionForm action={revertBound}>
-            <ConfirmButton confirm="Revert this template to the Rekey default? Your custom subject + body will be lost.">
+            <ConfirmButton title="Revert email template?" confirm="Revert this template to the Rekey default? Your custom subject + body will be lost.">
               Revert to default
             </ConfirmButton>
           </ActionForm>

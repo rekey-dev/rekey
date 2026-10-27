@@ -17,7 +17,7 @@ const EndUserIdArg = z.string().min(1).max(200).describe('The end user id, from 
 const UserArgs = z.object({ applicationId: ApplicationIdArg, endUserId: EndUserIdArg }).strict();
 
 async function appFor(ctx: OperatorToolContext, applicationId: string, need: 'read' | 'write') {
-  const app = await loadAppInTenant(ctx, applicationId);
+  const app = await loadAppInTenant(ctx, applicationId, need);
   await applicationAccess(accessContextFromTool(ctx), app.id, need, {
     scope: need === 'read' ? 'end-users:read' : 'end-users:write',
   });

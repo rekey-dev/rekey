@@ -61,7 +61,7 @@ export const operatorBillingLogTools: OperatorTool[] = [
     },
     handler: async (ctx, raw) => {
       const args = parseArgs(Args, 'recent_billing_events', raw);
-      const app = await loadAppInTenant(ctx, args.applicationId);
+      const app = await loadAppInTenant(ctx, args.applicationId, 'read');
       const page = await readBillingLog({
         applicationId: app.id,
         limit: args.limit,

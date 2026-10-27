@@ -1,5 +1,5 @@
 /**
- * The Users overview through the real cache (REDIS_URL, provided in CI):
+ * The Insights page through the real cache (REDIS_URL, provided in CI):
  * concurrent cold requests compute each section once, hits say so, and a
  * reporting-timezone change drops the Application's cached sections.
  */

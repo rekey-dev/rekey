@@ -16,7 +16,7 @@ You are an AI agent reading the Rekey CLI. This file tells you how to use it cor
 | `REKEY_URL` | `--api-url <url>` | Where the API is. e.g. `http://localhost:3030` or `https://rekey.example.com`. |
 | `SUPER_ADMIN_KEY` | `--admin-key <hex>` | Bootstrap admin credential, for `init`, `apps`, `plans list`, `plans create`, `plans set-active`, and the `billing-outbox` check of `doctor`. |
 | `REKEY_SECRET` | `--secret-key <key>` | An Application secret key, for `lists`. |
-| `REKEY_OPERATOR_TOKEN` | `--operator-token <token>` | An operator personal access token, for `plans prices`, `coupons`, `billing`, `payments`, `refunds`, `analytics` and the money checks of `doctor`. Reads need the `billing:read` scope; `plans prices add|update|archive`, `coupons create|update`, `billing reporting-currency set`, `billing unavailable-currency set` and `refunds create` need `billing:write`. |
+| `REKEY_OPERATOR_TOKEN` | `--operator-token <token>` | An operator personal access token, for `plans prices`, `coupons`, `billing`, `payments`, `refunds`, `analytics` and the money checks of `doctor`. Reads need the `read` scope; `plans local-prices`, `plans prices add|update|archive`, `coupons create|update` and `billing reporting-currency set` need `applications:write`. Issuing a refund and changing the unavailable-currency default need an operator session: do them in the panel. |
 
 `rekey doctor` checks these and returns a structured report. Read its output before invoking other commands when you're not sure of the env state.
 
@@ -63,17 +63,15 @@ rekey billing preview --app <id> --country IN [--plan <slug|id>] [--coupon CODE]
 rekey billing reporting-currency get --app <id>
 rekey billing reporting-currency set <CODE> --app <id>
 rekey billing unavailable-currency get --app <id>
-rekey billing unavailable-currency set fallback|refuse --app <id>
 rekey billing reconciliation --app <id> [--from ISO] [--to ISO]
 rekey billing price-fallbacks --app <id> [--from ISO] [--to ISO]
 rekey payments show <paymentId> --app <id>
 rekey refunds list <paymentId> --app <id>
-rekey refunds create <paymentId> --app <id> [--amount n] [--reason "..."] [--idempotency-key k]
 ```
 
 `lists` acts as one Application, so it takes that Application's secret key (`REKEY_SECRET` or `--secret-key`) and works on Rekey Cloud too. `lists export` writes the members to stdout, or to `--out`; with `--out` and `--json`, stdout is a summary `{ key, format, status, count, file }`. CSV cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet never runs them.
 
-`analytics users` returns the Users overview of one Application (`GET /api/v1/tenant/applications/:id/analytics/users`) as the API sends it: per-section envelopes, each naming its timezone. Every filter flag is passed through unchanged (`--created-via` becomes `createdVia`), and the API's `code` and `fix` come back on failure.
+`analytics users` returns the Insights page of one Application (`GET /api/v1/tenant/applications/:id/analytics/users`) as the API sends it: per-section envelopes, each naming its timezone. Every filter flag is passed through unchanged (`--created-via` becomes `createdVia`), and the API's `code` and `fix` come back on failure.
 
 Add `--json` to any of them. Every error envelope (text or JSON) carries `code`, `message`, and `fix`. Read `fix` first.
 
@@ -86,14 +84,13 @@ Every amount is a whole number of **minor units of its currency**: `1900` is $19
 - **`billing log`** prints `{ items, nextCursor, actors }` with `--json`, newest first. `--include actors` fills `actors` with who the end users and operators named are; without it `actors` is null. `--all` follows `nextCursor` until the end or until `--max` entries (default 1000); when it stops at `--max`, `nextCursor` is the cursor to continue from. `--tier` is sent upper-case (`PERMANENT`, `DIAGNOSTIC`).
 - **`billing preview`** opens no checkout and writes nothing. With `--currency` and no `--on-unavailable-currency`, the Application's default (`billingConfig.onUnavailableCurrency`) applies, as at checkout; `onUnavailableCurrency` in the result is the rule applied, and the text output says it on its first line. Each item carries `summary`, a `priceFallback` when the buyer's currency cannot be charged and the default price is charged instead, and, with `--coupon`, the coupon's `discount` or the `refusal` a checkout carrying it would get.
 - **`billing reconciliation`** and **`billing price-fallbacks`** cover the last 7 days unless `--from` and `--to` say otherwise, at most 31. Dates are ISO 8601: a bare date is midnight UTC, and a time needs its zone.
-- **`payments show`** prints one payment. With `--json`, `refundable` says whether `refunds create` would reach the provider, and `refundBlockedReason` why not (`payment_not_succeeded`, `no_provider_charge_id`, `already_refunded`, `provider_unknown`, `provider_cannot_refund`, `provider_not_configured`). Read it before `refunds create`.
-- **`refunds create`** asks the provider to pay money back. Left without `--amount` it refunds everything not yet refunded. It does not cancel a subscription or take back credits. Repeating the same request is one refund.
+- **`payments show`** prints one payment. With `--json`, `refundable` says whether a refund from the panel would reach the provider, and `refundBlockedReason` why not (`payment_not_succeeded`, `no_provider_charge_id`, `already_refunded`, `provider_unknown`, `provider_cannot_refund`, `provider_not_configured`).
 
 ## `rekey doctor`
 
 `--json` prints `{ checks: [...] }`. Each check has `name`, `status`, `message`, a `fix` when it is not `ok`, and `applicationId` when it is about one Application. `status` is `ok`, `warn`, `fail` or `skipped`. The exit code is non-zero when any check is `fail`. **`skipped` is a check that did not run**, usually for want of a credential: do not read it as a pass.
 
-With `REKEY_OPERATOR_TOKEN` (scope `billing:read`) it checks every Application the token can see, or only `--app <id>`. It sends read-only requests.
+With `REKEY_OPERATOR_TOKEN` (scope `read`) it checks every Application the token can see, or only `--app <id>`. It sends read-only requests.
 
 | Check | Trips when | Status |
 |---|---|---|

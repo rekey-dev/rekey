@@ -280,7 +280,7 @@ Mounted at `/api/v1/tenant/mcp`. JSON-RPC over HTTP POST. Bearer-authed by
 | Operator tool definitions (organization membership) | `apps/api/src/modules/tenant-mcp/operator-organization-tools.ts` |
 | Hybrid bearer guard (PAT **or** OAuth JWT) | `apps/api/src/modules/tenant-mcp/bearer-auth.ts` |
 | PAT resolution (shared with `/api/v1/tenant/operator/*`) | `apps/api/src/middleware/operator-token-auth.ts` |
-| Panel UI — connection guide | `apps/panel/src/app/(authed)/account/mcp/page.tsx` |
+| Panel UI — connection guide | `apps/panel/src/app/(authed)/account/(home)/mcp/page.tsx` |
 
 ### Auth model
 
@@ -316,6 +316,7 @@ being handed a long-lived secret to paste.
 | `list_applications` | per-app endUserCount, activeSubs, apiRequestsLast24h |
 | `list_members` | operators in workspace + role |
 | `list_invitations` | pending workspace invitations — **`minRole: ADMIN`** |
+| `list_member_grants` | a member's per-application grants (application and `APP_ADMIN`, `APP_BILLING` or `APP_VIEWER`), by `tenantUserId` from `list_members`. **`minRole: ADMIN`** |
 | `recent_payments` | filter by `status`, `limit` |
 | `recent_subscriptions` | filter by `status`, `limit` |
 | `recent_billing_events` | one Application's billing log, newest first; filter by `type`, `endUserId`, `subscriptionId`, `paymentId`, `currency`, `from`, `to`; page with `cursor`. See [billing-log.md](billing-log.md) |
@@ -326,17 +327,25 @@ being handed a long-lived secret to paste.
 | `get_billing_reconciliation` | where the billing log and the payments, refunds and subscriptions disagree, for a period of at most 31 days. Needs `billing:read` |
 | `get_payment` | one payment by id, with the `provider` that took it, whether it is `refundable` through Rekey and the `refundBlockedReason` when it is not: the judgement `create_refund` makes before it asks a provider. Needs `billing:read` |
 | `list_payment_refunds` | every refund recorded against one payment, oldest first. Needs `billing:read` |
+| `list_licenses` | an Application's licenses, newest first, paged with `limit` and `offset`. `keyPrefix` only, never the key. Needs `billing:read` |
+| `list_subscription_imports` | an Application's subscription import runs, newest first, with `counts` per outcome and `stale`. Needs `billing:read` |
+| `list_unapplied_payments` | money a provider took that Rekey never applied, oldest first, filter by `status`. Needs `billing:read` |
+| `get_dunning_status` | an Application's failed-payment recovery cases, newest first, filter by `status` or `subscriptionId`. Needs `billing:read` |
 | `list_coupons` | an Application's coupons with what each has taken off per currency. Needs `billing:read` |
 | `recent_security_events` | filter by `actorType`, `limit` — **`minRole: ADMIN`** |
 | `recent_webhook_events` | filter by `provider`, `onlyFailed`, `limit` |
 | `recent_failed_webhook_deliveries` | last-N FAILED outbound deliveries |
+| `list_webhook_deliveries` | one endpoint's delivery attempts, newest first, with the `payload` sent and the `responseBody` (4 KiB at most); filter by `status` or `eventType`. Needs `developer:read` |
 | `application_health` | per-app payment success rate (30d) + outbound webhook success rate (24h), sorted by failure count |
-| `get_user_analytics` | one app's Users overview (`overview:read`): the `GET .../analytics/users` sections and filters, counts only |
+| `get_user_analytics` | one app's user insights (`overview:read`): the `GET .../analytics/users` sections and filters, counts only |
 | `get_end_user` | one end-user: verification state, app environment, current subscription |
+| `list_end_users` | an Application's end-users, newest first, the rows the REST list returns; `search` matches the email, `limit` (max 100) and `offset` page. Needs `end-users:read` |
+| `get_end_user_credits` | an end-user's credit balance and 50 most recent ledger entries. Needs `billing:read` |
 | `list_devices` | an end-user's devices, newest activity first, optionally filtered by `status` |
 | `list_support_cases` | an application's support cases: open ones oldest first, or closed ones most recently opened first, optionally for one end-user. Each case has its `noteCount`; note bodies are not returned. See [support-mode.md](support-mode.md) |
 | `list_organization_roles` | an application's organization-role catalog + each role's `baseRole` tier. Also reports `organizationsEnabled`, and when it is false returns a note naming `update_auth_config`, so an agent asking about roles on an app without organizations gets the next step rather than an empty list |
 | `list_organizations` | an application's organizations, newest first, with member and pending-invitation counts. `query` matches name or slug; `limit` (max 100) and `offset` page, with `total` and `hasMore`. Lives in `operator-organization-tools.ts` and needs `organizations:read` |
+| `get_organization` | one organization with every member (email, catalog role, base tier) and its pending invitations. Needs `organizations:read` |
 | `list_contact_lists` | an application's lists (waitlists, newsletters, contact forms) with member and submission counts, Public capture and archived state. Needs `audience:read`, and a viewer or billing grant is refused as over REST |
 | `get_contact_list_stats` | one list by `key`: members by status, joined and left in the last 7 and 30 days, how people joined, and submissions. Needs `audience:read` |
 
@@ -372,7 +381,7 @@ reason. Each still does MEMBER-level work with write access, and answers
 
 | Tool | With write access | Needs admin access |
 |---|---|---|
-| `invite_member` | invite a MEMBER | invite an OWNER or ADMIN |
+| `invite_member` | invite a MEMBER with no apps | invite an OWNER or ADMIN, or a MEMBER with `appGrants` |
 | `remove_member` | remove a MEMBER | remove an OWNER or ADMIN |
 | `create_organization_role` | a role with `baseRole: MEMBER` | a role with `baseRole` OWNER or ADMIN |
 | `update_organization_role` | edit a MEMBER-tier role | edit an OWNER- or ADMIN-tier role, or raise a role to those tiers |

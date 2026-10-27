@@ -26,7 +26,6 @@ import type {
   PriceFallbackDto,
   ProvidersListDto,
   PublicPlanDto,
-  RefundResultDto,
   Rekey,
   RekeyOperator,
   ResolvedPriceDto,
@@ -105,7 +104,6 @@ export async function operatorSurface(): Promise<void> {
   await operator.coupons.update('A', { endsAt: null, maxRedemptions: 10, maxRedemptionsPerUser: null });
   // @ts-expect-error a coupon's start cannot be changed
   await operator.coupons.update('A', { startsAt: '2026-11-01T00:00:00.000Z' });
-  expectTypeOf(await operator.payments.refunds.create('pay_1', { amount: 500 })).toEqualTypeOf<RefundResultDto>();
   expectTypeOf<TenantPaymentDto['refundedAmount']>().toEqualTypeOf<number>();
   expectTypeOf(await operator.payments.get('pay_1')).toEqualTypeOf<TenantPaymentDto>();
   expectTypeOf<TenantPaymentDto['refundBlockedReason']>().toEqualTypeOf<RefundBlockedReason | null>();

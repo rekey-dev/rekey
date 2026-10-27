@@ -195,11 +195,14 @@ const operator = new RekeyOperator({
 const stats = await operator.billing.stats();
 for (const row of stats.mrr) console.log(row.currency, formatMoney(row.mrrCents, row.currency));
 
-const { refund, payment } = await operator.payments.refunds.create('pay_123', { amount: 500, reason: 'Duplicate charge' });
-console.log(refund.status, formatMoney(payment.refundedAmount, payment.currency));
+const payment = await operator.payments.get('pay_123');
+console.log(payment.status, formatMoney(payment.refundedAmount, payment.currency));
 ```
 
-Reads need the `billing:read` scope on the token and writes `billing:write`.
+Reads need the `read` scope on the token. Changing a plan, a price, a coupon
+or the reporting currency needs `applications:write`. Issuing a refund,
+changing provider credentials and changing the billing settings need an
+operator session, so they are in the panel and not on this client.
 
 | Method | Description |
 | --- | --- |
@@ -208,13 +211,13 @@ Reads need the `billing:read` scope on the token and writes `billing:write`.
 | `plans.prices.list(plan)` / `set(plan, currency, { amount?, countries? })` / `archive(plan, currency)` | A plan's prices, one per currency. `amount` is required to add a price and can change only until a provider has registered it. |
 | `coupons.list(page?)` / `get(code)` / `create(input, { idempotencyKey? }?)` / `update(code, input)` | Coupons: a percentage in `basisPoints`, or `amounts` with one amount per currency. `coveredCurrencies` is where a coupon works, `null` for any. `update` also changes `endsAt`, `maxRedemptions` and `maxRedemptionsPerUser`, each a value or `null` to remove it; a cap below what is already redeemed is refused with `COUPON_LIMIT_BELOW_REDEEMED`. |
 | `payments.list({ status?, from?, to?, sort?, order?, limit?, offset? })` / `payments.get(paymentId)` | Payments, each with `refundedAmount`, the `provider` that took it, and whether it is `refundable` through Rekey with the `refundBlockedReason` when it is not. `refundBlockedMessage(reason)` is the sentence for a person. |
-| `payments.refunds.list(paymentId, page?)` / `create(paymentId, { amount?, reason?, idempotencyKey? }?)` | Refunds of one payment. Leave `amount` out to refund everything that remains. The same call made twice is one refund. |
+| `payments.refunds.list(paymentId, page?)` | The refunds recorded against one payment, oldest first. |
 | `billingLog.events.list(options?)` / `pages(options?)` / `iterate(options?)` | The billing log: one page, every page, or every entry, newest first, paged on a cursor. |
 | `billingLog.forSubscription(id)` / `forPayment(id)` / `forEndUser(id)` | The trail of one record. |
 | `billingLog.priceFallbacks(period?)` | How often a buyer was charged the default price because their currency could not be charged. |
 | `billingLog.reconciliation(period?)` | Where the log and the payments, refunds and subscriptions disagree. |
 | `billing.getReportingCurrency()` / `setReportingCurrency(code)` | The currency the stats lead with. Nothing is converted into it. |
-| `billing.getConfig()` / `updateConfig({ onUnavailableCurrency })` | The Application's billing settings, and the default for a checkout that names a currency no provider can charge: `'fallback'` charges the default price, `'refuse'` answers `BILLING_NO_PROVIDER_FOR_CURRENCY`. A request's own `onUnavailableCurrency` wins. |
+| `billing.getConfig()` | The Application's billing settings: `onUnavailableCurrency` is the default for a checkout that names a currency no provider can charge, `'fallback'` charges the default price and `'refuse'` answers `BILLING_NO_PROVIDER_FOR_CURRENCY`. A request's own `onUnavailableCurrency` wins. |
 | `billing.stats()` | Subscription counts, and MRR and revenue per currency. No total across currencies. `unverified` is money recorded and not applied. |
 | `billing.previewRouting({ country, plan?, couponCode?, ... })` | Which price and provider a buyer in a country would get, and why, without opening a checkout. |
 | `billing.providers()` / `providerCurrencies()` | What each provider can charge, and what each configured account charges. |
@@ -444,7 +447,7 @@ Prefer a namespace method wherever one exists — those carry the endpoint's rea
 ## Gotchas
 
 - **Entitlements are resolved server-side.** Never gate features from client state — always read `rekey.billing.getEntitlements(...)` on the server.
-- **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Setup → Settings), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
+- **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Setup → Defaults), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
 - **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to Rekey** lands (Stripe/PayPal → Rekey — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks Rekey sends to your app (user-lifecycle events); see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md).
 - **A checkout can charge the default price.** When no provider can charge the price selected for the buyer, `createCheckout` charges the plan's default price and sets `priceFallback`. Tell the buyer before you redirect them. Read `price` for what is charged.
 - **Switching active org returns new tokens.** `organizations.switch` / `clearActive` return a fresh `{ accessToken, refreshToken }` pair — persist both, or later reads use the stale org view.

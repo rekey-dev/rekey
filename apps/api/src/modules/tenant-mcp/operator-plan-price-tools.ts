@@ -64,7 +64,7 @@ export const operatorPlanPriceTools: OperatorTool[] = [
     write: true,
     args: SetPlanPriceArgs,
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const plan = await plansService.getBySlug(app.id, input.planSlug);
       const price = await planPricesService.put({
         applicationId: app.id,
@@ -94,7 +94,7 @@ export const operatorPlanPriceTools: OperatorTool[] = [
     annotations: { destructiveHint: true },
     args: z.object(PlanPriceRef).strict(),
     run: async (ctx, input) => {
-      const app = await loadAppInTenant(ctx, input.applicationId);
+      const app = await loadAppInTenant(ctx, input.applicationId, 'billing-write');
       const plan = await plansService.getBySlug(app.id, input.planSlug);
       const currency = input.currency.toUpperCase();
       await planPricesService.remove({

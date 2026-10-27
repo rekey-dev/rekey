@@ -167,7 +167,7 @@ export function registerCouponsCommand(program: Command): void {
       ctx,
       method: 'GET',
       path: appPath(opts.app, `/coupons${listQuery(readListOpts(ctx, opts))}`),
-      scope: 'billing:read',
+      scope: 'read',
     });
     ok(ctx, { coupons: data.items, page: data.page }, (d) => {
       if (d.coupons.length === 0) {
@@ -196,7 +196,7 @@ export function registerCouponsCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, `/coupons/${encodeURIComponent(code)}`),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, (coupon) => {
         process.stdout.write(`${couponLine(coupon)}\n`);
@@ -282,7 +282,7 @@ export function registerCouponsCommand(program: Command): void {
         method: 'POST',
         path: appPath(opts.app, '/coupons'),
         body,
-        scope: 'billing:write',
+        scope: 'applications:write',
       });
       ok(ctx, data, printCoupon);
     });
@@ -355,7 +355,7 @@ export function registerCouponsCommand(program: Command): void {
         method: 'PATCH',
         path: appPath(opts.app, `/coupons/${encodeURIComponent(code)}`),
         body,
-        scope: 'billing:write',
+        scope: 'applications:write',
       });
       ok(ctx, data, (coupon) => {
         printCoupon(coupon);

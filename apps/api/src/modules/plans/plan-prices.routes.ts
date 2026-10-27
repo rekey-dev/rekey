@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, ref } from '../../lib/openapi.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { planPricesService } from './plan-prices.service.js';
 
 const PriceParam = z.object({
@@ -46,7 +46,7 @@ const BILLING_WRITE_ERRORS = {
 } as const;
 
 export async function planPricesRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.put(
     '/:id/plans/:planId/prices/:currency',
@@ -54,7 +54,7 @@ export async function planPricesRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'billing:write' } },
       schema: {
         tags: ['Tenant · Plans'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Set a Plan price in another currency',
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +
@@ -151,7 +151,7 @@ export async function planPricesRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'billing:write' } },
       schema: {
         tags: ['Tenant · Plans'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Remove a Plan price in another currency',
         description:
           'Requires **billing-write** access to this Application, OWNER/ADMIN, or a MEMBER ' +

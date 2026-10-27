@@ -140,10 +140,11 @@ export default async function ApiTokensPage({
   });
 
   return (
-    <section className="mx-auto max-w-7xl space-y-10 px-6 py-8 lg:px-8">
+    <section className="space-y-10">
       <PageHeader
+        level={2}
         title="API tokens"
-        description="Personal-access-tokens (rp_op_…) let you (or an AI agent acting as you) call the Rekey API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → Operator MCP."
+        description="Personal-access-tokens (rp_op_…) let you (or an AI agent acting as you) call the Rekey API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → AI assistants (MCP)."
       />
 
       {error && (
@@ -243,7 +244,7 @@ export default async function ApiTokensPage({
                   <TD align="right">
                     <ActionForm action={revokeToken} className="inline">
                       <input type="hidden" name="id" value={t.id} />
-                      <ConfirmButton confirm={`Revoke "${t.name}"? Any tool using it stops working immediately.`}>
+                      <ConfirmButton title="Revoke API token?" confirm={`Revoke "${t.name}"? Any tool using it stops working immediately.`}>
                         Revoke
                       </ConfirmButton>
                     </ActionForm>

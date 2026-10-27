@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, okPage } from '../../lib/openapi.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { refundsService } from './refunds.service.js';
 
 const Params = z.object({ id: z.string().min(1), paymentId: z.string().min(1) });
@@ -77,7 +77,7 @@ const SESSION_ERRORS = {
 } as const;
 
 export async function refundsRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/payments/:paymentId/refunds',
@@ -85,7 +85,7 @@ export async function refundsRoutes(app: FastifyInstance): Promise<void> {
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'The refunds of one payment',
         description:
           'Every refund recorded against the payment, oldest first: those a provider reported and those ' +
@@ -112,7 +112,7 @@ export async function refundsRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:id/payments/:paymentId/refunds',
     {
-      config: { access: { scope: 'billing:write' } },
+      config: { access: { scope: 'billing:write' }, operatorToken: false },
       schema: {
         tags: ['Tenant · Billing'],
         security: [{ tenantSession: [] }],

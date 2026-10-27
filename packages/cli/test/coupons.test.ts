@@ -45,7 +45,7 @@ describe('rekey coupons', () => {
     expect(r.code).toBe(1);
     const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
-    expect(error.fix).toContain('billing:read');
+    expect(error.fix).toContain('with the read scope');
     expect(stub.requests).toEqual([]);
   });
 

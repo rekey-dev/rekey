@@ -71,7 +71,7 @@ async function findPlan(ctx: OutputContext, app: string, plan: string): Promise<
       ctx,
       method: 'GET',
       path: appPath(app, `/plans?limit=${MAX_LIST_LIMIT}&offset=${offset}`),
-      scope: 'billing:read',
+      scope: 'read',
     });
     const found = page.items.find((each) => each.id === plan || each.slug === plan);
     if (found !== undefined) return found;
@@ -94,7 +94,7 @@ async function putPrice(
     method: 'PUT',
     path: pricePath(target.app, target.plan, target.currency),
     body,
-    scope: 'billing:write',
+    scope: 'applications:write',
   });
   ok(ctx, data, (price) => {
     process.stdout.write(`✓ ${target.plan}  ${priceLine(price)}\n`);
@@ -205,7 +205,7 @@ export function registerPlanPricesCommand(plans: Command): void {
         ctx,
         method: 'DELETE',
         path: pricePath(opts.app, plan, currency),
-        scope: 'billing:write',
+        scope: 'applications:write',
       });
       ok(ctx, { plan, currency, sold: false }, (d) => {
         process.stdout.write(`✓ ${d.plan}  ${d.currency} price is no longer sold\n`);

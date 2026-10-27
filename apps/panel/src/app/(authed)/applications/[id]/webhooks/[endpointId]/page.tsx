@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { RecordHeader } from '@/components/RecordHeader';
-import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { api } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
@@ -16,6 +15,10 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { FilterChips } from '@/components/FilterChips';
+import { DEFAULT_PAGE_SIZE, Pager, readOffset, readPageSize } from '@/components/Pager';
+import { retryAllFailed, retryDelivery } from './actions';
+import { RETRY_ALL_CAP } from './retry-all-cap';
 
 interface EndpointRow {
   id: string;
@@ -35,20 +38,8 @@ interface DeliveryRow {
   error: string | null;
   createdAt: string;
   nextAttemptAt: string | null;
-  /**
-   * Both are STORED (`WebhookDelivery.payload` / `.responseBody`, the latter
-   * already capped at 4 KB on write) and both are loaded by the service, but
-   * the tenant route's serializer drops them before responding, so today these
-   * arrive `undefined` on every row.
-   *
-   * They are declared optional rather than omitted because the UI below is the
-   * consumer that makes fixing it worthwhile: the moment the serializer
-   * includes them, the expanded row starts rendering real content with no
-   * further panel change. Until then the row explains the gap instead of
-   * showing an empty box.
-   */
-  payload?: unknown;
-  responseBody?: string | null;
+  payload: unknown;
+  responseBody: string | null;
 }
 
 /** Response bodies can be 4 KB of nginx HTML; show the head of it. */
@@ -77,55 +68,11 @@ async function rotateSecret(applicationId: string, endpointId: string): Promise<
   };
 }
 
-async function retryDelivery(
-  applicationId: string,
-  endpointId: string,
-  deliveryId: string,
-): Promise<void> {
-  'use server';
-  await api({
-    method: 'POST',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
-  });
-  redirect(`/applications/${applicationId}/webhooks/${endpointId}?retried=1`);
-}
-
-/**
- * Requeue every non-succeeded delivery on this endpoint.
- *
- * A dead endpoint produces a page of a dozen failures and the only control was
- * a per-row Retry, twelve clicks, each a full page navigation, to recover from
- * one outage. There is no bulk endpoint API-side (`retry-all` does not exist on
- * any surface), so this fans out the per-delivery call. Sequential rather than
- * Promise.all: these all hit the same customer URL that just failed, and a
- * dozen simultaneous POSTs is the wrong way to greet a server coming back up.
- *
- * Failures are counted, not thrown, one delivery that has since been evicted
- * shouldn't abandon the other eleven.
- */
-async function retryAllFailed(applicationId: string, endpointId: string): Promise<void> {
-  'use server';
-  const { items: rows } = await api<Page<DeliveryRow>>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
-  });
-  const failed = rows.filter((r) => r.status === 'FAILED');
-  let queued = 0;
-  for (const d of failed) {
-    try {
-      await api({
-        method: 'POST',
-        path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(d.id)}/retry`,
-      });
-      queued += 1;
-    } catch {
-      /* already retried, evicted, or raced, keep going */
-    }
-  }
-  redirect(
-    `/applications/${applicationId}/webhooks/${endpointId}?retriedAll=${queued}&of=${failed.length}`,
-  );
-}
+const STATUS_FILTERS: Array<{ value: DeliveryRow['status']; label: string }> = [
+  { value: 'FAILED', label: 'Failed' },
+  { value: 'PENDING', label: 'Pending' },
+  { value: 'SUCCEEDED', label: 'Delivered' },
+];
 
 const STATUS_TONE: Record<DeliveryRow['status'], BadgeTone> = {
   SUCCEEDED: 'success',
@@ -135,16 +82,8 @@ const STATUS_TONE: Record<DeliveryRow['status'], BadgeTone> = {
 
 /** What we sent and what came back, for one delivery. */
 function DeliveryDetail({ delivery: d }: { delivery: DeliveryRow }): React.JSX.Element {
-  const payloadText =
-    d.payload === undefined || d.payload === null
-      ? null
-      : typeof d.payload === 'string'
-        ? d.payload
-        : JSON.stringify(d.payload, null, 2);
-  const body =
-    d.responseBody === undefined || d.responseBody === null
-      ? null
-      : truncate(d.responseBody, RESPONSE_BODY_LIMIT);
+  const payloadText = typeof d.payload === 'string' ? d.payload : JSON.stringify(d.payload, null, 2);
+  const body = d.responseBody === null ? null : truncate(d.responseBody, RESPONSE_BODY_LIMIT);
 
   return (
     <>
@@ -174,17 +113,9 @@ function DeliveryDetail({ delivery: d }: { delivery: DeliveryRow }): React.JSX.E
         <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
           Request payload
         </div>
-        {payloadText === null ? (
-          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
-            Stored, but not returned by the API: the tenant delivery endpoint omits{' '}
-            <code className="font-mono">payload</code> from its response. This panel renders it as
-            soon as the field is served.
-          </p>
-        ) : (
-          <pre className="mt-1 max-h-64 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-2 font-mono text-[11px] text-[var(--color-fg)]">
-            {payloadText}
-          </pre>
-        )}
+        <pre className="mt-1 max-h-64 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-2 font-mono text-[11px] text-[var(--color-fg)]">
+          {payloadText}
+        </pre>
       </div>
 
       <div>
@@ -192,10 +123,7 @@ function DeliveryDetail({ delivery: d }: { delivery: DeliveryRow }): React.JSX.E
           Response body
         </div>
         {body === null ? (
-          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
-            Stored (capped at 4 KB), but not returned by the API: the tenant delivery endpoint
-            omits <code className="font-mono">responseBody</code> from its response.
-          </p>
+          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">No response.</p>
         ) : body.text === '' ? (
           <p className="mt-1 text-xs text-[var(--color-muted-fg)]">Empty body.</p>
         ) : (
@@ -248,23 +176,36 @@ export default async function WebhookDetailPage({
   const retried = typeof sp.retried === 'string';
   const retriedAll = typeof sp.retriedAll === 'string' ? sp.retriedAll : null;
   const retriedAllOf = typeof sp.of === 'string' ? sp.of : null;
+  const retriedAllCapped = sp.capped === '1';
+  const retriedAllPaused = sp.paused === '1';
+  const status = STATUS_FILTERS.find((f) => f.value === sp.status)?.value;
+  const pageSize = readPageSize(sp);
+  const offset = readOffset(sp);
+  const deliveriesPath = `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`;
+  const deliveryQuery = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+  if (status) deliveryQuery.set('status', status);
 
-  const [endpointPage, deliveryPage] = await Promise.all([
+  const [endpointPage, deliveryPage, failedPage] = await Promise.all([
     api<Page<EndpointRow> & { httpsRequired: boolean }>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks`,
     }),
-    api<Page<DeliveryRow>>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
-    }),
+    api<Page<DeliveryRow>>({ method: 'GET', path: `${deliveriesPath}?${deliveryQuery.toString()}` }),
+    api<Page<DeliveryRow>>({ method: 'GET', path: `${deliveriesPath}?status=FAILED&limit=1` }),
   ]);
   const endpoints = endpointPage.items;
   const deliveries = deliveryPage.items;
 
   const webhooksCrumb = { label: 'Webhooks', href: `/applications/${id}/webhooks` };
 
-  const failedCount = deliveries.filter((d) => d.status === 'FAILED').length;
+  const failedCount = failedPage.page.total;
+  const basePath = `/applications/${id}/webhooks/${endpointId}`;
+  const sizeParam: Record<string, string> = pageSize === DEFAULT_PAGE_SIZE ? {} : { ps: String(pageSize) };
+  const view = new URLSearchParams({ ...(status ? { status } : {}), ...(offset ? { offset: String(offset) } : {}), ...sizeParam }).toString();
+  const filterHref = (v: string | undefined): string => {
+    const q = new URLSearchParams({ ...(v ? { status: v } : {}), ...sizeParam }).toString();
+    return q ? `${basePath}?${q}` : basePath;
+  };
   const endpoint = endpoints.find((e) => e.id === endpointId);
   if (!endpoint) {
     return (
@@ -311,8 +252,14 @@ export default async function WebhookDetailPage({
       {retried && <SavedBanner params={['retried']} message="Retry queued." />}
       {retriedAll !== null && (
         <SavedBanner
-          params={['retriedAll', 'of']}
-          message={`Requeued ${retriedAll} of ${retriedAllOf ?? retriedAll} failed deliveries.`}
+          params={['retriedAll', 'of', 'capped', 'paused']}
+          message={
+            retriedAllPaused
+              ? `Paused: rate limit reached after requeueing ${retriedAll} of ${retriedAllOf ?? retriedAll} failed deliveries. Try again in a minute.`
+              : retriedAllCapped
+              ? `Requeued ${retriedAll} of the newest ${retriedAllOf ?? retriedAll} failed deliveries. Older failures remain; retry all again to requeue the next batch.`
+              : `Requeued ${retriedAll} of ${retriedAllOf ?? retriedAll} failed deliveries.`
+          }
         />
       )}
 
@@ -324,7 +271,7 @@ export default async function WebhookDetailPage({
           </p>
         </div>
         <RevealActionForm action={rotateSecret.bind(null, id, endpointId)}>
-          <ConfirmButton confirm="Rotate the signing secret? Old signatures stop verifying immediately, so update your consumer with the new value before the next delivery.">
+          <ConfirmButton title="Rotate signing secret?" confirm="Rotate the signing secret? Old signatures stop verifying immediately, so update your consumer with the new value before the next delivery.">
             Rotate secret
           </ConfirmButton>
         </RevealActionForm>
@@ -332,13 +279,13 @@ export default async function WebhookDetailPage({
 
       <section className="space-y-3">
         <SectionHeader
-          title="Recent deliveries"
-          count={`${deliveries.length} of last 50`}
+          title="Deliveries"
+          count={String(deliveryPage.page.total)}
           action={
             failedCount > 0 ? (
-              <ActionForm action={retryAllFailed.bind(null, id, endpointId)}>
+              <ActionForm action={retryAllFailed.bind(null, id, endpointId, view)}>
                 <SubmitButton
-                  pendingLabel={`Queuing ${failedCount}…`}
+                  pendingLabel={`Queuing ${Math.min(failedCount, RETRY_ALL_CAP)}…`}
                   className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
                 >
                   Retry all failed ({failedCount})
@@ -347,11 +294,21 @@ export default async function WebhookDetailPage({
             ) : undefined
           }
         />
+        <FilterChips
+          chips={[{ value: undefined, label: 'All' }, ...STATUS_FILTERS]}
+          active={status}
+          hrefFor={filterHref}
+          label="Filter deliveries by status"
+        />
         {deliveries.length === 0 ? (
-          <EmptyState
-            title="No deliveries yet"
-            description="Trigger an event (sign-up, password change, MFA enroll) to see one here."
-          />
+          status || offset > 0 ? (
+            <EmptyState variant="inline" title="No deliveries match" description="Try another status, or go back a page." />
+          ) : (
+            <EmptyState
+              title="No deliveries yet"
+              description="Trigger an event (sign-up, password change, MFA enroll) to see one here."
+            />
+          )
         ) : (
           <Table minWidth="min-w-[48rem]">
             <THead>
@@ -392,10 +349,10 @@ export default async function WebhookDetailPage({
                     </TD>
                     <TD align="right">
                       {d.status !== 'SUCCEEDED' && (
-                        <ActionForm action={retryDelivery.bind(null, id, endpointId, d.id)} className="inline">
+                        <ActionForm action={retryDelivery.bind(null, id, endpointId, d.id, view)} className="inline">
                           <SubmitButton
                             pendingLabel="Queuing…"
-                            className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60"
+                            className="inline-block py-1.5 text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60"
                           >
                             Retry
                           </SubmitButton>
@@ -403,11 +360,7 @@ export default async function WebhookDetailPage({
                       )}
                     </TD>
                   </TR>
-                  {/* Expandable detail. A native <details> keeps this a server
-                      component, no client JS, keyboard-operable, and each row
-                      opens independently. Debugging a failed delivery meant
-                      leaving the product entirely before this existed: neither
-                      what we sent nor what came back was visible anywhere. */}
+                  {/* A native <details> keeps this a server component with no client JS. */}
                   <TR className="!bg-transparent">
                     <TD colSpan={5} className="!py-0">
                       <details className="group pb-3">
@@ -428,6 +381,14 @@ export default async function WebhookDetailPage({
             </TBody>
           </Table>
         )}
+        <Pager
+          basePath={basePath}
+          offset={offset}
+          pageSize={pageSize}
+          count={deliveries.length}
+          hasMore={deliveryPage.page.hasMore}
+          {...(status ? { extraParams: { status } } : {})}
+        />
       </section>
     </div>
   );

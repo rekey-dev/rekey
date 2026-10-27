@@ -1,5 +1,5 @@
 /**
- * `get_user_analytics`: the Users overview for an agent. The same service,
+ * `get_user_analytics`: the Insights page for an agent. The same service,
  * sections, filters, cache and access as `GET .../analytics/users`: counts,
  * rates and dates only, never a person.
  */
@@ -36,7 +36,7 @@ export const operatorAnalyticsTools: OperatorTool[] = [
   {
     name: 'get_user_analytics',
     description:
-      "An application's Users overview: KPIs (total, new, DAU/WAU/MAU, stickiness, paying), activity over " +
+      "An application's user insights: KPIs (total, new, DAU/WAU/MAU, stickiness, paying), activity over " +
       'time, audience mix, onboarding, retention, account health, and with billing:read subscription and usage ' +
       'counts. Arguments mirror GET /api/v1/tenant/applications/:id/analytics/users: `range` 7d|30d|90d|12m|custom ' +
       '(with `from`/`to` as YYYY-MM-DD), `sections` as a comma list of ' +
@@ -54,7 +54,7 @@ export const operatorAnalyticsTools: OperatorTool[] = [
     },
     handler: async (ctx, args) => {
       const applicationId = typeof args.applicationId === 'string' ? args.applicationId : '';
-      const app = await loadAppInTenant(ctx, applicationId);
+      const app = await loadAppInTenant(ctx, applicationId, 'read');
       const access = await applicationAccess(accessContextFromTool({ ...ctx, scopes: ctx.scopes }), app.id, 'read', {
         scope: 'overview:read',
       });

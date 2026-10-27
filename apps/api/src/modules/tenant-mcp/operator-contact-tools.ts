@@ -44,7 +44,7 @@ export function parseArgs<T extends z.ZodTypeAny>(schema: T, tool: string, args:
 }
 
 async function readableApp(ctx: OperatorToolContext, applicationId: string) {
-  const app = await loadAppInTenant(ctx, applicationId);
+  const app = await loadAppInTenant(ctx, applicationId, 'read');
   await applicationAccess(accessContextFromTool({ ...ctx, scopes: ctx.scopes }), app.id, 'read', {
     scope: 'audience:read',
   });

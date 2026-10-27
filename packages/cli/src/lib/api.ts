@@ -179,14 +179,14 @@ export async function adminRequest<T>(args: RequestArgs): Promise<T> {
 }
 
 /** The operator scope a billing command needs, named in the fix when the token is missing. */
-export type OperatorScope = 'billing:read' | 'billing:write';
+export type OperatorScope = 'read' | 'applications:write';
 
 /**
  * A request to an operator route (`/api/v1/tenant/*`) with an operator
  * personal access token. `scope` is the scope the route asks of the token.
  *
  * @example
- * const data = await operatorRequest<T>({ ctx, method: 'GET', path: '/api/v1/tenant/applications', scope: 'billing:read' });
+ * const data = await operatorRequest<T>({ ctx, method: 'GET', path: '/api/v1/tenant/applications', scope: 'read' });
  */
 export async function operatorRequest<T>(args: RequestArgs & { scope?: OperatorScope }): Promise<T> {
   const apiUrl = requireApiUrl(args.ctx);

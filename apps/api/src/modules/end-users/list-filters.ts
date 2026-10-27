@@ -1,6 +1,6 @@
 /**
  * The operator end-user list's activity, audience and billing filters, the
- * ones the Users overview links into ("View all" on each table).
+ * ones the Insights page links into ("View all" on each table).
  */
 
 import type { Prisma } from '@prisma/client';

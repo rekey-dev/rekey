@@ -205,12 +205,12 @@ export default async function OrganizationsPage({
                     <div className="flex items-center justify-end gap-3">
                       <Link
                         href={`/applications/${id}/organizations/${o.id}`}
-                        className="text-xs font-medium text-[var(--color-fg)] hover:underline"
+                        className="inline-block py-1.5 text-xs font-medium text-[var(--color-fg)] hover:underline"
                       >
                         Manage
                       </Link>
                       <ActionForm action={deleteOrg.bind(null, id, o.id)} className="inline">
-                        <ConfirmButton
+                        <ConfirmButton title="Delete organization?"
                           confirm={`Delete organization "${o.name}"? This removes all ${o.memberCount} membership${o.memberCount === 1 ? '' : 's'} and any pending invitations. End-user accounts themselves are not deleted.`}
                         >
                           Delete

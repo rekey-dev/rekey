@@ -33,9 +33,9 @@ export default async function AccountActivityPage({
   });
 
   return (
-    <section className="px-6 py-6 space-y-6 max-w-7xl mx-auto">
+    <section className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold">My requests</h1>
+        <h2 className="text-lg font-semibold">My requests</h2>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
           Recent requests made to the Rekey API under your operator session, which the panel issues
           these on your behalf as you navigate. Newest first. Captured best-effort and capped to

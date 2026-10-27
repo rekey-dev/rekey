@@ -40,13 +40,13 @@ describe('rekey payments', () => {
     await stub.close();
   });
 
-  it('payments show needs an operator token with billing:read', async () => {
+  it('payments show needs an operator token with the read scope', async () => {
     stub.reset();
     const r = await runCli(['payments', 'show', 'pay_1', '--app', 'app_1', '--json'], { REKEY_URL: stub.url });
     expect(r.code).toBe(1);
     const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
-    expect(error.fix).toContain('billing:read');
+    expect(error.fix).toContain('with the read scope');
     expect(stub.requests).toEqual([]);
   });
 

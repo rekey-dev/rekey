@@ -4,7 +4,7 @@
  *   rekey payments show <paymentId> --app <id>
  *
  * It says whether the payment can be refunded through Rekey, and why not when
- * it cannot, before `rekey refunds create` is tried.
+ * it cannot.
  */
 
 import type { Command } from 'commander';
@@ -55,7 +55,7 @@ export function registerPaymentsCommand(program: Command): void {
         ctx,
         method: 'GET',
         path: appPath(opts.app, `/payments/${encodeURIComponent(paymentId)}`),
-        scope: 'billing:read',
+        scope: 'read',
       });
       ok(ctx, data, (payment) => {
         process.stdout.write(`${paymentLines(payment).join('\n')}\n`);

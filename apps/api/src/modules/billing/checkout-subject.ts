@@ -27,7 +27,7 @@ export function assertCheckoutSubject(billingSubject: string, beneficiaryOrgId: 
       statusCode: 400,
       code: 'BILLING_ORGANIZATION_REQUIRED',
       message: 'This Application bills per organization, but no organization was provided for checkout.',
-      fix: 'Pass `organizationId` of a team the user OWNS or ADMINS (set the session\'s active org via organizations.switch, or pass organizationId to createCheckout). Change the model in Panel → Application → Billing → Setup → Settings.',
+      fix: 'Pass `organizationId` of a team the user OWNS or ADMINS (set the session\'s active org via organizations.switch, or pass organizationId to createCheckout). Change the model in Panel → Application → Billing → Setup → Defaults.',
     });
   }
   if (billingSubject !== 'org' && beneficiaryOrgId !== undefined) {
@@ -35,7 +35,7 @@ export function assertCheckoutSubject(billingSubject: string, beneficiaryOrgId: 
       statusCode: 400,
       code: 'BILLING_ORGANIZATION_NOT_ACCEPTED',
       message: 'This Application bills individual users, so a checkout cannot name an organization.',
-      fix: 'Drop `organizationId` to bill the user, or switch the Application to organization billing in Panel → Application → Billing → Setup → Settings (only possible while nothing is subscribed).',
+      fix: 'Drop `organizationId` to bill the user, or switch the Application to organization billing in Panel → Application → Billing → Setup → Defaults (only possible while nothing is subscribed).',
     });
   }
 }

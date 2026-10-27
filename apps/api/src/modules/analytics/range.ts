@@ -1,5 +1,5 @@
 /**
- * Calendar-day arithmetic and range resolution for the Users overview.
+ * Calendar-day arithmetic and range resolution for the Insights page.
  *
  * Days are `YYYY-MM-DD` strings throughout. A preset resolves against "today"
  * in the Application's reporting timezone, so the cache key for a preset is

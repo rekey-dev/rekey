@@ -207,13 +207,13 @@ export default async function UsagePage({
                     <ActionForm action={setMeterActive.bind(null, id, m.slug, !m.active)} className="inline">
                       <SubmitButton
                         pendingLabel={m.active ? 'Disabling…' : 'Enabling…'}
-                        className="rounded text-xs font-medium text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                        className="inline-block py-1.5 rounded text-xs font-medium text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         {m.active ? 'Disable' : 'Enable'}
                       </SubmitButton>
                     </ActionForm>
                     <ActionForm action={deleteMeter.bind(null, id, m.slug)} className="inline">
-                      <ConfirmButton
+                      <ConfirmButton title="Delete usage meter?"
                         confirm={`Delete meter "${m.slug}"? All recorded usage events for this meter will be deleted too. To preserve history, Disable instead.`}
                       >
                         Delete

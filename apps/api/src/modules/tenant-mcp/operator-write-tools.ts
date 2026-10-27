@@ -57,7 +57,6 @@ import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
 import { assertMayMintScopes } from '../api-keys/elevated-scopes.js';
-import { accessContextFromTool } from '../../lib/access-context.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { applicationsService } from '../applications/applications.service.js';
@@ -82,6 +81,10 @@ import {
   type OperatorToolContext,
 } from './operator-tools.js';
 import { assertAdminTierFor } from './admin-tier.js';
+import { z } from 'zod';
+import { defineTool } from './tool-definition.js';
+import { InvitationAppGrantsSchema } from '../tenant-workspaces/invitation-grants.js';
+import { accessContextFromTool, applicationAccess, type AppAccessNeed } from '../../lib/access-context.js';
 
 /**
  * Resolve a workspace member's membership id from their tenant-user id, scoped
@@ -126,28 +129,16 @@ async function membershipInTenant(tenantId: string, tenantUserId: string): Promi
  * equivalents enforce grants; the read-tool set in `operator-tools.ts`
  * grant-scopes MEMBERs correctly. This file was the seam between the two.
  *
- * ## What this is NOT
- *
- * `accessibleApplicationIds` models `need: 'read'` and only that. It ignores
- * `ApplicationGrant.role` (an `APP_VIEWER` is in the set) and it hands the whole
- * workspace to a `legacyWorkspaceRead` MEMBER, both of which `ensureAppAccess`
- * refuses for a WRITE (see `legacyWriteDenied` / `grantDenied` in
- * `lib/app-access.ts`).
- *
- * So this call is not what authorizes the writes in this file. The dispatcher's
- * `role >= ADMIN` gate is, and this is a redundant read check on top of it,
- * harmless because OWNER/ADMIN receive the whole workspace here anyway. Adding
- * a write tool with `minRole: 'MEMBER'` would NOT be protected by this line: a
- * legacy member would get a workspace-wide write that REST answers 403 for.
- * If that day comes, give this helper a `need` parameter mirroring
- * `ensureAppAccess` rather than assuming it already covers you.
- *
- * The grandfathered `legacyWorkspaceRead` exception survives here deliberately,
- * because it survives over REST too, this is parity, not a gap.
+ * `need` is the same classification `ensureAppAccess` takes over REST.
+ * `accessibleApplicationIds` answers `'read'` only: it admits an `APP_VIEWER`
+ * and a `legacyWorkspaceRead` MEMBER. Any other need is then checked against
+ * the grant role, so a viewer cannot write through a tool whose `minRole` lets
+ * a MEMBER in. The grandfathered legacy read survives, as it does over REST.
  */
 export async function loadAppInTenant(
   ctx: OperatorToolContext,
   applicationId: string,
+  need: AppAccessNeed,
 ): Promise<Application> {
   // Both resolved unconditionally and in parallel, so every rejection path
   // costs the same work. Checking the tenant first and the grants only on a
@@ -166,6 +157,7 @@ export async function loadAppInTenant(
       fix: 'Call list_applications to see the applications you can modify.',
     });
   }
+  if (need !== 'read') await applicationAccess(accessContextFromTool(ctx), app.id, need);
   return app;
 }
 
@@ -250,8 +242,9 @@ export async function loadEndUserInApp(
   ctx: OperatorToolContext,
   applicationId: string,
   endUserId: string,
+  need: AppAccessNeed,
 ): Promise<Application> {
-  const app = await loadAppInTenant(ctx, applicationId);
+  const app = await loadAppInTenant(ctx, applicationId, need);
   await assertEndUserInApplication(app.id, endUserId, 'Use get_end_user to find the id.');
   return app;
 }
@@ -320,7 +313,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId), 'read');
       const status = args.status === undefined ? undefined : (String(args.status) as 'ACTIVE' | 'RELEASED' | 'BLOCKED');
       const { items, total } = await devicesService.listForEndUser(app.id, String(args.endUserId), { status, take: 100 });
       return { total, devices: items.map((d) => deviceView(ctx, d)) };
@@ -339,7 +332,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId), 'write');
       const r = await devicesService.release({
         applicationId: app.id,
         endUserId: String(args.endUserId),
@@ -362,7 +355,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId), 'write');
       const r = await devicesService.block({
         applicationId: app.id,
         endUserId: String(args.endUserId),
@@ -386,7 +379,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId), 'write');
       const device = await devicesService.unblock({
         applicationId: app.id,
         endUserId: String(args.endUserId),
@@ -412,7 +405,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'read');
       const config = AuthConfigSchema.parse(app.authConfig);
       const roles = await organizationRolesService.list(app.id);
       return {
@@ -457,7 +450,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       assertOrganizationsEnabled(app);
       if (args.baseRole !== 'MEMBER') assertAdminTierFor(ctx, `Creating ${PRIVILEGED_ORG_ROLE}`);
       const created = await organizationRolesService.create({
@@ -497,7 +490,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       assertOrganizationsEnabled(app);
       await assertWriteTierMayTouchRole(ctx, app.id, String(args.name), 'Editing');
       if (args.baseRole !== undefined && args.baseRole !== 'MEMBER') {
@@ -542,7 +535,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       assertOrganizationsEnabled(app);
       await assertWriteTierMayTouchRole(ctx, app.id, String(args.name), 'Deleting');
       if (args.reassignTo !== undefined) {
@@ -590,7 +583,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       const meter = await usageService.createMeter({
         applicationId: app.id,
         slug: String(args.slug),
@@ -616,7 +609,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'read');
       return { meters: await usageService.listMeters(app.id) };
     },
   },
@@ -648,7 +641,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'billing-write');
       const plan = await plansService.getBySlug(app.id, String(args.planSlug));
       const ent = await entitlementsService.upsert({
         planId: plan.id,
@@ -685,7 +678,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'read');
       const plan = await plansService.getBySlug(app.id, String(args.planSlug));
       return { planSlug: plan.slug, entitlements: await entitlementsService.listForPlan(plan.id) };
     },
@@ -703,7 +696,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'read');
       return { apiKeys: await apiKeysService.listForApplication(app.id) };
     },
   },
@@ -724,7 +717,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       await apiKeysService.revoke(app.id, String(args.apiKeyId));
       audit(ctx, 'app.api_key.revoked', app.id, { apiKeyId: String(args.apiKeyId) });
       return { revoked: true, apiKeyId: String(args.apiKeyId) };
@@ -763,7 +756,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
 
       // Empty scopes mean full access in the service, which is the same default
       // the panel's mint form applies. Passing a list narrows the key.
@@ -971,7 +964,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       const patch = {
         ...(args.methods !== undefined && { methods: args.methods as string[] }),
         ...(args.passwordMinLength !== undefined && {
@@ -1057,7 +1050,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       const { endpoint, secret } = await webhookService.createEndpoint({
         applicationId: app.id,
         url: String(args.url),
@@ -1099,7 +1092,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       const endpoint = await webhookService.updateEndpoint({
         applicationId: app.id,
         endpointId: String(args.endpointId),
@@ -1120,32 +1113,39 @@ export const operatorWriteTools: OperatorTool[] = [
 
   // ── Member management (write), reuses tenantWorkspacesService, whose
   //    ensureCanManage enforces OWNER-manages-anyone / ADMIN-manages-MEMBER. ──
-  {
+  defineTool({
     name: 'invite_member',
     description:
       'Invite a teammate to the workspace by email with a role (OWNER / ADMIN / MEMBER). ' +
-      'Sends an invitation email with a secure link. Write access invites MEMBERs only: ' +
-      'inviting an OWNER or ADMIN needs the OWNER role and admin access (the ' +
-      'mcp:operator:admin scope).',
+      'Sends an invitation email with a secure link. Write access invites MEMBERs with no apps only: ' +
+      'inviting an OWNER or ADMIN, or a MEMBER with `appGrants`, needs admin access (the ' +
+      'mcp:operator:admin scope), and an OWNER or ADMIN invitation also needs the OWNER role. ' +
+      '`appGrants` are the apps a MEMBER gets on joining, each with APP_ADMIN, APP_BILLING or ' +
+      'APP_VIEWER; an OWNER or ADMIN already reaches every app and is refused them.',
     write: true,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        email: { type: 'string', minLength: 3, maxLength: 254 },
-        role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
-      },
-      required: ['email', 'role'],
-      additionalProperties: false,
-    },
-    handler: async (ctx, args) => {
+    args: z
+      .object({
+        email: z.string().min(3).max(254),
+        role: z.enum(['OWNER', 'ADMIN', 'MEMBER']),
+        appGrants: InvitationAppGrantsSchema.optional().describe(
+          'MEMBER only. Application ids come from list_applications.',
+        ),
+      })
+      .strict(),
+    run: async (ctx, args) => {
       // Security: an OWNER or ADMIN invitation to an address the caller picks is a new admin seat.
       if (args.role !== 'MEMBER') assertAdminTierFor(ctx, 'Inviting an OWNER or ADMIN');
+      // Security: app grants hand an address the caller picks the end-user data, billing or app admin of those apps.
+      if (args.appGrants !== undefined && args.appGrants.length > 0) {
+        assertAdminTierFor(ctx, 'Inviting a member with appGrants');
+      }
       const result = await tenantWorkspacesService.createInvitation({
         tenantId: ctx.tenantId,
         invitedById: ctx.tenantUserId,
         invitedByRole: ctx.role,
-        email: String(args.email),
-        role: String(args.role) as TenantRole,
+        email: args.email,
+        role: args.role,
+        ...(args.appGrants !== undefined && { appGrants: args.appGrants }),
         // PANEL_URL has no default (a Rekey default would email a self-hoster's
         // operators a link to OUR panel). Without it we cannot build a usable
         // invite link, so omit the key entirely rather than send a broken one
@@ -1166,11 +1166,12 @@ export const operatorWriteTools: OperatorTool[] = [
         invitationId: result.invitation.id,
         email: result.invitation.email,
         role: result.invitation.role,
+        appGrants: result.invitation.appGrants,
         status: result.invitation.status,
         emailSent: result.emailSent,
       };
     },
-  },
+  }),
   {
     name: 'revoke_invitation',
     description:
@@ -1306,7 +1307,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId), 'write');
       const provider = String(args.provider) as BillingProviderName;
       const module = getModule(provider);
       if (!module) {
@@ -1387,7 +1388,7 @@ export const operatorWriteTools: OperatorTool[] = [
           fix: 'Use recent_subscriptions to find a subscription id in this workspace.',
         });
       }
-      const app = await loadAppInTenant(ctx, sub.applicationId);
+      const app = await loadAppInTenant(ctx, sub.applicationId, 'write');
       const atPeriodEnd = args.atPeriodEnd !== false;
       const updated = await billingService.cancelSubscriptionById(app, subscriptionId, {
         atPeriodEnd,

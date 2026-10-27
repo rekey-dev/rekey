@@ -117,7 +117,7 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
           statusCode: 404,
           code: 'PORTAL_NOT_FOUND',
           message: 'No hosted portal is available for this address.',
-          fix: 'Check the URL. If you are the operator, enable the portal in Panel → Application → Portal.',
+          fix: 'Check the URL. If you are the operator, enable the portal in Panel → Application → Billing → Portal.',
         });
       }
       const billing = BillingConfigSchema.parse(application.billingConfig);

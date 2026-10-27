@@ -24,7 +24,7 @@ import {
 } from '@rekey.dev/shared-types';
 import { ensureAppAccess, type AppAccess } from '../../lib/app-access.js';
 import { errs, ok, ref } from '../../lib/openapi.js';
-import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { resolveBillingLogActors } from './actors.js';
 import { priceFallbackSummary } from './price-fallbacks.js';
 import { readBillingLog } from './reader.js';
@@ -136,7 +136,7 @@ function trail(key: 'endUserId' | 'subscriptionId' | 'paymentId') {
 function trailSchema(summary: string, what: string, entity: string) {
   return {
     tags: ['Tenant · Billing'],
-    security: [{ tenantSession: [] }],
+    security: [{ tenantSession: [] }, { operatorPat: [] }],
     summary,
     description:
       'Requires **read** access to this Application and the `billing:read` scope.\n\n' +
@@ -155,7 +155,7 @@ function trailSchema(summary: string, what: string, entity: string) {
 }
 
 export async function tenantBillingLogRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireTenantSession);
+  app.addHook('onRequest', requireOperatorAuth);
 
   app.get(
     '/:id/billing/events',
@@ -163,7 +163,7 @@ export async function tenantBillingLogRoutes(app: FastifyInstance): Promise<void
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: "Read an Application's billing log",
         description:
           'Requires **read** access to this Application and the `billing:read` scope.\n\n' +
@@ -228,7 +228,7 @@ export async function tenantBillingLogRoutes(app: FastifyInstance): Promise<void
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Compare the billing log with payments, refunds and subscriptions',
         description:
           'Requires **read** access to this Application and the `billing:read` scope.\n\n' +
@@ -266,7 +266,7 @@ export async function tenantBillingLogRoutes(app: FastifyInstance): Promise<void
       config: { access: { scope: 'billing:read' } },
       schema: {
         tags: ['Tenant · Billing'],
-        security: [{ tenantSession: [] }],
+        security: [{ tenantSession: [] }, { operatorPat: [] }],
         summary: 'Count the checkouts that fell back to the default price',
         description:
           'Requires **read** access to this Application and the `billing:read` scope.\n\n' +

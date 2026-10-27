@@ -1063,7 +1063,7 @@ export interface ApplicationRow {
    * absent is not shown, rather than shown and refused.
    */
   access: { level: string; scopes: string[] };
-  /** IANA zone the Users overview counts days in. */
+  /** IANA zone the Insights page counts days in. */
   reportingTimezone: string;
   /**
    * Only on list rows fetched with `include=summary`. Each field is left out

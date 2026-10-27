@@ -20,7 +20,6 @@ import {
   PublicPlanDtoSchema,
   ReconciliationReportSchema,
   RefundDtoSchema,
-  RefundResultDtoSchema,
   ReportingCurrencyDtoSchema,
   RoutingPreviewDtoSchema,
   TenantPaymentDtoSchema,
@@ -224,11 +223,6 @@ const refund = {
 };
 
 export const REFUNDS = PagedSchema(RefundDtoSchema).parse({ items: [refund], page: PAGE });
-
-export const REFUND_RESULT = RefundResultDtoSchema.parse({
-  refund,
-  payment: { id: 'pay_1', amount: 1900, currency: 'USD', refundedAmount: 500, status: 'PARTIALLY_REFUNDED' },
-});
 
 const entry = {
   id: 'be_1',

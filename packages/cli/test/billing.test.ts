@@ -81,7 +81,7 @@ describe('rekey billing', () => {
     expect(r.code).toBe(1);
     const { error } = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
-    expect(error.fix).toContain('billing:read');
+    expect(error.fix).toContain('with the read scope');
     expect(stub.requests).toEqual([]);
   });
 
@@ -418,28 +418,6 @@ describe('rekey billing', () => {
     const json = await runCli(['billing', 'unavailable-currency', 'get', '--app', 'app_1', '--json'], env);
     expect(JSON.parse(json.stdout)).toEqual({ onUnavailableCurrency: 'fallback' });
     expect(stub.requests[0]).toEqual({ key: `GET ${APP}`, body: undefined, auth: AUTH });
-  });
-
-  it('billing unavailable-currency set patches the billing config with the rule', async () => {
-    stub.reset();
-    const billingConfig = valid('BillingConfigSchema', { enabled: true, provider: 'stripe', onUnavailableCurrency: 'refuse' });
-    stub.ok(`PATCH ${APP}/billing-config`, { billingConfig });
-    const json = await runCli(['billing', 'unavailable-currency', 'set', 'refuse', '--app', 'app_1', '--json'], env);
-    expect(json.code, json.stderr).toBe(0);
-    expect(stub.requests).toEqual([{ key: `PATCH ${APP}/billing-config`, body: { onUnavailableCurrency: 'refuse' }, auth: AUTH }]);
-    expect(JSON.parse(json.stdout)).toEqual({ onUnavailableCurrency: 'refuse' });
-    const text = await runCli(['billing', 'unavailable-currency', 'set', 'refuse', '--app', 'app_1'], env);
-    expect(text.stdout).toBe('✓ a currency nobody can charge: refuse  refuses the checkout with BILLING_NO_PROVIDER_FOR_CURRENCY\n');
-  });
-
-  it('billing unavailable-currency set refuses anything but fallback or refuse, and sends nothing', async () => {
-    stub.reset();
-    const bad = await runCli(['billing', 'unavailable-currency', 'set', 'ignore', '--app', 'app_1', '--json'], env);
-    expect(bad.code).toBe(1);
-    expect((JSON.parse(bad.stderr) as { error: { code: string } }).error.code).toBe('CLI_BILLING_UNAVAILABLE_CURRENCY_INVALID');
-    const missing = await runCli(['billing', 'unavailable-currency', 'set', '--app', 'app_1', '--json'], env);
-    expect((JSON.parse(missing.stderr) as { error: { code: string } }).error.code).toBe('CLI_USAGE_ERROR');
-    expect(stub.requests).toEqual([]);
   });
 
   // ---------- billing reconciliation ----------

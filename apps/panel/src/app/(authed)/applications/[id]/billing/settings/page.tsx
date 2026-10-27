@@ -312,7 +312,7 @@ export default async function BillingSettingsPage({
           </div>
           <ActionForm action={setDunningEnabled.bind(null, id, !dunningEnabled)} className="shrink-0">
             {dunningEnabled ? (
-              <ConfirmButton
+              <ConfirmButton title="Turn off failed-payment recovery?"
                 confirm="Turn off failed-payment recovery? New past-due subscriptions will get no reminder emails and won’t be auto-cancelled. Cases already in progress finish on their existing schedule."
                 variant="danger"
                 triggerClassName={dangerButtonClass('sm')}

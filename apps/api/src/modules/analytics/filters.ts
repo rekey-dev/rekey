@@ -1,5 +1,5 @@
 /**
- * The Users overview filters: canonical form, access checks, and the SQL that
+ * The Insights page filters: canonical form, access checks, and the SQL that
  * applies them to `end_users`.
  *
  * Platform, country and via describe the user's LATEST values

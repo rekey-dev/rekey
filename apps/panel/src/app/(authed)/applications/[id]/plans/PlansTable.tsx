@@ -175,7 +175,7 @@ export function PlansTable({
                     title={`Edit plan: ${p.slug}`}
                     description="Rename the plan, correct its default price while no provider holds it, and manage its prices in other currencies. The slug is permanent because your integration passes it to checkout."
                     trigger="Edit"
-                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+                    triggerClassName="inline-block py-1.5 cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   >
                     <PlanBlockers
                       blockers={blockers}
@@ -229,7 +229,7 @@ export function PlansTable({
                     title={`What's included: ${p.name}`}
                     description="What a buyer gets with this plan: licenses, credits, features and usage allowance. They receive it when their subscription starts."
                     trigger="What's included"
-                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+                    triggerClassName="inline-block py-1.5 cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   >
                     <div className="space-y-4">
                       {ents.length > 0 ? (
@@ -241,7 +241,7 @@ export function PlansTable({
                                 {entitlementLabel(e)}
                               </span>
                               <ActionForm action={removeEntitlement.bind(null, applicationId, p.slug, e.id)}>
-                                <ConfirmButton confirm={`Remove "${entitlementLabel(e)}" from ${p.slug}? Future purchases stop granting it; already-materialized grants on existing buyers are unaffected.`}>
+                                <ConfirmButton title="Remove plan entitlement?" confirm={`Remove "${entitlementLabel(e)}" from ${p.slug}? Future purchases stop granting it; already-materialized grants on existing buyers are unaffected.`}>
                                   Remove
                                 </ConfirmButton>
                               </ActionForm>
@@ -271,7 +271,7 @@ export function PlansTable({
                       <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
                         <SubmitButton
                           pendingLabel="Registering…"
-                          className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                          className="inline-block py-1.5 rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                         >
                           Register
                         </SubmitButton>
@@ -286,7 +286,7 @@ export function PlansTable({
                     <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
                       <SubmitButton
                         pendingLabel="Registering…"
-                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                        className="inline-block py-1.5 rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         Retry registration
                       </SubmitButton>
@@ -294,13 +294,13 @@ export function PlansTable({
                   ) : (
                   <ActionForm action={setPlanActive.bind(null, applicationId, p.slug, !p.active)} className="inline">
                     {p.active ? (
-                      <ConfirmButton confirm={`Archive plan "${p.slug}"? End-users on this plan stay subscribed; new sign-ups are blocked.`}>
+                      <ConfirmButton title="Archive plan?" confirm={`Archive plan "${p.slug}"? End-users on this plan stay subscribed; new sign-ups are blocked.`}>
                         Archive
                       </ConfirmButton>
                     ) : (
                       <SubmitButton
                         pendingLabel="Reactivating…"
-                        className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                        className="inline-block py-1.5 rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         Reactivate
                       </SubmitButton>

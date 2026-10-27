@@ -1,4 +1,5 @@
 import type { ApplicationGrantRole, Prisma, TenantRole } from '@prisma/client';
+import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEventIn } from '../../lib/security-events.js';
@@ -8,6 +9,19 @@ export interface InvitationAppGrant {
   applicationId: string;
   role: ApplicationGrantRole;
 }
+
+/** The `appGrants` an invitation body may carry. */
+export const InvitationAppGrantsSchema = z
+  .array(
+    z.object({
+      applicationId: z.string().min(1),
+      role: z.enum(['APP_ADMIN', 'APP_BILLING', 'APP_VIEWER']),
+    }),
+  )
+  .max(100)
+  .refine((gs) => new Set(gs.map((g) => g.applicationId)).size === gs.length, {
+    message: 'Each application may appear once in appGrants.',
+  });
 
 /**
  * Refuse app grants an invitation cannot carry: grants on an OWNER or ADMIN

@@ -12,7 +12,7 @@ import { ensureAppAccess } from '../../lib/app-access.js';
 import { errs, ok, okPage, raw } from '../../lib/openapi.js';
 import { PaginationQuery, paginationJsonSchema, parsePagination } from '../../lib/pagination.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
-import { refuseOperatorToken, requireOperatorAuth } from '../../middleware/operator-auth.js';
+import { requireOperatorAuth } from '../../middleware/operator-auth.js';
 import { requireTenantRole } from '../../middleware/tenant-session.js';
 import { exportMembersCsv, operatorMembers, operatorSubmissions, operatorUnsubscribe } from './list-reads.service.js';
 
@@ -166,8 +166,8 @@ export async function tenantListMembersRoutes(app: FastifyInstance): Promise<voi
   app.get(
     '/:id/lists/:listId/export.csv',
     {
-      config: { access: { floor: true } },
-      preHandler: [refuseOperatorToken, requireTenantRole(['OWNER', 'ADMIN'])],
+      config: { access: { floor: true }, operatorToken: false },
+      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: TAGS,
         security: [{ tenantSession: [] }],

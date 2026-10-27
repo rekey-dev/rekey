@@ -41,7 +41,7 @@ const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 const rowAction =
-  'text-xs font-medium text-[var(--color-fg)] hover:underline disabled:opacity-60';
+  'inline-block py-1.5 text-xs font-medium text-[var(--color-fg)] hover:underline disabled:opacity-60';
 const rowDanger = dangerButtonClass('xs');
 
 const pageUrl = (id: string): string => `/applications/${id}/roles`;
