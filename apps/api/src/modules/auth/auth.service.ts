@@ -84,12 +84,12 @@ import {
   LOGIN_POLICY,
 } from '../../lib/brute-force.js';
 import type { WebAuthnCredential } from '@prisma/client';
-import { AuthConfigSchema, onboardingStatus, type OnboardingStatus } from '@rekey.dev/shared-types';
+import { AuthConfigSchema, onboardingStatus, type AuthConfig, type OnboardingStatus } from '@rekey.dev/shared-types';
 import { assertNoReservedMetadataKey } from '../../lib/oidc-profile.js';
 import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/signup-policy.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
-import { mfaService } from '../mfa/mfa.service.js';
+import { mfaService, mfaEnrollmentOutstanding } from '../mfa/mfa.service.js';
 import {
   claimMfaChallenge,
   isMfaChallengeSpent,
@@ -98,7 +98,7 @@ import {
   mfaCodeReusedError,
 } from '../../lib/mfa-replay.js';
 import { emailService } from '../email/email.service.js';
-import { resolveAppUrl, buildTokenUrl , assertAllowedTokenUrl } from '../../lib/app-url.js';
+import { resolveAppUrl, buildTokenUrl, assertAllowedTokenUrl, defaultAuthLinkPage } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import {
@@ -133,6 +133,8 @@ export interface SignUpInput {
   metadata?: Record<string, unknown>;
   /** Optional `appUrl` used in the welcome email's CTA button. */
   appUrl?: string;
+  /** Link template for the confirmation email; `{token}` is substituted. */
+  verifyUrl?: string;
   device?: DeviceContext;
   /**
    * How the request authenticated (`secret` | `publishable`). Threaded from
@@ -306,7 +308,7 @@ export function endUserBannedError(): RekeyError {
 }
 
 /** Both terminal refusals, erased first: an erased user's ban no longer matters. */
-function assertEndUserCanAuthenticate(user: Pick<EndUser, 'erasedAt' | 'bannedAt'>): void {
+export function assertEndUserCanAuthenticate(user: Pick<EndUser, 'erasedAt' | 'bannedAt'>): void {
   assertEndUserNotErased(user);
   assertEndUserNotBanned(user);
 }
@@ -376,6 +378,28 @@ export interface DeviceContext {
   primary?: boolean;
   /** The client the session is started from, recorded on its refresh row (lib/client-platform.ts). */
   client?: ClientContext | null;
+  /** `request.internalCaller`: the request proved INTERNAL_CALLER_SECRET (our hosted portal or panel). */
+  internalCaller?: boolean;
+}
+
+/**
+ * A primary sign-in that becomes a portal session: the Application requires a
+ * device binding, the request names no device, and it proved the caller
+ * secret. The portal is a browser on many machines, so it cannot hold a slot.
+ */
+function isPortalSignIn(application: Application, device: DeviceContext | undefined): boolean {
+  if (device?.internalCaller !== true || device.primary === false) return false;
+  if (device.fingerprint || device.deviceId) return false;
+  return AuthConfigSchema.parse(application.authConfig).deviceBinding === 'required';
+}
+
+/**
+ * Whether `/auth/refresh` takes a refresh row of this kind. A portal row only
+ * from a request that proved the caller secret: anywhere else it would be a
+ * session that sidesteps `max_devices`.
+ */
+function refreshableKind(kind: string, device: DeviceContext | undefined): boolean {
+  return kind === 'session' || (kind === 'portal' && device?.internalCaller === true);
 }
 
 /**
@@ -390,14 +414,19 @@ export function assertDeviceBindingSatisfiable(
   application: Application,
   device: DeviceContext | undefined,
 ): void {
-  if (device?.fingerprint || device?.deviceId) return;
+  if (device?.fingerprint || device?.deviceId || isPortalSignIn(application, device)) return;
   const { deviceBinding } = AuthConfigSchema.parse(application.authConfig);
   if (deviceBinding === 'required' && device?.primary !== false) {
     throw new RekeyError({
       statusCode: 400,
       code: 'DEVICE_FINGERPRINT_REQUIRED',
       message: 'This Application requires a device binding on sign-in.',
-      fix: 'Send `device: { fingerprint, label? }` in the request body, see docs/devices.md.',
+      fix:
+        'Send `device: { fingerprint, label? }` in the request body from a client that computes a stable ' +
+        'fingerprint, such as a desktop or mobile app; see docs/devices.md. The hosted portal is the one ' +
+        "exception: it signs users in without a device when the deployment's operator has configured its " +
+        'server credential (INTERNAL_CALLER_SECRET on a self-hosted deployment). That is deployment ' +
+        'configuration, not something an application developer sets or copies into their own server.',
     });
   }
 }
@@ -554,7 +583,8 @@ async function replayContextMismatch(
   successor: RefreshToken,
   device: DeviceContext | undefined,
 ): Promise<ReuseReason | null> {
-  if (presented.applicationId !== application.id || presented.kind !== 'session') {
+  if (presented.kind === 'portal' && device?.internalCaller !== true) return 'portal_without_caller_secret';
+  if (presented.applicationId !== application.id || !refreshableKind(presented.kind, device)) {
     return 'wrong_application';
   }
   const fingerprint = device?.fingerprint;
@@ -783,6 +813,8 @@ type PairOrigin =
         impersonation: ImpersonationContext | undefined;
         /** `sessionsInvalidBefore` as the session middleware read it when it admitted the request. */
         stamp: Date | null;
+        /** `request.portalSession`: the session being re-minted is a portal session, and so is the new one. */
+        portal: boolean;
       };
     };
 
@@ -820,6 +852,7 @@ async function issuePair(
   // picking a different sign-in method. It runs AFTER the verification gate so
   // an unconfirmed address does not register devices it cannot use.
   const deviceId = await bindDevice(application, endUser, device);
+  const portal = 'session' in origin ? origin.session.portal : isPortalSignIn(application, device);
   // The refresh row first: it mints the session id the access token carries
   // as `sid`, which is what lets a single-session revoke end this pair. A
   // sign-in writes it with its `session.created` in one transaction, so the
@@ -830,6 +863,7 @@ async function issuePair(
     activeOrganizationId: activeOrganizationId ?? null,
     deviceId,
     client: device?.client ?? null,
+    kind: portal ? ('portal' as const) : ('session' as const),
   };
   const basis: SessionBasis =
     'credential' in origin
@@ -864,6 +898,7 @@ async function issuePair(
     ...(activeOrganizationId && { activeOrganizationId }),
     ...(deviceId && { deviceId }),
     sessionId: refresh.record.sessionId,
+    portal,
   });
   return {
     endUser: redact(endUser),
@@ -927,13 +962,12 @@ export async function issueSessionOrMfaChallenge(
     };
   }
   const result = await issuePair(application, endUser, { credential }, device);
-  // When the app requires MFA but the user hasn't enrolled, still issue the
-  // session but flag it so the customer app can force enrollment.
-  const policy = AuthConfigSchema.parse(application.authConfig).mfa;
+  // The session is issued so the user can enrol; every other session route
+  // refuses it with MFA_ENROLLMENT_REQUIRED until they do.
   return {
     mfaRequired: false,
     ...result,
-    ...(policy === 'required' && { mfaEnrollmentRequired: true }),
+    ...((await mfaEnrollmentOutstanding(application, endUser.id)) && { mfaEnrollmentRequired: true }),
   };
 }
 
@@ -961,9 +995,17 @@ async function refuseQuietRequestOverCap(reserved: HeldAuthEmail): Promise<void>
   if (!quiet.allowed) throw authEmailCappedError(quiet.retryAfterSeconds);
 }
 
-function ensurePasswordMethodEnabled(application: Application): void {
+/** Whether sign-in with this primary method is on, the predicate the sign-in routes enforce. */
+export function authMethodEnabled(
+  config: Pick<AuthConfig, 'methods'>,
+  method: 'password' | 'magic_link',
+): boolean {
+  return config.methods.includes(method);
+}
+
+export function ensurePasswordMethodEnabled(application: Application): void {
   const config = AuthConfigSchema.parse(application.authConfig);
-  if (!config.methods.includes('password')) {
+  if (!authMethodEnabled(config, 'password')) {
     throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_METHOD_DISABLED',
@@ -981,7 +1023,7 @@ function ensurePasswordMethodEnabled(application: Application): void {
  * timeouts let the password through, see `lib/breached-password.ts` for
  * the rationale.
  */
-async function ensurePasswordNotBreached(
+export async function ensurePasswordNotBreached(
   application: Application,
   password: string,
 ): Promise<void> {
@@ -1002,7 +1044,7 @@ async function ensurePasswordNotBreached(
 
 function ensureMagicLinkMethodEnabled(application: Application): void {
   const config = AuthConfigSchema.parse(application.authConfig);
-  if (!config.methods.includes('magic_link')) {
+  if (!authMethodEnabled(config, 'magic_link')) {
     throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_METHOD_DISABLED',
@@ -1047,7 +1089,7 @@ function emailNotVerifiedError(): RekeyError {
     // sent them there gave no hint why. `deliverVerificationEmail` declines to
     // mint a token when no link would resolve, which is correct, but the
     // caller has to know that to get out of the loop.
-    fix: 'The user has to open the email sent to their address. Signing up with a new address sends a verification link while this setting is on. Signing up with an address that already has an account sends that address what to do instead (sign in, or a link to choose a new password), and answers exactly like this so the response cannot be used to find out which addresses have accounts. Either mail is skipped once the address has reached its hourly email limit. If no verification link arrived, POST /api/v1/auth/resend-verification with the address, it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
+    fix: 'The user has to open the email sent to their address. Signing up with a new address sends a verification link while this setting is on. Signing up with an address that already has an account sends that address what to do instead (sign in, or a link to choose a new password), and answers exactly like this so the response cannot be used to find out which addresses have accounts. Either mail is skipped once the address has reached its hourly email limit. If no verification link arrived, POST /api/v1/auth/resend-verification with the address, it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly, set `authConfig.appUrl` or turn on the hosted portal first; without any of them it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
   });
 }
 
@@ -1127,8 +1169,8 @@ export async function deliverVerificationEmail(args: {
   // Refuse a destination this Application has not declared, see
   // assertAllowedTokenUrl. This link carries a live token in an email we send.
   assertAllowedTokenUrl(args.application, args.verifyUrl, 'verifyUrl');
-  const base = args.verifyUrl === undefined ? resolveAppUrl(args.application, args.appUrl) : null;
-  if (args.requireResolvableUrl === true && args.verifyUrl === undefined && base === null) {
+  const page = args.verifyUrl === undefined ? defaultAuthLinkPage(args.application, 'verify', args.appUrl) : null;
+  if (args.requireResolvableUrl === true && args.verifyUrl === undefined && page === null) {
     // The only trace this leaves, nothing reaches the transport, so there is
     // no `email_logs` row. Without it the fix would be a silent drop, which is
     // the same class of bug as the button-less mail it replaces.
@@ -1138,7 +1180,7 @@ export async function deliverVerificationEmail(args: {
       eventKey: 'email_verification',
       endUserId: args.endUser.id,
       reason:
-        'No verification link could be built: set authConfig.appUrl (Panel → Application → Auth), add a redirect URL, or set DEFAULT_APP_URL.',
+        'No verification link could be built: set authConfig.appUrl (Panel → Application → Auth), add a redirect URL, turn on the hosted portal, or set DEFAULT_APP_URL.',
     });
     return { emailSent: false, verificationToken: null };
   }
@@ -1159,13 +1201,13 @@ export async function deliverVerificationEmail(args: {
     to: args.endUser.email,
     variables: {
       userEmail: args.endUser.email,
-      // `!== undefined`, matching how `base` was decided above, a truthiness
-      // test here would send an empty caller template down the `base` branch,
-      // where `base` is deliberately null.
+      // `!== undefined`, matching how `page` was decided above, a truthiness
+      // test here would send an empty caller template down the `page` branch,
+      // where `page` is deliberately null.
       verifyUrl:
         args.verifyUrl !== undefined
           ? args.verifyUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : buildTokenUrl(base, '/verify', issued.raw),
+          : buildTokenUrl(page, '', issued.raw),
       expiresAtIso: issued.record.expiresAt.toISOString(),
     },
   });
@@ -1210,6 +1252,9 @@ export const authService = {
       });
     }
     assertDeviceBindingSatisfiable(input.application, input.device);
+    // Before the account exists: the send below is fire-and-forget and would
+    // swallow this refusal.
+    assertAllowedTokenUrl(input.application, input.verifyUrl, 'verifyUrl');
     if (input.password.length < config.passwordMinLength) {
       throw new RekeyError({
         statusCode: 400,
@@ -1319,6 +1364,7 @@ export const authService = {
         requireResolvableUrl: true,
         allowance: 'reserve',
         ...(input.appUrl !== undefined && { appUrl: input.appUrl }),
+        ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
       }).catch(() => undefined);
     }
     // After the verification mail, which matters more when the recipient's
@@ -1683,14 +1729,15 @@ export const authService = {
     // Reject MCP-surface refresh tokens at the session endpoint, they're only
     // valid at the per-app OAuth /token endpoint. Prevents cross-surface
     // confusion (an mcp_account token shouldn't mint a full session).
-    if (outcome.token.kind !== 'session') {
+    if (!refreshableKind(outcome.token.kind, device)) {
       throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_INVALID',
         message: 'This refresh token is not valid for session refresh.',
-        fix: 'Use the token endpoint it was issued by, or sign in again.',
+        fix: 'Refresh it where it was issued (the OAuth token endpoint for an MCP grant, the hosted portal for a portal session), or sign in again.',
       });
     }
+    const portal = outcome.token.kind === 'portal';
 
     // Everything that can refuse runs BEFORE the rotation. `rotateRefreshToken`
     // spends the presented token: once it has run, a refusal below would leave
@@ -1746,11 +1793,14 @@ export const authService = {
     // the reuse detection burned the family. So the decision (blocked, over
     // the limit, released) is made here with nothing written, and the write
     // happens once `rotateRefreshToken` has succeeded.
-    const plan = await planDeviceBinding(application, endUser, {
-      ...device,
-      deviceId,
-      primary: false,
-    });
+    // A portal chain never binds a device, whatever the request sends.
+    const plan = portal
+      ? null
+      : await planDeviceBinding(application, endUser, {
+          ...device,
+          deviceId,
+          primary: false,
+        });
     if (plan) {
       const check = await devicesService.preflight({
         applicationId: application.id,
@@ -1839,6 +1889,7 @@ export const authService = {
       ...(oid && { activeOrganizationId: oid }),
       ...(deviceId && { deviceId }),
       sessionId: replacement.record.sessionId,
+      portal,
     });
     return {
       endUser: redact(endUser),
@@ -1869,13 +1920,15 @@ export const authService = {
     impersonation: ImpersonationContext | undefined;
     /** `req.sessionStamp`: the stamp the session middleware admitted this request against. */
     sessionStamp: Date | null;
+    /** `req.portalSession`: the current session is a portal session. */
+    portalSession?: boolean;
     device?: DeviceContext;
   }): Promise<AuthResult> {
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: args.endUserId } });
     return issuePair(
       args.application,
       endUser,
-      { session: { impersonation: args.impersonation, stamp: args.sessionStamp } },
+      { session: { impersonation: args.impersonation, stamp: args.sessionStamp, portal: args.portalSession === true } },
       args.device,
       args.activeOrganizationId ?? undefined,
     );
@@ -2005,7 +2058,7 @@ export const authService = {
         // a domain the operator does not own.
         resetUrl: input.resetUrl
           ? input.resetUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : buildTokenUrl(resolveAppUrl(input.application), '/reset', issued.raw),
+          : buildTokenUrl(defaultAuthLinkPage(input.application, 'reset'), '', issued.raw),
         expiresAtIso: issued.record.expiresAt.toISOString(),
       },
     });
@@ -2401,7 +2454,7 @@ export const authService = {
         // IS a session. No resolvable base ⇒ no button, never a dead href.
         signInUrl: input.signInUrl
           ? input.signInUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : buildTokenUrl(resolveAppUrl(input.application), '/sign-in/magic', issued.raw),
+          : buildTokenUrl(defaultAuthLinkPage(input.application, 'signIn'), '', issued.raw),
         expiresAtIso: issued.record.expiresAt.toISOString(),
       },
     });
@@ -3221,7 +3274,11 @@ export const authService = {
       });
     }
     const result = await issuePair(input.application, endUser, { credential: { via: 'passkey' } }, input.device);
-    return { mfaRequired: false, ...result };
+    return {
+      mfaRequired: false,
+      ...result,
+      ...((await mfaEnrollmentOutstanding(input.application, endUser.id)) && { mfaEnrollmentRequired: true }),
+    };
   },
 
   async listPasskeys(
@@ -3324,7 +3381,7 @@ export const authService = {
     applicationId: string,
     endUserId: string,
     session: { sid?: string; dev?: string } = {},
-  ): Promise<{ endUser: PublicEndUser; sessionsInvalidBefore: Date | null; sessionEnded: boolean }> {
+  ): Promise<{ endUser: PublicEndUser; sessionsInvalidBefore: Date | null; sessionEnded: boolean; hasPassword: boolean }> {
     const [row, head, device] = await Promise.all([
       prisma.endUser.findUnique({ where: { id: endUserId } }),
       session.sid
@@ -3353,6 +3410,7 @@ export const authService = {
       endUser: redact(row),
       sessionsInvalidBefore: row.sessionsInvalidBefore,
       sessionEnded: sessionEnded(session, head, device),
+      hasPassword: row.passwordHash !== null,
     };
   },
 

@@ -12,9 +12,11 @@
 import * as React from 'react';
 import type { BillingProviderInfoDto, ResolvedPriceDto } from '@rekey.dev/react';
 import type { CouponQuote } from '@/lib/coupon-quote';
+import { renewalSentence } from '@/lib/checkout-format';
 import { formatPlanPrice, type PricePlan } from '@/lib/format';
 import { catalogueFallbackSentence, priceFallbackSentence } from '@/lib/price-notice';
 import { Banner } from './banner';
+import { CancelSentence } from './cancel-sentence';
 import { Card } from './card';
 import { ProviderRadios } from './provider-radios';
 import { SubmitButton } from './submit-button';
@@ -26,9 +28,20 @@ export interface ReviewedPlan extends PricePlan {
 }
 
 const INPUT =
-  'min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]';
+  'min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)]';
 const QUIET_BUTTON =
-  'rounded-md border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-fg)] hover:bg-[var(--color-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]';
+  'min-h-11 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-fg)] hover:bg-[var(--color-bg)]';
+
+/**
+ * A checkout for another plan starts a separate subscription: the API keeps
+ * one subscription per plan and nothing in checkout ends the one already held.
+ */
+function addedAlongside(planName: string): string {
+  return (
+    `This starts a separate subscription to ${planName}. The plan you already have is not changed or canceled; ` +
+    'if you no longer want it, cancel it separately.'
+  );
+}
 
 /** The sentence under a code that was not applied. The pay button below it still works, at full price. */
 function refusalFollowUp(fullPrice: string): string {
@@ -92,7 +105,7 @@ export function PlanReview({
 }: {
   slug: string;
   plan: ReviewedPlan;
-  /** The buyer already holds another plan. */
+  /** The buyer already holds another plan, which this checkout leaves in place. */
   switching: boolean;
   /** The team this checkout bills, on an Application that bills per organization. */
   team: string | null;
@@ -111,15 +124,19 @@ export function PlanReview({
   const fallback = quoted?.quote.priceFallback
     ? priceFallbackSentence(quoted.quote.priceFallback)
     : catalogueFallbackSentence(plan.price);
-  const verb = switching ? 'Switch to' : plan.kind === 'SUBSCRIPTION' ? 'Subscribe to' : 'Buy';
+  const verb = plan.kind === 'SUBSCRIPTION' ? 'Subscribe to' : 'Buy';
+  const renewal =
+    plan.kind === 'SUBSCRIPTION' && !plan.isFree && plan.price !== null
+      ? renewalSentence(plan.price.formatted, plan.interval)
+      : null;
 
   return (
     <div className="space-y-6">
       <Card>
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-[var(--color-fg)]">
+          <h1 className="text-sm font-semibold text-[var(--color-fg)]">
             {verb} {plan.name}
-          </h2>
+          </h1>
           {team && (
             <span className="rounded-full bg-[var(--color-bg)] px-2 py-0.5 text-xs text-[var(--color-muted-fg)]">
               Team: {team}
@@ -130,6 +147,19 @@ export function PlanReview({
         {plan.price && (
           <p className="mt-1 text-xs text-[var(--color-muted-fg)]">Charged in {plan.price.currency.toUpperCase()}.</p>
         )}
+        {renewal && (
+          <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+            {renewal}{' '}
+            <CancelSentence
+              manageHref={`/${slug}`}
+              supportUrl={null}
+              supportEmail={null}
+              merchantName=""
+              linkClassName="underline hover:text-[var(--color-fg)]"
+            />
+          </p>
+        )}
+        {switching && <p className="mt-3 text-sm text-[var(--color-fg)]">{addedAlongside(plan.name)}</p>}
         {fallback && (
           <div className="mt-3">
             <Banner tone="info">{fallback}</Banner>

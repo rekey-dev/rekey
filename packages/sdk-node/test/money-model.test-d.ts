@@ -26,6 +26,7 @@ import type {
   PriceFallbackDto,
   ProvidersListDto,
   PublicPlanDto,
+  PublicPlanPage,
   Rekey,
   RekeyOperator,
   ResolvedPriceDto,
@@ -43,7 +44,7 @@ declare const operator: RekeyOperator;
 
 export async function secretKeySurface(): Promise<void> {
   const plans = await rekey.billing.getPlans(undefined, { country: 'IN', accessToken: 'token' });
-  expectTypeOf(plans).toEqualTypeOf<Paged<PublicPlanDto>>();
+  expectTypeOf(plans).toEqualTypeOf<PublicPlanPage>();
   expectTypeOf<PublicPlanDto['price']>().toEqualTypeOf<ResolvedPriceDto | null>();
   expectTypeOf<PublicPlanDto['prices'][number]>().toHaveProperty('isDefault');
   expectTypeOf<PublicPlanDto['checkout']>().toEqualTypeOf<{ ready: boolean }>();

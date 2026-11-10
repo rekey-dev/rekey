@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { HELD_UNAVAILABLE_NOTE, planOffer, UNAVAILABLE_REASON } from '@/lib/plan-offer';
+import { planOffer, UNAVAILABLE_REASON } from '@/lib/plan-offer';
 import { catalogueFallbackSentence, priceFallbackSentence } from '@/lib/price-notice';
 import { CHECKOUT_WITH_FALLBACK, PLANS } from './fixtures/billing';
 
@@ -22,17 +22,14 @@ describe('planOffer', () => {
     });
   });
 
-  it('keeps showing a subscriber the plan they are on, and says when it cannot be bought again', () => {
-    expect(planOffer(PLANS.proDefault, { held: true, canCheckout: true })).toEqual({ kind: 'current', note: null });
-    expect(planOffer(PLANS.proBoundUnchargeable, { held: true, canCheckout: true })).toEqual({
-      kind: 'current',
-      note: HELD_UNAVAILABLE_NOTE,
-    });
+  it('keeps showing a subscriber the plan they are on, with no note that it cannot be bought again', () => {
+    expect(planOffer(PLANS.proDefault, { held: true, canCheckout: true })).toEqual({ kind: 'current' });
+    expect(planOffer(PLANS.proBoundUnchargeable, { held: true, canCheckout: true })).toEqual({ kind: 'current' });
   });
 
   it('never calls a free plan unavailable: it applies without a checkout', () => {
     expect(planOffer(PLANS.free, buyer)).toEqual({ kind: 'none' });
-    expect(planOffer(PLANS.free, { held: true, canCheckout: true })).toEqual({ kind: 'current', note: null });
+    expect(planOffer(PLANS.free, { held: true, canCheckout: true })).toEqual({ kind: 'current' });
   });
 
   it('offers nothing to a team member who may only look', () => {

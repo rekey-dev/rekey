@@ -4,10 +4,11 @@
  * and never while a subscription is still billing.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { emailService } from '../src/modules/email/email.service.js';
 import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
 
 operatorsConfirmTheirEmail();
@@ -146,6 +147,78 @@ describe('deleting your own account', () => {
     });
     expect(after.statusCode).toBe(410);
     expect(after.json().error.code).toBe('END_USER_ERASED');
+  });
+
+  describe('an account with no password and no two-factor', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    /** Delivers every auth mail and hands back the codes it carried. */
+    function mailbox(): string[] {
+      const codes: string[] = [];
+      vi.spyOn(emailService, 'dispatch').mockImplementation(async (input) => {
+        if (input.eventKey === 'account_code') codes.push(String(input.variables.code));
+        return { kind: 'sent', messageId: null, via: 'byo' } as never;
+      });
+      return codes;
+    }
+    const askForCode = (ctx: Ctx) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/email-code',
+        headers: { authorization: `Bearer ${ctx.publicKey}`, 'x-rekey-user-token': ctx.userToken },
+        payload: { purpose: 'delete_account' },
+      });
+    async function passwordless(): Promise<Ctx> {
+      const ctx = await bootstrap();
+      await prisma.endUser.update({ where: { id: ctx.userId }, data: { passwordHash: null } });
+      return ctx;
+    }
+
+    it('deletes with a code emailed to the verified address, which never reaches the response', async () => {
+      const ctx = await passwordless();
+      const codes = mailbox();
+      const asked = await askForCode(ctx);
+      expect(asked.statusCode).toBe(200);
+      expect(asked.body).not.toContain(codes[0]!);
+      const res = await del(ctx.publicKey, ctx.userToken, { emailCode: codes[0]! });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data.erased).toBe(true);
+    });
+
+    it('refuses a session alone, a wrong code, and a code for another purpose', async () => {
+      const ctx = await passwordless();
+      const codes = mailbox();
+      const none = await del(ctx.publicKey, ctx.userToken, {});
+      expect(none.statusCode).toBe(401);
+      expect(none.json().error.code).toBe('EMAIL_CODE_REQUIRED');
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/email-code',
+        headers: { authorization: `Bearer ${ctx.publicKey}`, 'x-rekey-user-token': ctx.userToken },
+        payload: { purpose: 'set_password' },
+      });
+      expect((await del(ctx.publicKey, ctx.userToken, { emailCode: codes[0]! })).json().error.code).toBe('EMAIL_CODE_INVALID');
+      await askForCode(ctx);
+      const wrong = codes[1] === '000000' ? '111111' : '000000';
+      expect((await del(ctx.publicKey, ctx.userToken, { emailCode: wrong })).json().error.code).toBe('EMAIL_CODE_INVALID');
+      expect((await prisma.endUser.findUniqueOrThrow({ where: { id: ctx.userId } })).erasedAt).toBeNull();
+    });
+
+    it('sends no deletion code to an account that has a password, and does not take one from it', async () => {
+      const ctx = await bootstrap();
+      const codes = mailbox();
+      const asked = await askForCode(ctx);
+      expect(asked.statusCode).toBe(409);
+      expect(asked.json().error.code).toBe('EMAIL_CODE_NOT_ACCEPTED');
+      expect(codes).toEqual([]);
+
+      const { issueEmailedCode } = await import('../src/modules/auth/emailed-code.js');
+      const code = await issueEmailedCode(ctx.userId, 'delete_account');
+      const res = await del(ctx.publicKey, ctx.userToken, { emailCode: code });
+      expect(res.json().error.code).toBe('STEP_UP_REQUIRED');
+      expect((await prisma.endUser.findUniqueOrThrow({ where: { id: ctx.userId } })).erasedAt).toBeNull();
+    });
   });
 
   it('a secret-key caller needs no step-up', async () => {

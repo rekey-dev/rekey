@@ -3,6 +3,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   authConfigVisible,
+  portalDomainState,
   portalDomainUnverified,
   signInReachable,
 } from '../src/lib/auth-config';
@@ -86,6 +87,17 @@ describe('portalDomainUnverified', () => {
 
   it('does not fire when the portal is off', () => {
     expect(portalDomainUnverified(live({ portalDomain: 'portal.acme.example' }))).toBe(false);
+  });
+});
+
+describe('portalDomainState', () => {
+  const at = '2026-08-20T12:00:00.000Z';
+
+  it('tells a lapsed domain apart from one never verified', () => {
+    expect(portalDomainState(live())).toBe('not_set');
+    expect(portalDomainState(live({ portalDomain: 'portal.acme.example' }))).toBe('pending');
+    expect(portalDomainState(live({ portalDomain: 'portal.acme.example', portalDomainVerifiedAt: at }))).toBe('verified');
+    expect(portalDomainState(live({ portalDomain: 'portal.acme.example', portalDomainLapsedAt: at }))).toBe('lapsed');
   });
 });
 

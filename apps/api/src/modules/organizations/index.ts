@@ -4,3 +4,4 @@ export {
   organizationsAuthenticatedRoutes,
   organizationsAcceptInvitationRoutes,
 } from './organizations.routes.js';
+export { organizationInvitationPreviewRoutes } from './organization-invitations.routes.js';

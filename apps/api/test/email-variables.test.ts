@@ -89,14 +89,27 @@ describe('payment-failed portal button', () => {
 });
 
 describe('hostedPortalUrl', () => {
+  const noDomain = { portalDomain: null, portalDomainVerifiedAt: null };
+
   it('is the shared portal host plus the slug when the Application enabled it', () => {
     const origin = new URL(process.env.PUBLIC_PORTAL_URL!).origin;
-    expect(hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true })).toBe(`${origin}/acme`);
-    expect(hostedPortalUrl({ slug: 'a b', hostedPortalEnabled: true })).toBe(`${origin}/a%20b`);
+    expect(hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true, ...noDomain })).toBe(`${origin}/acme`);
+    expect(hostedPortalUrl({ slug: 'a b', hostedPortalEnabled: true, ...noDomain })).toBe(`${origin}/a%20b`);
+  });
+
+  it('is the verified custom domain with no slug path', () => {
+    const app = { slug: 'acme', hostedPortalEnabled: true, portalDomain: 'billing.acme.example' };
+    expect(hostedPortalUrl({ ...app, portalDomainVerifiedAt: new Date() })).toBe('https://billing.acme.example');
+    expect(hostedPortalUrl({ ...app, portalDomainVerifiedAt: null })).toBe(
+      `${new URL(process.env.PUBLIC_PORTAL_URL!).origin}/acme`,
+    );
   });
 
   it('is null when the Application has not enabled it', () => {
-    expect(hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: false })).toBeNull();
+    expect(hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: false, ...noDomain })).toBeNull();
+    expect(
+      hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: false, portalDomain: 'billing.acme.example', portalDomainVerifiedAt: new Date() }),
+    ).toBeNull();
   });
 });
 

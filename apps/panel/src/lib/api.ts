@@ -1048,6 +1048,10 @@ export interface ApplicationRow {
   hostedPortalEnabled?: boolean;
   portalDomain?: string | null;
   portalDomainVerifiedAt?: string | null;
+  /** Set when the API's periodic DNS re-check withdrew verification. */
+  portalDomainLapsedAt?: string | null;
+  /** The TXT record that proves control of `portalDomain`. Single-Application read only. */
+  portalDomainTxtRecord?: { name: string; value: string } | null;
   portalBranding?: Record<string, unknown>;
   /** Public MCP server URL, computed API-side from PUBLIC_WEBHOOK_BASE_URL/API_URL. */
   mcpUrl?: string;

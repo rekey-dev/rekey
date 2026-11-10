@@ -220,7 +220,7 @@ Methods, Account deletion):
 
 | Value | Publishable key (browser) | Secret key (server) |
 |---|---|---|
-| `self_service` (default) | Allowed, with `password`, or `code` when MFA is enrolled | Allowed, no proof needed |
+| `self_service` (default) | Allowed, with `password`, or `code` when MFA is enrolled; an account with neither sends `emailCode` | Allowed, no proof needed |
 | `server_only` | `403 ACCOUNT_SELF_DELETION_DISABLED` | Allowed, no proof needed |
 | `off` | `403 ACCOUNT_SELF_DELETION_DISABLED` | `403 ACCOUNT_SELF_DELETION_DISABLED` |
 
@@ -233,7 +233,8 @@ checked before any password, so a disabled Application is no password oracle.
 |---|---|---|
 | `ACCOUNT_SELF_DELETION_DISABLED` | 403 | The setting refuses this key, as in the table above. |
 | `STEP_UP_REQUIRED` | 401 | A publishable-key call sent no valid `password` or `code`. Password attempts count toward the sign-in lockout. |
-| `STEP_UP_UNAVAILABLE` | 400 | A publishable-key call for an account with no password and no MFA, so there is nothing to confirm with. Delete it with a secret key instead. |
+| `EMAIL_CODE_REQUIRED` | 401 | A publishable-key call for an account with no password and no MFA, without `emailCode`. Ask for one with `POST /api/v1/auth/email-code { "purpose": "delete_account" }`: six digits to the account's verified address, valid 10 minutes, once, five wrong tries end it. |
+| `EMAIL_CODE_INVALID` | 401 | `emailCode` is wrong, used, expired or out of tries. Ask for a new one. |
 | `IMPERSONATION_ACTION_FORBIDDEN` | 403 | The token is an operator impersonation session. |
 | `ACCOUNT_HAS_ACTIVE_SUBSCRIPTION` | 409 | A subscription is `ACTIVE`, `TRIALING` or `PAST_DUE`, bills through a payment provider and is not set to cancel. Cancel it (`POST /api/v1/billing/subscription/cancel`, at period end is enough), then retry. Rekey does not cancel it for the user. |
 | `END_USER_ERASED` | 410 | The account is already erased. |

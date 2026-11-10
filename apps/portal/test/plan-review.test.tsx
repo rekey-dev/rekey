@@ -110,3 +110,24 @@ describe('plan review, the payment provider', () => {
     expect(html).toMatch(/<input[^>]*type="hidden"[^>]*name="providerPreselected"[^>]*value="stripe"/);
   });
 });
+
+describe('plan review, what the buyer agrees to', () => {
+  it('says a subscription renews and how to cancel, as checkout does', () => {
+    const html = render({ plan: PLANS.proInIndia });
+    expect(html).toContain('Renews automatically at ₹1,499.00 every month until you cancel.');
+    expect(html).toMatch(/You can cancel any time from <a[^>]*href="\/acme"[^>]*>your account<\/a>; canceling stops the next renewal\./);
+  });
+
+  it('promises no renewal for a plan billed by usage', () => {
+    const html = render({ plan: PLANS.metered });
+    expect(html).not.toContain('Renews automatically');
+    expect(html).not.toContain('You can cancel any time');
+  });
+
+  it('tells a buyer who already holds a plan that it stays, rather than offering to switch', () => {
+    const html = render({ switching: true });
+    expect(html).toContain('This starts a separate subscription to Pro. The plan you already have is not changed or canceled');
+    expect(html).not.toMatch(/Switch/);
+    expect(render()).not.toContain('separate subscription');
+  });
+});

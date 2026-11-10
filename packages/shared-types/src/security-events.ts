@@ -62,6 +62,11 @@ export const SECURITY_EVENT_LABEL = {
   'app.sessions_rotated': 'App sessions rotated (kill-switch)',
   'app.public_key.rotated': 'Publishable key rotated',
   'app.portal_config_updated': 'Hosted portal settings updated',
+  'app.portal_domain_verified': 'Custom portal domain verified',
+  'app.portal_domain_verification_failed': 'Custom portal domain verification failed',
+  // The periodic DNS re-check stopped finding the record, so the domain is no
+  // longer honoured: someone else may now control it.
+  'app.portal_domain_lapsed': 'Custom portal domain verification lapsed',
   'app.settings_updated': 'Application settings updated',
   // Lifecycle. All three are workspace-billing-relevant as well as
   // operationally significant: promotion consumes a production slot and cannot
@@ -170,10 +175,14 @@ export const SECURITY_EVENT_LABEL = {
   'user.sign_in_failed': 'End-user sign-in failed',
   'user.locked_out': 'End-user locked out (too many failed attempts)',
   'user.email_verified': 'End-user verified their email',
+  'user.email_change_requested': 'End-user asked to change their email address',
+  'user.email_changed': 'End-user changed their email address',
   'user.password_reset': 'End-user reset their password',
   'user.password_changed': 'End-user changed their password',
+  'user.password_set': 'End-user set a first password',
   'user.passkey_added': 'End-user added a passkey',
   'user.passkey_removed': 'End-user removed a passkey',
+  'user.backup_codes_replaced': 'End-user replaced their two-factor backup codes',
   'user.sessions_revoked': 'End-user revoked their sessions',
   // Refresh-token replay. `raced`: a rotated token came back within
   // REFRESH_TOKEN_REUSE_WINDOW_SECONDS while its successor was unused, and was

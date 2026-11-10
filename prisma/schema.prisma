@@ -684,10 +684,19 @@ model Application {
   // the publishable key + the end-user's own token. See docs/specs/hosted-portal.md.
   hostedPortalEnabled    Boolean  @default(false) @map("hosted_portal_enabled")
   // Optional custom domain for the hosted portal (e.g. billing.theirsaas.com).
-  // Unique → a domain maps to exactly one Application (no cross-tenant routing).
-  // Activated only after DNS verification (portalDomainVerifiedAt set).
-  portalDomain           String?  @unique @map("portal_domain")
+  // Honoured only after DNS verification (portalDomainVerifiedAt set). Several
+  // Applications may CLAIM one domain, but at most one may hold it verified:
+  // partial unique index portal_domain_verified_key (migration
+  // 20261110132835_portal_domain_verification), which Prisma 6 cannot describe.
+  // So a domain still resolves to exactly one Application.
+  portalDomain           String?  @map("portal_domain")
   portalDomainVerifiedAt DateTime? @map("portal_domain_verified_at")
+  // Periodic DNS re-check of a verified domain (applications/portal-domain.ts).
+  portalDomainCheckedAt     DateTime? @map("portal_domain_checked_at")
+  portalDomainCheckFailures Int       @default(0) @map("portal_domain_check_failures")
+  // Set when the re-check withdrew verification; cleared by a new domain or a
+  // successful verify.
+  portalDomainLapsedAt      DateTime? @map("portal_domain_lapsed_at")
   // Portal branding (logo URL, colors) — reuses the tokens-based theming shape.
   portalBranding         Json     @default("{}") @map("portal_branding")
   // Which checkout page buyers get, set separately for each payment mode so an

@@ -20,6 +20,7 @@ import { verifyUserAccessTokenAnyAlg, type UserSessionClaims } from '../lib/jwt.
 import { prisma } from '../lib/prisma.js';
 import { authService, type PublicEndUser } from '../modules/auth/auth.service.js';
 import { accessTokenEndedByStamp } from '../lib/session-stamp.js';
+import { mfaEnrollmentOutstanding } from '../modules/mfa/mfa.service.js';
 
 /** Who is really behind an impersonated session. Set only for `imp` tokens. */
 export interface ImpersonationContext {
@@ -62,6 +63,30 @@ declare module 'fastify' {
      * passes it on, so the mint is refused if every session was ended since.
      */
     sessionStamp?: Date | null;
+    /** Whether the signed-in user has a password, read with the session. Never the hash itself. */
+    endUserHasPassword?: boolean;
+    /**
+     * True when the user token is an `eu_portal` token: a hosted-portal session
+     * on a device-bound app, holding no device slot. A route that re-mints the
+     * session passes it on so the new pair stays a portal session.
+     */
+    portalSession?: boolean;
+    /**
+     * The session (refresh-token family, `RefreshToken.sessionId`) this
+     * request's user token was minted for, from its `sid` claim. Undefined for
+     * a token minted without one, such as an impersonation token.
+     */
+    userSessionId?: string;
+  }
+
+  interface FastifyContextConfig {
+    /**
+     * The route answers a session whose Application requires MFA before the
+     * user has enrolled: it is one they need in order to enrol, to see who
+     * they are, or to sign out. Every other `requireUserSession` route refuses
+     * that session with MFA_ENROLLMENT_REQUIRED.
+     */
+    allowWithoutMfaEnrollment?: boolean;
   }
 }
 
@@ -100,6 +125,7 @@ export async function requireUserSession(
     presented,
     request.application.id,
     request.application.tokenGeneration,
+    { acceptPortal: request.internalCaller },
   );
   if (!claims) {
     throw new RekeyError({
@@ -136,11 +162,13 @@ export async function requireUserSession(
   const impersonation = await resolveImpersonation(claims, request.application.id);
   if (impersonation) request.impersonation = impersonation;
 
-  const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
-    request.application.id,
-    claims.sub,
-    claims,
-  );
+  // An operator acting for the user cannot enrol for them, so an impersonated
+  // session is never held back for it.
+  const enforceMfa = !impersonation && request.routeOptions.config.allowWithoutMfaEnrollment !== true;
+  const [{ endUser, sessionsInvalidBefore, sessionEnded, hasPassword }, mfaOutstanding] = await Promise.all([
+    authService.getByIdForSession(request.application.id, claims.sub, claims),
+    enforceMfa ? mfaEnrollmentOutstanding(request.application, claims.sub) : false,
+  ]);
   // A token minted before the user's last password change, reset, sign-out
   // everywhere or refresh-token reuse is refused now rather than at its
   // expiry. Those end every session, and the stamp is per user. See
@@ -168,8 +196,15 @@ export async function requireUserSession(
     });
   }
 
+  // After the session checks, so a dead token still answers 401 rather than
+  // telling its holder to set up two-factor.
+  if (mfaOutstanding) throw mfaEnrollmentRequired();
+
   request.endUser = endUser;
+  request.endUserHasPassword = hasPassword;
   request.sessionStamp = sessionsInvalidBefore;
+  request.portalSession = claims.typ === 'eu_portal';
+  if (claims.sid) request.userSessionId = claims.sid;
   if (claims.dev) request.deviceId = claims.dev;
 
   // The `oid` claim says which organization was active when the token was
@@ -203,6 +238,38 @@ export async function requireUserSession(
       request.activeOrganizationId = claims.oid;
     }
   }
+}
+
+/**
+ * Refuse a session whose Application requires MFA and whose user has not
+ * enrolled, unless it is an impersonation. For a route that answers such a
+ * session but must still withhold part of its answer (the `include` reads of
+ * GET /auth/me and GET /users/me).
+ */
+export async function assertMfaEnrolledUnlessImpersonating(
+  request: FastifyRequest,
+  application: Parameters<typeof mfaEnrollmentOutstanding>[0],
+  endUserId: string,
+): Promise<void> {
+  if (request.impersonation) return;
+  if (await mfaEnrollmentOutstanding(application, endUserId)) throw mfaEnrollmentRequired();
+}
+
+function mfaEnrollmentRequired(): RekeyError {
+  return new RekeyError({
+    statusCode: 403,
+    code: 'MFA_ENROLLMENT_REQUIRED',
+    message:
+      'This Application requires two-factor authentication and this account has not set it up, so ' +
+      'this session can only be used to set it up.',
+    fix:
+      'With the same session, call POST /api/v1/auth/mfa/setup, show the user the returned otpauthUrl ' +
+      'and backup codes, then POST /api/v1/auth/mfa/setup-confirm with a current code from their ' +
+      'authenticator app. A passkey does not count. If setup answers EMAIL_NOT_VERIFIED, have the user ' +
+      'confirm their address first (POST /api/v1/auth/send-verification). Until enrolment, only those ' +
+      'calls, GET /api/v1/auth/mfa/status, GET /api/v1/auth/me and GET /api/v1/users/me (both without ' +
+      '`include`) and POST /api/v1/auth/sign-out-everywhere answer this session.',
+  });
 }
 
 /**

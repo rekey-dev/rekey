@@ -9,13 +9,34 @@
  */
 
 import { formatMoney as formatRegistryMoney } from '@rekey.dev/shared-types/currency';
+import { intervalWord, type CheckoutLocale } from './checkout-format';
+
+/** The visitor's locale, picked from `Accept-Language` by `checkoutLocale`. */
+export type PortalLocale = CheckoutLocale;
+
+/**
+ * The API stores instants in UTC and the portal does not know the visitor's
+ * zone, so every date is the UTC day: the same on the server and in any tab.
+ */
+export const PORTAL_TIME_ZONE = 'UTC';
+
+/**
+ * Every date the portal shows.
+ *
+ * @example
+ * formatDate('2026-10-15T00:00:00Z', 'en-US', 'UTC'); // 'Oct 15, 2026'
+ * formatDate('2026-10-15T00:00:00Z', 'en-IN', 'UTC'); // '15 Oct 2026'
+ */
+export function formatDate(value: Date | string, locale: PortalLocale, timeZone: string): string {
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeZone }).format(new Date(value));
+}
 
 /**
  * A stored minor-unit amount as a price, such as '$9.99' or '¥1,000'. Throws
  * a RangeError for an amount that is not a whole number.
  */
-export function formatMoney(amount: number, currency: string): string {
-  return formatRegistryMoney(amount, currency);
+export function formatMoney(amount: number, currency: string, locale: PortalLocale): string {
+  return formatRegistryMoney(amount, currency, locale);
 }
 
 /** The subset of a catalogue plan this module reads. */
@@ -34,7 +55,8 @@ export interface PricePlan {
 
 /** "/month" for a subscription, nothing for a one-off: `Plan.interval` defaults to MONTH whatever the kind. */
 function cadence(plan: Pick<PricePlan, 'kind' | 'interval'>): string {
-  return plan.kind === 'SUBSCRIPTION' && plan.interval ? ` /${plan.interval.toLowerCase()}` : '';
+  const every = plan.kind === 'SUBSCRIPTION' ? intervalWord(plan.interval) : null;
+  return every ? ` /${every}` : '';
 }
 
 /**
@@ -54,6 +76,18 @@ export function formatPlanPrice(plan: PricePlan): string {
     return `${plan.price.formatted} · ${plan.creditsAmount} credits`;
   }
   return `${plan.price.formatted}${cadence(plan)}`;
+}
+
+/**
+ * The price shown after a plan's name in a list, or null when it would only
+ * repeat the name, as for a free plan called "Free".
+ *
+ * @example
+ * planPriceBesideName({ name: 'Free', isFree: true, price: null }); // null
+ */
+export function planPriceBesideName(plan: PricePlan & { name: string }): string | null {
+  const price = formatPlanPrice(plan);
+  return price.trim().toLowerCase() === plan.name.trim().toLowerCase() ? null : price;
 }
 
 /**
@@ -85,12 +119,12 @@ export interface RefundablePayment {
  * currency, or null when nothing was.
  *
  * @example
- * refundLine({ amount: 1900, currency: 'USD', refundedAmount: 500 }); // 'Refunded $5.00 of $19.00'
+ * refundLine({ amount: 1900, currency: 'USD', refundedAmount: 500 }, 'en-US'); // 'Refunded $5.00 of $19.00'
  */
-export function refundLine(payment: RefundablePayment): string | null {
+export function refundLine(payment: RefundablePayment, locale: PortalLocale): string | null {
   const returned = payment.refundedAmount;
   if (returned <= 0) return null;
-  const refunded = formatMoney(returned, payment.currency);
+  const refunded = formatMoney(returned, payment.currency, locale);
   if (returned >= payment.amount) return `Refunded ${refunded}`;
-  return `Refunded ${refunded} of ${formatMoney(payment.amount, payment.currency)}`;
+  return `Refunded ${refunded} of ${formatMoney(payment.amount, payment.currency, locale)}`;
 }

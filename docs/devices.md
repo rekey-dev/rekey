@@ -106,9 +106,13 @@ token, so releasing takes one of three routes:
 - Let an operator release it: `POST /api/v1/tenant/applications/:id/end-users/:euid/devices/:deviceId/release`,
   or the `release_device` MCP tool.
 
-With `deviceBinding: required` only the second and third apply, because the
-first needs a session the policy refuses; build the release into your
-backend if you require binding.
+With `deviceBinding: required` the first route is closed to your own
+clients, because it needs a session the policy refuses. The hosted portal
+still offers it: set the same `INTERNAL_CALLER_SECRET` on the API and on the
+portal, and the portal signs users in without a device. That portal session
+holds no slot, and the API honours it only on requests that carry the secret, so it
+reaches nothing but the portal. Without the secret, build the release into
+your backend.
 
 ## Binding a session to a device
 
@@ -170,7 +174,8 @@ stays unbound is left alone.
 
 `authConfig.deviceBinding` is `optional` by default. Set it to `required` and
 the primary sign-in flows refuse without a `device` (`400
-DEVICE_FINGERPRINT_REQUIRED`). Refresh is never gated by it, so flipping the
+DEVICE_FINGERPRINT_REQUIRED`), except from the hosted portal when it carries
+`INTERNAL_CALLER_SECRET` (see above). Refresh is never gated by it, so flipping the
 switch on a running Application does not sign anyone out; it changes what the
 next sign-in needs. Set it with `PATCH /tenant/applications/:id/auth-config`
 or the `update_auth_config` MCP tool.
@@ -235,7 +240,9 @@ your backend on a visitor's request undoes the setting; keep that route to
 your support tooling.
 
 It only holds with `deviceBinding: required`. With binding optional, a user
-at the limit can sign in without a fingerprint and holds no slot at all. Like
+at the limit can sign in without a fingerprint and holds no slot at all. The
+hosted portal's session holds no slot either, but it reaches only the portal,
+and its release call uses the publishable key, so it meets the same 403. Like
 `max_devices` itself, it is a policy for your own clients, not a lock: the
 fingerprint is computed by the client, so someone who can run a modified one
 can present a fingerprint already registered to them and share that slot. Two
@@ -265,6 +272,16 @@ opaque fingerprint. Since 2.1.0 it has always been possible to *take* a seat
 - Operators see every activation at `GET …/licenses/:licenseId/activations`
   (`releasedAt` marks freed seats) and can release one at
   `POST …/licenses/:licenseId/activations/:activationId/release`.
+- The licence's holder sees its machines at
+  `GET /api/v1/users/me/licenses/:licenseId/activations` (a label, the start of
+  the fingerprint as `fingerprintHint`, first and last seen, `ACTIVE` or
+  `RELEASED`) and frees one without the key at
+  `DELETE /api/v1/users/me/licenses/:licenseId/activations/:activationId`, with
+  their own session. That runs the same policy as `deactivate` and answers the
+  same body. A licence pooled to an organization is listed for its members and
+  freed by its OWNER and ADMIN tiers; any other licence id answers 404
+  `LICENSE_NOT_FOUND`. SDK: `rekey.licenses.listMyActivations(...)` and
+  `rekey.licenses.releaseMyActivation(...)`.
 
 `deactivate` proves possession of the key and nothing else. On a `SEATS`
 licence shared by a team, any holder of the key can release any machine's
@@ -308,7 +325,7 @@ closed by design, is deliberately not applied to these routes.
 | `device.blocked` | An operator blocked the device; its sessions were revoked. |
 | `device.unblocked` | An operator lifted the block. The device is RELEASED. |
 | `device.limit_reached` | A new device was refused. `data.devices` lists the active devices filling the cap. |
-| `license.deactivated` | A machine gave back its license seat — `POST /licenses/deactivate` or an operator release (`data.releasedBy`). `data.license` and `data.machineFingerprint`. |
+| `license.deactivated` | A machine gave back its license seat: `POST /licenses/deactivate` (`releasedBy: client`), the holder from their account (`end_user`) or an operator release (`operator`). `data.license` and `data.machineFingerprint`. |
 
 Every payload except `device.limit_reached` carries `data.device` with `id`,
 `endUserId`, `fingerprint`, `label`, `status` and the timestamps. See

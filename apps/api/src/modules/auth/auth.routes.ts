@@ -15,6 +15,7 @@ import { mfaService } from '../mfa/mfa.service.js';
 import { authRateLimit, passkeyStartRateLimit, signUpRateLimit } from '../../lib/rate-limit.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+import { accountCredentialRoutes, emailChangeConfirmRoutes } from './account-credential.routes.js';
 import { ok, okPage, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { CREDENTIAL_BODY_LIMIT, SIGN_UP_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
@@ -59,7 +60,7 @@ const UNVERIFIED_403 =
   ' Or EMAIL_NOT_VERIFIED: this account has not confirmed its email address, so it cannot add ' +
   'a sign-in method yet.';
 
-const USER_SESSION_401 =
+export const USER_SESSION_401 =
   BOOTSTRAP_401 +
   ' Or USER_TOKEN_MISSING: no `X-Rekey-User-Token` header; or USER_TOKEN_INVALID: the user ' +
   'token is invalid, expired, or signed with a different secret; or ' +
@@ -67,7 +68,7 @@ const USER_SESSION_401 =
   'IMPERSONATION_SESSION_ENDED: the impersonation session backing this token has ended.';
 
 /** Shared by every route in the authenticated plugin (`authenticatedAuthRoutes`). */
-const AUTHENTICATED_ERRORS = {
+export const AUTHENTICATED_ERRORS = {
   401: USER_SESSION_401,
   403: BOOTSTRAP_403.replace('the secret key lacks the `auth:write` scope.', 'the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).'),
   404: 'END_USER_NOT_FOUND: the end-user behind this session no longer exists in this Application.',
@@ -75,7 +76,7 @@ const AUTHENTICATED_ERRORS = {
   429: RATE_LIMITED,
 } as const;
 
-const IMPERSONATION_403 =
+export const IMPERSONATION_403 =
   BOOTSTRAP_403 +
   ' Or IMPERSONATION_ACTION_FORBIDDEN: an impersonation session cannot rebind a credential ' +
   '(password, MFA, or passkey).';
@@ -104,6 +105,7 @@ function deviceContext(
   fingerprint: string | null;
   label: string | null;
   client: ClientContext;
+  internalCaller: boolean;
 } {
   const client = requestClient(req, hint);
   return {
@@ -112,6 +114,7 @@ function deviceContext(
     fingerprint: binding?.fingerprint ?? null,
     label: binding?.label ?? null,
     client,
+    internalCaller: req.internalCaller,
   };
 }
 
@@ -158,7 +161,7 @@ const DEVICE_ERRORS_400 =
  * auth action. Scoped to the calling Application + its tenant so it surfaces in
  * the operator's per-app Activity feed.
  */
-function recordEndUserEvent(
+export function recordEndUserEvent(
   req: FastifyRequest,
   type: SecurityEventType,
   endUserId: string | null,
@@ -177,11 +180,29 @@ function recordEndUserEvent(
   });
 }
 
+// Permissive URL check, accepts `{token}` placeholders that Ajv's
+// `format: uri` would reject. Zod's `.url()` parses with the WHATWG URL
+// constructor which tolerates `{` `}` in path/query.
+const TokenizedUrl = z
+  .string()
+  .max(2048)
+  .refine((v) => {
+    try {
+      // Constructed for its THROW: this is URL validation, not an object we keep.
+      // eslint-disable-next-line no-new
+      new URL(v);
+      return true;
+    } catch {
+      return false;
+    }
+  }, 'Must be a valid URL.');
+
 const SignUpBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
   emailVerified: z.boolean().optional(),
+  verifyUrl: TokenizedUrl.optional(),
   device: DeviceBindingRequestSchema.optional(),
   client: ClientHintSchema.optional(),
 });
@@ -201,23 +222,6 @@ const RefreshBody = z.object({
 const SignOutBody = z.object({
   refreshToken: z.string().min(1).max(512),
 });
-
-// Permissive URL check, accepts `{token}` placeholders that Ajv's
-// `format: uri` would reject. Zod's `.url()` parses with the WHATWG URL
-// constructor which tolerates `{` `}` in path/query.
-const TokenizedUrl = z
-  .string()
-  .max(2048)
-  .refine((v) => {
-    try {
-      // Constructed for its THROW: this is URL validation, not an object we keep.
-      // eslint-disable-next-line no-new
-      new URL(v);
-      return true;
-    } catch {
-      return false;
-    }
-  }, 'Must be a valid URL.');
 
 const ForgotPasswordBody = z.object({
   email: z.string().email().max(254),
@@ -363,6 +367,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // also satisfies via SCOPE_IMPLICATIONS; publishable requests are
   // pre-authorized by route membership).
   app.addHook('onRequest', requireScope('auth:write'));
+  await emailChangeConfirmRoutes(app);
 
   app.post(
     '/sign-up',
@@ -405,6 +410,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
                 'linked providers the first time someone proves the mailbox by magic link, social ' +
                 'sign-in or password reset.',
             },
+            verifyUrl: {
+              type: 'string',
+              maxLength: 2048,
+              description:
+                'Where the confirmation email links, with `{token}` replaced by the token. Must be on an ' +
+                "origin the Application has registered or inside its own hosted portal, as for " +
+                '/auth/resend-verification. Left out, the link goes to the default verification page.',
+            },
             device: DEVICE_BODY_SCHEMA,
             client: CLIENT_BODY_SCHEMA,
           },
@@ -418,7 +431,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               'PASSWORD_TOO_SHORT: shorter than `authConfig.passwordMinLength`; or ' +
               'PASSWORD_BREACHED: the password appears in a known breach corpus; or ' +
               'METADATA_TOO_LARGE: `metadata` exceeds the 16KB limit; or ' +
-              'METADATA_KEY_RESERVED: a publishable caller set the reserved `metadata.oidc` key.' +
+              'METADATA_KEY_RESERVED: a publishable caller set the reserved `metadata.oidc` key; or ' +
+              'AUTH_URL_INVALID / AUTH_URL_NOT_ALLOWED: `verifyUrl` is not a URL, or not on a registered ' +
+              'origin or the hosted portal. Nothing is created.' +
               DEVICE_ERRORS_400,
             403:
               BOOTSTRAP_403 +
@@ -448,6 +463,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         password: body.password,
         ...(body.metadata !== undefined && { metadata: body.metadata }),
         ...(body.emailVerified !== undefined && { emailVerified: body.emailVerified }),
+        ...(body.verifyUrl !== undefined && { verifyUrl: body.verifyUrl }),
         device: deviceContext(req, body.device, body.client),
         // Signup policy: a `secret_only` app refuses creation via a pub key.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
@@ -1022,8 +1038,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'happened. A secret-key caller gets the real outcome, and the raw token when the ' +
           'Application has no email transport configured (the same contract /forgot-password ' +
           'uses).\n\n' +
-          'Nothing is sent when no verification link can be built, pass `verifyUrl`, or set ' +
-          'the Application URL (Panel → Application → Auth). An already-verified address is ' +
+          'Nothing is sent when no verification link can be built, pass `verifyUrl`, set ' +
+          'the Application URL (Panel → Application → Auth) or turn on the hosted portal. An already-verified address is ' +
           'a no-op rather than an error.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
@@ -1149,6 +1165,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   // own record and devices does; every change needs `auth:write`.
   app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
+  await accountCredentialRoutes(app);
 
   app.post(
     '/change-password',
@@ -1208,7 +1225,8 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
     {
       bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Sends an email on every call; same tier as /resend-verification.
-      config: { rateLimit: authRateLimit(10) },
+      // Answers before MFA enrolment: setting up MFA needs a confirmed address.
+      config: { rateLimit: authRateLimit(10), allowWithoutMfaEnrollment: true },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Send (or re-send) an email-verification link to the current user',
@@ -1535,7 +1553,8 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
         summary: 'List the current user\'s active sessions (live refresh tokens)',
         description:
           'Returns active sessions ordered newest-first, with the User-Agent + IP captured ' +
-          'at issue time. Use the returned `id` to revoke individual sessions via DELETE /sessions/:id.',
+          'at issue time. Use the returned `id` to revoke individual sessions via DELETE /sessions/:id. ' +
+          '`current` marks the session the presented user token belongs to.',
         security: [
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
@@ -1556,8 +1575,12 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
                   nullable: true,
                   description: 'The device this session is bound to, when the client sent a fingerprint.',
                 },
+                current: {
+                  type: 'boolean',
+                  description: 'True for the session the presented user token was minted from. At most one row is current.',
+                },
               },
-              required: ['id', 'createdAt', 'expiresAt', 'userAgent', 'ip', 'deviceId'],
+              required: ['id', 'createdAt', 'expiresAt', 'userAgent', 'ip', 'deviceId', 'current'],
             },
             "A page of the current user's active sessions (live refresh tokens), newest first.",
           ),
@@ -1581,6 +1604,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
             userAgent: r.userAgent,
             ip: r.ip,
             deviceId: r.deviceId,
+            current: req.userSessionId !== undefined && r.sessionId === req.userSessionId,
           })),
           total,
           take,
@@ -1638,6 +1662,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       // this one on the global 1 MiB would let a holder of any valid user
       // token push a megabyte per call at the parser.
       bodyLimit: CREDENTIAL_BODY_LIMIT,
+      config: { allowWithoutMfaEnrollment: true },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Revoke every refresh token for the current user',

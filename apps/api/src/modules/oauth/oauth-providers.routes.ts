@@ -40,7 +40,8 @@ export async function oauthProviderListRoutes(app: FastifyInstance): Promise<voi
         description:
           'Returns the providers this Application has configured with both a client id and a ' +
           'client secret, so a sign-in page can render one button per entry and start each ' +
-          'with `POST /api/v1/auth/oauth/{id}/start`. Only the id and a display name: client ' +
+          'with `POST /api/v1/auth/oauth/{id}/start`. `hostedPortal` says whether the operator offers it in the ' +
+          'Rekey-hosted customer portal. Only these: client ' +
           'ids, redirect URIs, scopes and secrets are never included. Accepts the publishable ' +
           `key. Cacheable for a minute (\`Cache-Control: ${CACHE_CONTROL}\`).`,
         security: [{ apiKey: [] }, { publishableKey: [] }],

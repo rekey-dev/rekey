@@ -36,11 +36,14 @@ import { assertVerifiedForCredential } from '../auth/user-lifecycle.js';
 
 const ProviderParam = z.object({ provider: z.string().min(1).max(40) });
 const StartBody = z.object({ state: z.string().min(1).max(512) });
+const RedirectUri = z.string().min(1).max(2048);
+const SignInStartBody = StartBody.extend({ redirectUri: RedirectUri.optional() });
 const CallbackBody = z.object({
   code: z.string().min(1).max(4096),
   device: DeviceBindingRequestSchema.optional(),
   client: ClientHintSchema.optional(),
 });
+const SignInCallbackBody = CallbackBody.extend({ redirectUri: RedirectUri.optional() });
 
 /**
  * Errors from `requirePublishableOrSecretKey` + `requireScope('auth:write')`,
@@ -62,6 +65,22 @@ const KEY_ERRORS = {
  * Additionally required by `oauthLinkRoutes`, `requireUserSession` runs after the key hooks.
  * The scope there is `auth:read` for GET and `auth:write` for the rest.
  */
+const REDIRECT_URI_PROPERTY = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 2048,
+  description:
+    "Only for this Application's hosted portal: its sign-in page (`<PUBLIC_PORTAL_URL>/<slug>/oauth/callback`, or " +
+    '`https://<verified custom domain>/oauth/callback`), used in place of the redirect URI configured for the ' +
+    "provider. Refused unless the provider's `hostedPortal` is on, and the provider console must list it too. " +
+    'Pass the same value to /start and /callback. Leave it ' +
+    'out everywhere else.',
+} as const;
+
+const REDIRECT_URI_400 =
+  "; or OAUTH_REDIRECT_URI_NOT_ALLOWED: `redirectUri` is not this Application's hosted portal sign-in page; or " +
+  'OAUTH_PROVIDER_NOT_IN_PORTAL: it is, but the operator has not turned on `hostedPortal` for this provider.';
+
 const USER_SESSION_ERRORS = {
   401:
     `${KEY_ERRORS[401]}; or USER_TOKEN_MISSING: no \`X-Rekey-User-Token\` header; or ` +
@@ -93,7 +112,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
         body: {
           type: 'object',
           required: ['state'],
-          properties: { state: { type: 'string', minLength: 1, maxLength: 512 } },
+          properties: { state: { type: 'string', minLength: 1, maxLength: 512 }, redirectUri: REDIRECT_URI_PROPERTY },
         },
         security: [{ apiKey: [] }, { publishableKey: [] }],
         response: {
@@ -111,7 +130,8 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             400:
               'BAD_REQUEST: `state` is missing or too long; or OAUTH_PROVIDER_NOT_CONFIGURED: ' +
-              'this Application has no config (or no client secret) for this provider.',
+              'this Application has no config (or no client secret) for this provider' +
+              REDIRECT_URI_400,
             ...KEY_ERRORS,
             404: 'OAUTH_PROVIDER_UNKNOWN: the provider is not registered (use google or github).',
           }),
@@ -120,11 +140,12 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
-      const body = StartBody.parse(req.body);
+      const body = SignInStartBody.parse(req.body);
       const url = await oauthService.buildAuthUrl({
         application: req.application!,
         providerName: provider,
         state: body.state,
+        ...(body.redirectUri !== undefined && { redirectUri: body.redirectUri }),
       });
       return { success: true, data: { authorizationUrl: url } };
     },
@@ -145,6 +166,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           required: ['code'],
           properties: {
             code: { type: 'string', minLength: 1, maxLength: 4096 },
+            redirectUri: REDIRECT_URI_PROPERTY,
             device: {
               type: 'object',
               required: ['fingerprint'],
@@ -181,7 +203,8 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
               'VALIDATION_ERROR: `code` is missing or too long; or ' +
               'OAUTH_PROVIDER_NOT_CONFIGURED: this Application has no config (or no client ' +
               'secret) for this provider; or OAUTH_NO_EMAIL: the provider did not return an ' +
-              'email, so a new user cannot be created.',
+              'email, so a new user cannot be created' +
+              REDIRECT_URI_400,
             401:
               `${KEY_ERRORS[401]}; or OAUTH_IDENTITY_WRONG_APPLICATION: defence-in-depth, ` +
               'should be unreachable via normal flows; or OAUTH_EMAIL_NOT_VERIFIED: the ' +
@@ -200,18 +223,20 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
-      const body = CallbackBody.parse(req.body);
+      const body = SignInCallbackBody.parse(req.body);
       const client = requestClient(req, body.client);
       const outcome = await oauthService.handleCallback({
         application: req.application!,
         providerName: provider,
         code: body.code,
+        ...(body.redirectUri !== undefined && { redirectUri: body.redirectUri }),
         device: {
           userAgent: client.userAgent,
           ip: req.ip || null,
           fingerprint: body.device?.fingerprint ?? null,
           label: body.device?.label ?? null,
           client,
+          internalCaller: req.internalCaller,
         },
         // Signup policy: refuse OAuth-first user creation via a pub key in
         // `secret_only` apps (and entirely in `invite_only`).

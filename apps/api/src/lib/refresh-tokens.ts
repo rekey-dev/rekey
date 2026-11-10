@@ -44,8 +44,11 @@ export interface IssueRefreshTokenOptions {
   userAgent?: string | null;
   /** Inbound IP at issue time. Surfaced by /me/sessions. */
   ip?: string | null;
-  /** Surface: "session" (default, SDK) or "mcp" (per-app OAuth token endpoint). */
-  kind?: 'session' | 'mcp';
+  /**
+   * Surface: "session" (default, SDK), "mcp" (per-app OAuth token endpoint) or
+   * "portal" (hosted portal session that holds no device slot).
+   */
+  kind?: 'session' | 'mcp' | 'portal';
   /** For `kind: 'mcp'`, the OAuth client_id the token is bound to. */
   clientId?: string | null;
   /**
@@ -315,6 +318,8 @@ export interface SessionSummary {
   ip: string | null;
   /** Bound device, or null for sessions minted without a fingerprint. */
   deviceId: string | null;
+  /** The session family, the `sid` claim of every access token minted from it. */
+  sessionId: string;
 }
 
 export async function listActiveSessions(
@@ -338,6 +343,7 @@ export async function listActiveSessions(
         userAgent: true,
         ip: true,
         deviceId: true,
+        sessionId: true,
       },
       ...(opts.take !== undefined && { take: opts.take }),
       ...(opts.skip !== undefined && { skip: opts.skip }),

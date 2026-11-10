@@ -14,7 +14,15 @@ import * as React from 'react';
 import type { CheckoutPageOrder, CheckoutPageView } from '@rekey.dev/shared-types';
 import { priceFallbackSentence } from '@/lib/price-notice';
 import { safeCssColor, safeHttpUrl } from '@/lib/config';
-import { formatMoney, intervalWord, readableAccent, readableSurface, type CheckoutLocale } from '@/lib/checkout-format';
+import {
+  formatMoney,
+  intervalWord,
+  readableAccent,
+  readableSurface,
+  renewalSentence,
+  type CheckoutLocale,
+} from '@/lib/checkout-format';
+import { CancelSentence } from '../cancel-sentence';
 import { checkoutProviderCopy } from '@/lib/checkout-provider-copy';
 import type { RazorpayReturn } from '@/lib/checkout-razorpay-return';
 import { portalBaseUrl } from '@/lib/env';
@@ -72,51 +80,9 @@ export function CheckoutNotice({
   );
 }
 
-function renewalSentence(order: CheckoutPageOrder, locale: CheckoutLocale): string | null {
-  const every = intervalWord(order.plan.interval);
-  if (order.plan.kind !== 'recurring' || every === null) return null;
-  const price = formatMoney(order.plan.amount, order.plan.currency, locale);
-  return `Renews automatically at ${price} every ${every} until you cancel.`;
-}
-
-function CancelSentence({ order }: { order: CheckoutPageOrder }): React.JSX.Element {
-  const manage = safeHttpUrl(order.manageUrl ?? undefined);
-  const support = safeHttpUrl(order.merchant.supportUrl ?? undefined);
-  const email = order.merchant.supportEmail;
-  if (manage) {
-    return (
-      <>
-        You can cancel any time from{' '}
-        <a className="ck-link" href={manage}>
-          your account
-        </a>
-        ; cancelling stops the next renewal.
-      </>
-    );
-  }
-  if (support) {
-    return (
-      <>
-        You can cancel any time by contacting{' '}
-        <a className="ck-link" href={support}>
-          {order.merchant.displayName} support
-        </a>
-        ; cancelling stops the next renewal.
-      </>
-    );
-  }
-  if (email) {
-    return (
-      <>
-        You can cancel any time by emailing{' '}
-        <a className="ck-link [overflow-wrap:anywhere]" href={`mailto:${email}`}>
-          {email}
-        </a>
-        ; cancelling stops the next renewal.
-      </>
-    );
-  }
-  return <>You can cancel any time from your {order.merchant.displayName} account; cancelling stops the next renewal.</>;
+function orderRenewal(order: CheckoutPageOrder, locale: CheckoutLocale): string | null {
+  if (order.plan.kind !== 'recurring') return null;
+  return renewalSentence(formatMoney(order.plan.amount, order.plan.currency, locale), order.plan.interval);
 }
 
 /**
@@ -329,7 +295,7 @@ export function CheckoutView({
   const every = intervalWord(order.plan.interval);
   const price = formatMoney(order.plan.amount, order.plan.currency, locale);
   const total = formatMoney(order.totalDueToday, order.plan.currency, locale);
-  const renewal = renewalSentence(order, locale);
+  const renewal = orderRenewal(order, locale);
   const fallback = order.priceFallback
     ? priceFallbackSentence(order.priceFallback, formatMoney(order.priceFallback.charged.amount, order.priceFallback.charged.currency, locale))
     : null;
@@ -395,7 +361,14 @@ export function CheckoutView({
             </p>
             {renewal && (
               <p className="mt-3 text-pretty text-sm leading-relaxed text-[var(--ck-muted-fg)]" id="charge-disclosure">
-                {renewal} <CancelSentence order={order} />
+                {renewal}{' '}
+                <CancelSentence
+                  manageHref={safeHttpUrl(order.manageUrl ?? undefined) ?? null}
+                  supportUrl={safeHttpUrl(m.supportUrl ?? undefined) ?? null}
+                  supportEmail={m.supportEmail}
+                  merchantName={m.displayName}
+                  linkClassName="ck-link"
+                />
               </p>
             )}
             {order.plan.kind === 'one_time' && (

@@ -43,20 +43,27 @@ vi.mock('@/lib/session', () => ({
   getPortalUser: async () => ({ accessToken: 'at' }),
   portalClientFor: async () => client,
 }));
+const facts = { devices: false };
+const support: { href: string | undefined } = { href: undefined };
 vi.mock('@/lib/config', () => ({
-  getPortalConfig: async () => ({ billingSubject: 'user', billingEnabled: true, branding: {} }),
-  supportLink: () => undefined,
+  getPortalConfig: async () => ({ name: 'Acme', billingSubject: 'user', billingEnabled: true, branding: {}, auth: facts }),
+  supportLink: () => support.href,
 }));
 vi.mock('@/lib/actions', () => ({
   cancelSubscriptionAction: async () => undefined,
 }));
+const visitor = { language: 'en-US,en;q=0.9' };
+vi.mock('next/headers', () => ({ headers: async () => new Headers({ 'accept-language': visitor.language }) }));
+vi.mock('@/lib/two-factor', () => ({ redirectWhileTwoFactorOutstanding: async () => undefined }));
+vi.mock('@/lib/profile-completion', () => ({ redirectWhileProfileOutstanding: async () => undefined }));
 vi.mock('next/navigation', () => ({
   redirect: (to: string) => {
     throw new Error(`REDIRECT ${to}`);
   },
+  useRouter: () => ({ refresh: () => undefined }),
 }));
 
-const { default: DashboardPage } = await import('@/app/(portal)/[slug]/page');
+const { default: DashboardPage } = await import('@/app/(portal)/[slug]/(overview)/page');
 
 async function render(searchParams: Record<string, string> = {}): Promise<string> {
   const element = await DashboardPage({
@@ -85,6 +92,8 @@ describe('portal dashboard, several live subscriptions', () => {
     client.listSubscriptions.mockResolvedValue({ items: [sub('s_pro', 'p_pro'), sub('s_basic', 'p_basic')] });
 
     const html = await render();
+    expect(html.match(/<h1/g)).toHaveLength(1);
+    expect(html).toContain('>Your account</h1>');
     const subscriptionCard = html.slice(0, html.indexOf('>Plans<'));
     expect(subscriptionCard).toContain('>Pro</span>');
     expect(subscriptionCard).toContain('>Basic</span>');
@@ -97,7 +106,7 @@ describe('portal dashboard, several live subscriptions', () => {
     expect(planRow(html, 'Team')).toContain('href="/acme/plans/team"');
   });
 
-  it('the cancel banner describes the subscription that was cancelled', async () => {
+  it('the cancel banner describes the subscription that was canceled', async () => {
     const basic = { ...sub('s_basic', 'p_basic'), cancelAt: '2026-10-15T00:00:00.000Z' };
     client.getSubscription.mockResolvedValue(sub('s_pro', 'p_pro'));
     client.listSubscriptions.mockResolvedValue({ items: [sub('s_pro', 'p_pro'), basic] });
@@ -105,19 +114,40 @@ describe('portal dashboard, several live subscriptions', () => {
     const html = await render({ e: 'canceled', sub: 's_basic' });
     const banner = html.slice(0, html.indexOf('>Subscription<'));
     expect(banner).toContain('Your Basic subscription will end on');
-    expect(banner).toContain(new Date(basic.cancelAt).toLocaleDateString());
+    expect(banner).toContain('Oct 15, 2026');
     expect(banner).not.toContain('Pro');
   });
 
-  it('ignores a cancelled id that is not one of the caller\'s subscriptions', async () => {
+  it('back from checkout, waits while a subscription is still pending and says when it is active', async () => {
+    client.getSubscription.mockResolvedValue(null);
+    client.listSubscriptions.mockResolvedValue({ items: [sub('s_pro', 'p_pro'), { ...sub('s_basic', 'p_basic'), status: 'PENDING' }] });
+    expect(await render({ checkout: 'success' })).toContain('Your subscription will activate shortly.');
+    client.listSubscriptions.mockResolvedValue({ items: [sub('s_pro', 'p_pro'), sub('s_basic', 'p_basic')] });
+    expect(await render({ checkout: 'success' })).toContain('Your subscription is active.');
+  });
+
+  it("writes the end date in the visitor's language, as a UTC day", async () => {
+    const basic = { ...sub('s_basic', 'p_basic'), cancelAt: '2026-10-15T23:30:00.000Z' };
+    client.getSubscription.mockResolvedValue(basic);
+    client.listSubscriptions.mockResolvedValue({ items: [basic] });
+    visitor.language = 'en-IN,en;q=0.9';
+    try {
+      const html = await render({ e: 'canceled', sub: 's_basic' });
+      expect(html.slice(0, html.indexOf('>Subscription<'))).toContain('will end on 15 Oct 2026.');
+    } finally {
+      visitor.language = 'en-US,en;q=0.9';
+    }
+  });
+
+  it('ignores a canceled id that is not one of the caller\'s subscriptions', async () => {
     const pro = { ...sub('s_pro', 'p_pro'), cancelAt: '2026-10-20T00:00:00.000Z' };
     client.getSubscription.mockResolvedValue(pro);
     client.listSubscriptions.mockResolvedValue({ items: [pro] });
 
     const html = await render({ e: 'canceled', sub: 's_someone_else' });
     const banner = html.slice(0, html.indexOf('>Subscription<'));
-    expect(banner).toContain('Your subscription has been cancelled.');
-    expect(banner).not.toContain(new Date(pro.cancelAt).toLocaleDateString());
+    expect(banner).toContain('Your subscription has been canceled.');
+    expect(banner).not.toContain('Oct 20, 2026');
   });
 
   it('an automatic checkout refused for lack of a hosted provider reads as unavailable', async () => {
@@ -157,18 +187,20 @@ describe('portal dashboard, prices', () => {
     expect(row).not.toContain('$19.00');
   });
 
-  it("shows a subscription's own price, and that its plan cannot be bought again when checkout is not ready", async () => {
+  it("shows a subscription's own price, and no cannot-buy note on its plan when checkout is not ready", async () => {
     const held = subscription({ id: 's_pro', planId: PLANS.proBoundUnchargeable.id });
     client.getSubscription.mockResolvedValue(held);
     client.listSubscriptions.mockResolvedValue({ items: [held] });
     client.getPlans.mockResolvedValueOnce({ items: [PLANS.proBoundUnchargeable] });
 
     const html = await render();
+    expect(html.match(/<h1/g)).toHaveLength(1);
+    expect(html).toContain('>Your account</h1>');
     const subscriptionCard = html.slice(0, html.indexOf('>Plans<'));
     expect(subscriptionCard).toContain('₹1,499.00 /month');
     const row = planRow(html, 'Pro');
     expect(row).toContain('Current');
-    expect(row).toContain('cannot be bought again here right now');
+    expect(row).not.toContain('cannot be bought');
   });
 
   it('shows a plan that cannot be bought as unavailable with a reason, and offers no checkout for it', async () => {
@@ -183,6 +215,7 @@ describe('portal dashboard, prices', () => {
   it('does not call a free plan unavailable because it has no checkout', async () => {
     client.getPlans.mockResolvedValueOnce({ items: [PLANS.free] });
     const row = planRow(await render(), 'Free');
+    expect(row).not.toContain('>Free</span> <span');
     expect(row).not.toContain('Not available');
     expect(row).not.toContain('href="/acme/plans/');
   });
@@ -225,5 +258,61 @@ describe('portal dashboard, billing history', () => {
     expect(history).toContain('¥1,500');
     expect(history).toContain('Refunded ¥1,500');
     expect(history).not.toMatch(/Total/i);
+  });
+
+  it('names its columns for screen readers and keeps a long description to one line', async () => {
+    client.listPayments.mockResolvedValueOnce({ items: [payment({ description: 'A very long invoice description' })] });
+    const html = await render();
+    const history = html.slice(html.indexOf('>Billing history<'));
+    expect(history).toMatch(/<thead class="sr-only"><tr><th scope="col">Payment<\/th><th scope="col">Amount and status<\/th>/);
+    expect(history).toMatch(/<span class="block truncate[^"]*">A very long invoice description<\/span>/);
+  });
+});
+
+describe('portal dashboard, cancel and errors', () => {
+  beforeEach(() => {
+    client.getSubscription.mockReset().mockResolvedValue(null);
+    client.listSubscriptions.mockReset().mockResolvedValue({ items: [] });
+    support.href = undefined;
+  });
+
+  it('offers "Cancel subscription" as a danger action, and names a plan it cannot find "Your plan"', async () => {
+    const held = { ...sub('s_gone', 'p_deleted'), currentPeriodEnd: '2099-01-01T00:00:00.000Z' };
+    client.listSubscriptions.mockResolvedValue({ items: [held] });
+    const html = await render();
+    expect(html).toContain('>Your plan</span>');
+    expect(html).not.toContain('p_deleted');
+    expect(html).toMatch(/<button type="button" class="[^"]*text-\[var\(--color-danger\)\][^"]*">Cancel subscription<\/button>/);
+  });
+
+  it('points to support in an error only when there is a support contact, and opens an email link in place', async () => {
+    let html = await render({ error: 'BILLING_BOUND_PROVIDER_UNAVAILABLE' });
+    expect(html).not.toMatch(/contact support/i);
+    support.href = 'mailto:help@acme.test';
+    html = await render({ error: 'BILLING_BOUND_PROVIDER_UNAVAILABLE' });
+    const link = /<a [^>]*href="mailto:help@acme.test"[^>]*>Contact support<\/a>/.exec(html)?.[0] ?? '';
+    expect(link).not.toBe('');
+    expect(link).not.toContain('target=');
+    support.href = 'https://acme.test/help';
+    html = await render({ error: 'BILLING_BOUND_PROVIDER_UNAVAILABLE' });
+    expect(html).toMatch(/<a [^>]*href="https:\/\/acme.test\/help"[^>]*target="_blank"/);
+  });
+});
+
+describe('portal dashboard, devices link', () => {
+  beforeEach(() => {
+    client.getSubscription.mockResolvedValue(null);
+    client.listSubscriptions.mockResolvedValue({ items: [] });
+  });
+
+  it('links to the devices page only when the application binds sign-in to a device', async () => {
+    facts.devices = false;
+    expect(await render()).not.toContain('href="/acme/devices"');
+    facts.devices = true;
+    const html = await render();
+    expect(html).toContain('href="/acme/devices"');
+    expect(html).toContain('>Manage devices</a>');
+    expect(html).toContain('id="plans"');
+    facts.devices = false;
   });
 });

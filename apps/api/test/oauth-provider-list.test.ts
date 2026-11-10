@@ -113,12 +113,12 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     const res = await list(a.publicKey);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data.providers).toEqual([
-      { id: 'google', name: 'Google' },
-      { id: 'github', name: 'GitHub' },
+      { id: 'google', name: 'Google', hostedPortal: false },
+      { id: 'github', name: 'GitHub', hostedPortal: false },
     ]);
   });
 
-  it('never returns anything but the id and display name', async () => {
+  it('never returns anything but the id, display name and hosted portal flag', async () => {
     await configure(a.applicationId, 'google');
     await configure(a.applicationId, 'oidc', 'https://issuer.example');
 
@@ -128,7 +128,7 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     expect(Object.keys(body.data)).toEqual(['providers']);
     const providers = body.data.providers as Array<Record<string, unknown>>;
     expect(providers).toHaveLength(2);
-    for (const p of providers) expect(Object.keys(p).sort()).toEqual(['id', 'name']);
+    for (const p of providers) expect(Object.keys(p).sort()).toEqual(['hostedPortal', 'id', 'name']);
     expect(providers.find((p) => p.id === 'oidc')?.name).toBe('SSO');
     for (const leaked of [CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, 'issuer.example', 'openid']) {
       expect(res.body).not.toContain(leaked);
@@ -150,10 +150,10 @@ describe('GET /api/v1/auth/oauth/providers', () => {
     await configure(b.applicationId, 'github');
 
     for (const key of [a.publicKey, a.liveKey]) {
-      expect((await list(key)).json().data.providers).toEqual([{ id: 'google', name: 'Google' }]);
+      expect((await list(key)).json().data.providers).toEqual([{ id: 'google', name: 'Google', hostedPortal: false }]);
     }
     for (const key of [b.publicKey, b.liveKey]) {
-      expect((await list(key)).json().data.providers).toEqual([{ id: 'github', name: 'GitHub' }]);
+      expect((await list(key)).json().data.providers).toEqual([{ id: 'github', name: 'GitHub', hostedPortal: false }]);
     }
   });
 

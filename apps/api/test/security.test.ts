@@ -18,6 +18,7 @@ import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
 import { issueMfaChallengeToken } from '../src/lib/jwt.js';
 import * as OTPAuth from 'otpauth';
+import jwt from 'jsonwebtoken';
 import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
 
 operatorsConfirmTheirEmail();
@@ -434,6 +435,54 @@ describe('Phase-1 security hardening', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.userAgent).toBe(ua);
     expect(rows[0]!.id).toBeTruthy();
+  });
+
+  it('/sessions marks the session the presented token belongs to, and the mark follows it across a refresh', async () => {
+    const b = await bootstrap('sessions-current');
+    const auth = { authorization: `Bearer ${b.liveKey}` };
+    const first = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-up',
+        headers: auth,
+        payload: { email: 'current@example.com', password: 'pw-one-two-three' },
+      })
+      .then((r) => r.json().data as { accessToken: string; refreshToken: string });
+    const second = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: auth,
+        payload: { email: 'current@example.com', password: 'pw-one-two-three' },
+      })
+      .then((r) => r.json().data as { accessToken: string });
+    // A rotation gives the session a new row id while its `sid` stays the same.
+    const rotated = await app
+      .inject({ method: 'POST', url: '/api/v1/auth/refresh', headers: auth, payload: { refreshToken: first.refreshToken } })
+      .then((r) => r.json().data as { accessToken: string });
+
+    const currentOf = async (accessToken: string) => {
+      const list = await app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/sessions',
+        headers: { ...auth, 'x-rekey-user-token': accessToken },
+      });
+      expect(list.statusCode).toBe(200);
+      const items = (list.json().data as { items: Array<{ id: string; current: boolean }> }).items;
+      expect(items).toHaveLength(2);
+      return items.filter((i) => i.current).map((i) => i.id);
+    };
+    const rowOf = async (accessToken: string) =>
+      (
+        await prisma.refreshToken.findFirstOrThrow({
+          where: { sessionId: (jwt.decode(accessToken) as { sid: string }).sid, revokedAt: null },
+        })
+      ).id;
+
+    const firstRow = await rowOf(rotated.accessToken);
+    expect(firstRow).not.toBe((jwt.decode(rotated.accessToken) as { sid: string }).sid);
+    expect(await currentOf(rotated.accessToken)).toEqual([firstRow]);
+    expect(await currentOf(second.accessToken)).toEqual([await rowOf(second.accessToken)]);
   });
 
   it('cross-user revoke by id is impossible (scoped by endUserId)', async () => {

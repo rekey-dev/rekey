@@ -29,17 +29,8 @@
 import 'server-only';
 import { isIP } from 'node:net';
 import { headers } from 'next/headers';
-
-export const PROXY_SECRET_HEADER = 'x-rekey-proxy-secret';
-
-/** Length-independent comparison, so the secret cannot be guessed a byte at a time. */
-function sameSecret(a: string, b: string): boolean {
-  let diff = a.length ^ b.length;
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return diff === 0;
-}
+import { PROXY_SECRET_HEADER, sameSecret } from './portal-host';
+import { portalPublicOrigin } from './public-base';
 
 export function vouchedClientIp(
   forwardedFor: string | null | undefined,
@@ -138,6 +129,20 @@ export async function forwardedClientHeaders(): Promise<Record<string, string>> 
     // Outside a request (build, tests): no visitor to forward.
   }
   return apiCallHeaders(ip, process.env.INTERNAL_CALLER_SECRET, visitor);
+}
+
+/**
+ * Headers for a call made with an Application's publishable key: the
+ * forwarded ones plus `Origin` set to the origin the visitor is on. The API
+ * refuses a publishable key without an allowlisted Origin whenever the
+ * Application has an origin allowlist. It allows the shared portal by the
+ * origin of its PUBLIC_PORTAL_URL, which must match PORTAL_BASE_URL, and an
+ * Application's verified custom domain as `https://<domain>`. Never taken from
+ * the raw incoming Host, which the visitor controls; the custom domain is the
+ * one the middleware resolved (lib/public-base.ts).
+ */
+export async function publishableKeyCallHeaders(): Promise<Record<string, string>> {
+  return { ...(await forwardedClientHeaders()), origin: await portalPublicOrigin() };
 }
 
 /** How long a server-side API call may take before the portal gives up. */

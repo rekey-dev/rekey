@@ -17,7 +17,7 @@ import { afterApproval, unconfirmedMessage } from '@/lib/approval-outcome';
 import { readStatus, usePollUntilComplete, type PollPhase } from '@/lib/use-poll-until-complete';
 import { RazorpayFallback, type RazorpayFallbackTarget } from './razorpay-fallback';
 
-type Phase = 'idle' | 'open' | 'processing' | 'cancelled' | 'failed' | 'script_failed' | PollPhase;
+type Phase = 'idle' | 'open' | 'processing' | 'canceled' | 'failed' | 'script_failed' | PollPhase;
 
 export type RazorpayTarget = { kind: 'subscription'; subscriptionId: string } | { kind: 'order'; orderId: string };
 
@@ -68,7 +68,7 @@ const UPI_FIRST: NonNullable<RazorpayOptions['config']> = {
 
 const MESSAGES: Partial<Record<Phase, string>> = {
   processing: 'Processing…',
-  cancelled: 'Payment not completed. You can try again.',
+  canceled: 'Payment not completed. You can try again.',
   failed: 'The payment failed. You have not been charged. You can try again.',
   script_failed: 'The secure payment form did not load.',
   confirming: 'Payment received. Confirming your payment…',
@@ -78,9 +78,9 @@ const MESSAGES: Partial<Record<Phase, string>> = {
 
 // A UPI collect request can still be approved in the buyer's app after the
 // modal closes, so where UPI is offered this never invites an immediate retry.
-const CANCELLED_WITH_UPI = 'Payment not completed. If you approved it in your UPI app, wait a moment before trying again.';
+const CANCELED_WITH_UPI = 'Payment not completed. If you approved it in your UPI app, wait a moment before trying again.';
 
-const BUTTON_PHASES = new Set<Phase>(['idle', 'open', 'processing', 'cancelled', 'failed']);
+const BUTTON_PHASES = new Set<Phase>(['idle', 'open', 'processing', 'canceled', 'failed']);
 
 function firstPhase(initial: 'loading' | 'confirming' | 'claimed' | 'unconfirmed' | 'failed'): Phase {
   if (initial === 'loading') return 'idle';
@@ -183,7 +183,7 @@ export function RazorpayPayment({
   );
 
   const onDismiss = React.useCallback(async () => {
-    setPhase((p) => (p === 'open' ? 'cancelled' : p));
+    setPhase((p) => (p === 'open' ? 'canceled' : p));
     // The payment may have gone through (a UPI approval racing the close).
     const status = await readStatus(basePath);
     if (status === 'confirming' || status === 'complete') await poll();
@@ -212,7 +212,7 @@ export function RazorpayPayment({
   };
 
   const message =
-    phase === 'unconfirmed' ? unconfirmedMessage(providerName) : phase === 'cancelled' && upiFirst ? CANCELLED_WITH_UPI : MESSAGES[phase];
+    phase === 'unconfirmed' ? unconfirmedMessage(providerName) : phase === 'canceled' && upiFirst ? CANCELED_WITH_UPI : MESSAGES[phase];
   const busy = (!loaded && BUTTON_PHASES.has(phase)) || phase === 'processing' || phase === 'confirming' || phase === 'handing_off' || phase === 'redirecting';
 
   return (

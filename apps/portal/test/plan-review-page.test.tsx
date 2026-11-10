@@ -40,6 +40,8 @@ vi.mock('@/lib/config', () => ({
   getPortalConfig: async () => ({ billingSubject: 'user', billingEnabled: true, branding: {}, publishableKey: 'rp_pub_x' }),
 }));
 vi.mock('@/lib/actions', () => ({ checkoutAction: async () => undefined }));
+vi.mock('@/lib/two-factor', () => ({ redirectWhileTwoFactorOutstanding: async () => undefined }));
+vi.mock('@/lib/profile-completion', () => ({ redirectWhileProfileOutstanding: async () => undefined }));
 vi.mock('@/lib/coupon-quote', async (original) => ({
   ...(await original<typeof import('@/lib/coupon-quote')>()),
   quoteCoupon: async (_client: unknown, _token: string, input: Record<string, unknown>) => {
@@ -84,6 +86,7 @@ describe('plan review page', () => {
 
   it("reads the catalogue with the buyer's token and the providers for this plan", async () => {
     const html = await render('pro');
+    expect(html.match(/<h1/g)).toHaveLength(1);
     expect(clientTokens).toEqual(['at']);
     expect(providerCalls).toEqual([{ planSlug: 'pro' }]);
     expect(html).toContain('₹1,499.00 /month');
@@ -115,5 +118,8 @@ describe('plan review page', () => {
     state.held = [];
     state.plans = [PLANS.proBoundUnchargeable];
     expect(await redirectOf(() => render('pro'))).toBe('/acme?error=PLAN_UNAVAILABLE');
+
+    state.plans = [{ ...PLANS.team, isFree: true, checkout: { ready: true } } as typeof PLANS.team];
+    expect(await redirectOf(() => render('team'))).toBe('/acme');
   });
 });

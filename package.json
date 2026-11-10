@@ -14,6 +14,7 @@
     "lint": "eslint .",
     "typecheck": "pnpm db:generate && turbo run typecheck",
     "test": "pnpm db:generate && turbo run test",
+    "guides:portal-shots": "node scripts/capture-portal-shots.mjs",
     "db:generate": "prisma generate --schema prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema prisma/schema.prisma",
     "db:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",

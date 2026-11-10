@@ -59,7 +59,9 @@ export type ReuseReason =
   /** Presented under another Application's key, or not a session token. */
   | 'wrong_application'
   /** A device fingerprint the successor is not bound to. */
-  | 'device_mismatch';
+  | 'device_mismatch'
+  /** A portal session's token, replayed by a request without INTERNAL_CALLER_SECRET. */
+  | 'portal_without_caller_secret';
 
 /**
  * Decide whether a replay of the rotated `presented` token falls inside the

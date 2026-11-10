@@ -11,6 +11,8 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { CopyButton } from '@/components/CopyButton';
+import { OAuthPortalOption } from '@/components/OAuthPortalOption';
+import { SINGLE_CALLBACK_HOST_PROVIDERS, portalSignInUrls } from '@/lib/oauth-portal';
 
 type ProviderName =
   | 'google'
@@ -87,7 +89,12 @@ async function setOauth(applicationId: string, formData: FormData): Promise<void
   if (!provider || !clientId || !clientSecret || !redirectUri) {
     redirect(`/applications/${applicationId}/oauth?error=missing&newOauth_${provider}=1`);
   }
-  const body: Record<string, unknown> = { clientId, clientSecret, redirectUri };
+  const body: Record<string, unknown> = {
+    clientId,
+    clientSecret,
+    redirectUri,
+    hostedPortal: formData.get('hostedPortal') === 'on',
+  };
   if (provider === 'oidc') {
     if (!issuerUrl) {
       redirect(`/applications/${applicationId}/oauth?error=missing_issuer&newOauth_oidc=1`);
@@ -144,7 +151,8 @@ export default async function OAuthPage({
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
 
   const app = await getApplication(id);
-  const configured = (app.oauthConfig ?? {}) as Record<string, { clientId: string; redirectUri: string; issuerUrl?: string }>;
+  const configured = (app.oauthConfig ?? {}) as Record<string, ProviderConfig>;
+  const portalUrls = portalSignInUrls(app);
 
   /**
    * A concrete redirect URI to suggest, derived from the Application's own
@@ -276,6 +284,7 @@ export default async function OAuthPage({
                       <p>clientId: {cfg.clientId}</p>
                       <p>redirect: {cfg.redirectUri}</p>
                       {cfg.issuerUrl && <p>issuer: {cfg.issuerUrl}</p>}
+                      {cfg.hostedPortal === true && <p>offered in the hosted portal</p>}
                     </div>
                   )}
                 </div>
@@ -298,6 +307,7 @@ export default async function OAuthPage({
                     error={reopenError}
                     errorDetail={errorDetail}
                     errorFix={errorFix}
+                    portalUrls={portalUrls}
                   />
                 </Modal>
                 {p.consoleUrl && (
@@ -336,10 +346,12 @@ function ConfigForm({
   existing,
   suggestedRedirectUri,
   error, errorDetail, errorFix,
+  portalUrls,
 }: {
   applicationId: string;
   provider: ProviderInfo;
-  existing: { clientId: string; redirectUri: string; issuerUrl?: string } | null;
+  existing: ProviderConfig | null;
+  portalUrls: string[];
   /** Concrete value to offer, or null when no origin is configured yet. */
   suggestedRedirectUri: string | null;
   error?: string;
@@ -438,12 +450,21 @@ function ConfigForm({
         </Field>
       )}
 
+      <OAuthPortalOption
+        providerLabel={provider.label}
+        portalUrls={portalUrls}
+        offered={existing?.hostedPortal === true}
+        singleCallbackHost={SINGLE_CALLBACK_HOST_PROVIDERS.has(provider.name)}
+      />
+
       <div className="flex items-center gap-2 pt-2">
         <SubmitButton pendingLabel="Saving…">{existing ? 'Save changes' : 'Add provider'}</SubmitButton>
       </div>
     </ActionForm>
   );
 }
+
+type ProviderConfig = { clientId: string; redirectUri: string; issuerUrl?: string; hostedPortal?: boolean };
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';

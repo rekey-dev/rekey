@@ -433,8 +433,8 @@ export default async function AuthMethodsPage({
                 <>
                   Adds a second sign-in step using an authenticator app (with backup codes).{' '}
                   <strong>Optional</strong> lets each user decide; <strong>required</strong>{' '}
-                  enforces it for everyone: users who haven&apos;t set it up are asked to at their
-                  next sign-in (your app sees{' '}
+                  enforces it for everyone: users who haven&apos;t set it up can sign in but can
+                  do nothing else until they do (your app sees{' '}
                   <code className="text-xs">mfaEnrollmentRequired</code> and routes them to setup).
                 </>
               }

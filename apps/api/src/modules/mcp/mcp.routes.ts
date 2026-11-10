@@ -64,12 +64,28 @@ import { RekeyError } from '../../lib/error.js';
 import { issueMcpConsentToken, verifyMcpAccessToken, verifyMcpConsentToken } from '../../lib/jwt.js';
 import { handleMcpMessage, type JsonRpcMessage } from './mcp-server.js';
 import { errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
-import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import type { PublicEndUser } from '../auth/auth.service.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
+import { hostedPortalUrl } from '../../lib/portal-origins.js';
+import {
+  peekAuthorizationRequest,
+  redirectWithAnswer,
+  storeAuthorizationRequest,
+  takeAuthorizationRequest,
+  type AuthorizationRequest,
+} from './authorization-requests.js';
+import {
+  PortalGrantBody,
+  PortalGrantBodySchema,
+  authorizationNeedsDeviceSession,
+  authorizationRequestUnknown,
+  portalAuthorizeDenyRoute,
+  requirePortalCallerForPublishableKey,
+} from './portal-authorize.js';
 
 const SlugParam = z.object({ slug: z.string().min(1).max(40) });
 
@@ -752,32 +768,22 @@ async function checkedHandoffRequest(req: FastifyRequest): Promise<{
   client: { id: string; redirectUris: string[]; clientName: string | null };
   redirectUri: string;
   granted: string;
+  /** Set when the hosted portal is answering a request `/authorize` stored. */
+  pending: { id: string; request: AuthorizationRequest } | null;
 }> {
   const { slug } = SlugParam.parse(req.params);
   const application = await resolveAuthServerApp(slug);
 
-  // Defence in depth. `requireApiKey` already refuses a publishable key
-  // (wrong prefix → API_KEY_INVALID), so this is unreachable, which is
-  // why it can carry a specific code without becoming a probing oracle.
-  if (req.authKind === 'publishable') {
-    throw new RekeyError({
-      statusCode: 403,
-      code: 'SESSION_HANDOFF_FORBIDDEN',
-      message: 'A publishable key cannot hand off a session.',
-      fix: 'Call this from your server with the Application secret key.',
-    });
-  }
-
-  // The slug names one Application and the secret key resolves to another
-  //, refuse rather than letting a key for app A mint codes on app B.
+  // The slug names one Application and the key resolves to another, refuse
+  // rather than letting a key for app A mint codes on app B.
   // `requireUserSession` has already bound the user token to the KEY's
   // Application, so without this the code would be minted on the wrong one.
   if (!req.application || req.application.id !== application.id) {
     throw new RekeyError({
       statusCode: 403,
       code: 'SESSION_HANDOFF_FORBIDDEN',
-      message: 'The presented secret key belongs to a different Application.',
-      fix: `Use the secret key for the Application "${slug}".`,
+      message: 'The presented key belongs to a different Application.',
+      fix: `Use the key for the Application "${slug}".`,
     });
   }
 
@@ -792,7 +798,27 @@ async function checkedHandoffRequest(req: FastifyRequest): Promise<{
     });
   }
 
-  const body = GrantBody.parse(req.body ?? {});
+  // The portal names a request `/authorize` stored and nothing else: it can
+  // only finish a request that went through that endpoint's own checks.
+  let pending: { id: string; request: AuthorizationRequest } | null = null;
+  let body: z.infer<typeof GrantBody>;
+  if (req.authKind === 'publishable') {
+    const portalBody = PortalGrantBody.parse(req.body ?? {});
+    const request = await peekAuthorizationRequest(portalBody.request_id);
+    if (!request || request.applicationId !== application.id) throw authorizationRequestUnknown();
+    pending = { id: portalBody.request_id, request };
+    body = {
+      client_id: request.clientId,
+      redirect_uri: request.redirectUri,
+      code_challenge: request.codeChallenge,
+      code_challenge_method: 'S256',
+      scope: request.scope,
+      nonce: request.nonce,
+      organization_id: portalBody.organization_id,
+    };
+  } else {
+    body = GrantBody.parse(req.body ?? {});
+  }
 
   const client = await mcpOAuthService.getClient(application.id, body.client_id);
   const redirectUri = client?.redirectUris.find((uri) => uri === body.redirect_uri);
@@ -804,6 +830,10 @@ async function checkedHandoffRequest(req: FastifyRequest): Promise<{
       fix: 'Register the client and its exact redirect URI at POST /oauth/register.',
     });
   }
+  // Security invariant: a portal session holds no device slot, so letting it
+  // approve a client would mint tokens that carry no device on an
+  // Application that binds every sign-in to one.
+  if (req.portalSession) throw authorizationNeedsDeviceSession(client.clientName);
   // From here on the redirect URI is proven registered for this client, so
   // a refusal may go back to it as an RFC 6749 §4.1.2.1 error. `details`
   // says so, and names the URI, so the hosted page never has to decide for
@@ -832,10 +862,12 @@ async function checkedHandoffRequest(req: FastifyRequest): Promise<{
       'Request scopes this Application supports (e.g. `openid email`).',
     );
   }
-  return { application, endUser, body, client, redirectUri, granted };
+  return { application, endUser, body, client, redirectUri, granted, pending };
 }
 
 export async function mcpRoutes(app: FastifyInstance): Promise<void> {
+  await portalAuthorizeDenyRoute(app);
+
   // RFC 9728, protected-resource metadata. The 401 from the MCP endpoint
   // (`POST /:slug`, further down this file) points clients here.
   app.get(
@@ -986,7 +1018,9 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Authorization endpoint: login + consent page',
         description:
           'Renders an HTML sign-in + consent form for a browser. No Rekey credential, ' +
-          'the end user authenticates by submitting the form below.',
+          'the end user authenticates by submitting the form below. An Application with ' +
+          '`authConfig.hostedAuthorizeUrl` sends the browser there instead, and one with the ' +
+          'hosted portal on sends it to the portal, which signs the user in and asks.',
         response: {
           200: raw('The login + consent HTML page.', 'text/html'),
           302: {
@@ -994,7 +1028,10 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
               'The authorization request could not be satisfied (unsupported `response_type`, ' +
               '`code_challenge_method` other than S256, `invalid_scope`, or an unsupported ' +
               '`prompt`/`request`/`request_uri`), redirect to the client `redirect_uri` with ' +
-              '`error` (+ `state`).',
+              '`error` (+ `state`). Otherwise, for an Application whose own page or hosted ' +
+              'portal asks the user, a redirect there: `hostedAuthorizeUrl` with the request ' +
+              'as sent, or `<portal>/authorize?request=<id>` carrying only an opaque id that ' +
+              'lives 15 minutes.',
           },
           400: raw(
             'Invalid authorization request, or unknown `client_id` / unregistered `redirect_uri`. ' +
@@ -1047,6 +1084,23 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           if (typeof v === 'string' && v !== '') hosted.searchParams.set(k, v);
         }
         return reply.redirect(hosted.toString());
+      }
+
+      const portal = hostedPortalUrl(application);
+      if (portal) {
+        const requestId = await storeAuthorizationRequest({
+          applicationId: application.id,
+          clientId: client.id,
+          redirectUri: q.data.redirect_uri,
+          codeChallenge: q.data.code_challenge,
+          scope: q.data.scope,
+          state: q.data.state,
+          nonce: q.data.nonce,
+        });
+        return reply
+          .header('cache-control', 'no-store')
+          .header('referrer-policy', 'no-referrer')
+          .redirect(`${portal}/authorize?request=${requestId}`);
       }
 
       return reply
@@ -1356,10 +1410,10 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // who has not signed in. What it adds is packaging: a standards-shaped code
   // instead of a bespoke handoff.
   //
-  // Deliberately NOT reachable with a publishable key. That WOULD be an
-  // escalation, the publishable key is identity, not authorization, and it
-  // lives in browsers. `requireApiKey` refuses anything without a secret
-  // prefix before the handler runs; the check inside is defence in depth.
+  // A publishable key reaches it only from the hosted portal, proven by the
+  // deployment caller secret (`requirePortalCallerForPublishableKey`), and
+  // then only to finish a request `/authorize` stored and the end-user has
+  // just been asked about.
   //
   // Everything else is the same path the interactive flow takes: same
   // `createAuthCode`, so the code is single-use, 60-second, and PKCE-bound,
@@ -1374,7 +1428,8 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       // secret key could mint one, including a key minted with nothing but
       // `credits:grant`. `*` includes it, so a full key is unaffected.
       preHandler: [
-        requireApiKey,
+        requirePublishableOrSecretKey,
+        requirePortalCallerForPublishableKey,
         requireScope('auth:write'),
         requireUserSession,
         refuseWhileImpersonating('hand off a session'),
@@ -1388,43 +1443,65 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           'BOTH the Application secret key (`Authorization: Bearer rp_live_…`) and the ' +
           "end-user's live access token (`X-Rekey-User-Token`), which must belong to the same " +
           'Application. The key needs the `auth:write` scope (`*` includes it). Returns a single-use, PKCE-bound authorization code to redeem at ' +
-          '`/oauth/token` exactly like one from the interactive endpoint.',
+          '`/oauth/token` exactly like one from the interactive endpoint. ' +
+          'The hosted portal calls it with the publishable key, the user token and the ' +
+          'deployment caller secret, naming the `request_id` the authorization endpoint ' +
+          'issued, and gets back the whole redirect instead of the code. A publishable key ' +
+          'without the caller secret is refused.',
         body: {
-          type: 'object',
-          required: ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method'],
-          properties: {
-            client_id: { type: 'string' },
-            redirect_uri: { type: 'string' },
-            code_challenge: { type: 'string' },
-            code_challenge_method: { type: 'string', enum: ['S256'] },
-            scope: { type: 'string' },
-            nonce: { type: 'string' },
-            organization_id: {
-              type: 'string',
-              nullable: true,
-              description:
-                'The organization an `mcp:account` grant acts for; the end-user must be a member ' +
-                'with a usable role. Omitted or `null`: personal, even when the session has an ' +
-                'active organization (`oid`); binding one is always explicit. Needs ' +
-                '`authConfig.organizationsEnabled` and a grant that includes `mcp:account`.',
+          anyOf: [
+            {
+              type: 'object',
+              required: ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method'],
+              properties: {
+                client_id: { type: 'string' },
+                redirect_uri: { type: 'string' },
+                code_challenge: { type: 'string' },
+                code_challenge_method: { type: 'string', enum: ['S256'] },
+                scope: { type: 'string' },
+                nonce: { type: 'string' },
+                organization_id: {
+                  type: 'string',
+                  nullable: true,
+                  description:
+                    'The organization an `mcp:account` grant acts for; the end-user must be a member ' +
+                    'with a usable role. Omitted or `null`: personal, even when the session has an ' +
+                    'active organization (`oid`); binding one is always explicit. Needs ' +
+                    '`authConfig.organizationsEnabled` and a grant that includes `mcp:account`.',
+                },
+              },
             },
-          },
+            PortalGrantBodySchema,
+          ],
         },
         response: {
           200: {
-            description: 'The authorization code.',
-            type: 'object',
-            properties: {
-              code: { type: 'string' },
-              expires_in: { type: 'integer' },
-              redirect_uri: {
-                type: 'string',
-                description:
-                  'The registered redirect URI the code is bound to. Send the browser here with ' +
-                  '`code` and the original `state`.',
+            anyOf: [
+              {
+                description: 'The authorization code.',
+                type: 'object',
+                properties: {
+                  code: { type: 'string' },
+                  expires_in: { type: 'integer' },
+                  redirect_uri: {
+                    type: 'string',
+                    description:
+                      'The registered redirect URI the code is bound to. Send the browser here with ' +
+                      '`code` and the original `state`.',
+                  },
+                },
+                required: ['code', 'expires_in', 'redirect_uri'],
               },
-            },
-            required: ['code', 'expires_in', 'redirect_uri'],
+              {
+                description: 'For the hosted portal: where to send the browser, code and `state` included.',
+                type: 'object',
+                properties: {
+                  redirect_to: { type: 'string' },
+                  expires_in: { type: 'integer' },
+                },
+                required: ['redirect_to', 'expires_in'],
+              },
+            ],
           },
           ...errs({
             ...AUTH_SERVER_GATE_404,
@@ -1434,12 +1511,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
               'Application without organizations. When the client and `redirect_uri` were valid and ' +
               'the refusal can go back to the client, `details` carries `oauth_error` ' +
               '(`invalid_request` or `invalid_scope`) and the registered `redirect_uri`; without ' +
-              '`details`, do not redirect the browser anywhere.',
+              '`details`, do not redirect the browser anywhere. AUTHORIZATION_REQUEST_UNKNOWN: the ' +
+              '`request_id` expired, was answered, or belongs to another Application.',
             401: 'API_KEY_MISSING / API_KEY_INVALID / USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION.',
             403:
               'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks `auth:write`; ' +
-              'SESSION_HANDOFF_FORBIDDEN: the secret key belongs to a different Application than ' +
-              '`:slug`, or the session is impersonated; ORGANIZATION_NOT_MEMBER / ' +
+              'SESSION_HANDOFF_FORBIDDEN: the key belongs to a different Application than ' +
+              '`:slug`, a publishable key came without the deployment caller secret, or the ' +
+              'session is impersonated; AUTHORIZATION_NEEDS_DEVICE_SESSION: the user token is a ' +
+              'hosted-portal session on an Application that binds sign-in to a device ' +
+              '(`details.client_name` names the client); ORGANIZATION_NOT_MEMBER / ' +
               'ORGANIZATION_ROLE_DISABLED: `organization_id` names an organization the end-user ' +
               'cannot act for.',
             429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
@@ -1448,7 +1529,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const { application, endUser, body, client, redirectUri, granted } =
+      const { application, endUser, body, client, redirectUri, granted, pending } =
         await checkedHandoffRequest(req);
 
       const organizationId = await handoffOrganization({
@@ -1457,6 +1538,11 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         granted,
         requested: body.organization_id,
       });
+
+      // Spent only once every check above has passed, so a refusal the user
+      // can correct (an organization they cannot act for) leaves the request
+      // standing, and spent atomically, so it answers once.
+      if (pending && !(await takeAuthorizationRequest(pending.id))) throw authorizationRequestUnknown();
 
       const code = await mcpOAuthService.createAuthCode({
         applicationId: application.id,
@@ -1489,9 +1575,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         applicationId: application.id,
         ip,
         userAgent,
-        metadata: { clientId: client.id, scope: granted, organizationId },
+        metadata: { clientId: client.id, scope: granted, organizationId, via: pending ? 'portal' : 'secret_key' },
       });
 
+      if (pending) {
+        return reply
+          .header('cache-control', 'no-store')
+          .send({ redirect_to: redirectWithAnswer(pending.request, { code }), expires_in: 60 });
+      }
       return reply.send({ code, expires_in: 60, redirect_uri: redirectUri });
     },
   );
@@ -1516,7 +1607,8 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     {
       bodyLimit: TOKEN_BODY_LIMIT,
       preHandler: [
-        requireApiKey,
+        requirePublishableOrSecretKey,
+        requirePortalCallerForPublishableKey,
         requireScope('auth:write'),
         requireUserSession,
         refuseWhileImpersonating('hand off a session'),
@@ -1528,18 +1620,24 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         description:
           'For a hosted authorize page: runs every check `POST /oauth/authorize/grant` runs, with ' +
           'the same credentials, and returns what the consent screen must show instead of a code. ' +
-          'Mints nothing and writes nothing. Call `/grant` only after the end-user allows.',
+          'Mints nothing and writes nothing. Call `/grant` only after the end-user allows. ' +
+          'The hosted portal names the `request_id` the authorization endpoint issued instead.',
         body: {
-          type: 'object',
-          required: ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method'],
-          properties: {
-            client_id: { type: 'string' },
-            redirect_uri: { type: 'string' },
-            code_challenge: { type: 'string' },
-            code_challenge_method: { type: 'string', enum: ['S256'] },
-            scope: { type: 'string' },
-            nonce: { type: 'string' },
-          },
+          anyOf: [
+            {
+              type: 'object',
+              required: ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method'],
+              properties: {
+                client_id: { type: 'string' },
+                redirect_uri: { type: 'string' },
+                code_challenge: { type: 'string' },
+                code_challenge_method: { type: 'string', enum: ['S256'] },
+                scope: { type: 'string' },
+                nonce: { type: 'string' },
+              },
+            },
+            PortalGrantBodySchema,
+          ],
         },
         response: {
           200: {
@@ -1563,30 +1661,44 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
                 properties: { email: { type: 'string' } },
                 required: ['email'],
               },
+              organizations: {
+                type: 'array',
+                description:
+                  'Organizations an `mcp:account` grant could act for instead of the personal ' +
+                  'account. Empty when there is no choice to offer.',
+                items: {
+                  type: 'object',
+                  properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } },
+                  required: ['id', 'name', 'role'],
+                },
+              },
             },
-            required: ['client_id', 'client_name', 'redirect_uri', 'scope', 'account'],
+            required: ['client_id', 'client_name', 'redirect_uri', 'scope', 'account', 'organizations'],
           },
           ...errs({
             ...AUTH_SERVER_GATE_404,
             400:
               'INVALID_GRANT_REQUEST: the same refusals as `/grant`, with `details` under the same ' +
-              'rule (present only once the client and `redirect_uri` are confirmed).',
+              'rule (present only once the client and `redirect_uri` are confirmed); ' +
+              'AUTHORIZATION_REQUEST_UNKNOWN: the `request_id` expired, was answered, or belongs ' +
+              'to another Application.',
             401: 'API_KEY_MISSING / API_KEY_INVALID / USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION.',
             403:
-              'API_KEY_SCOPE_INSUFFICIENT / SESSION_HANDOFF_FORBIDDEN, as for `/grant`.',
+              'API_KEY_SCOPE_INSUFFICIENT / SESSION_HANDOFF_FORBIDDEN / AUTHORIZATION_NEEDS_DEVICE_SESSION, as for `/grant`.',
             429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
           }),
         },
       },
     },
     async (req, reply) => {
-      const { endUser, client, redirectUri, granted } = await checkedHandoffRequest(req);
+      const { application, endUser, client, redirectUri, granted } = await checkedHandoffRequest(req);
       return reply.send({
         client_id: client.id,
         client_name: client.clientName,
         redirect_uri: redirectUri,
         scope: granted,
         account: { email: endUser.email },
+        organizations: await consentOrganizationChoices(application, endUser.id, granted),
       });
     },
   );

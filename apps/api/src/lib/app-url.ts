@@ -34,7 +34,7 @@
 import type { Application } from '@prisma/client';
 import { env } from '../config/env.js';
 import { RekeyError } from './error.js';
-import { hostedPortalUrl } from './portal-origins.js';
+import { hostedPortalUrl, sharedPortalUrl } from './portal-origins.js';
 
 /**
  * Parse a candidate as an absolute http(s) URL and normalise it to an origin
@@ -114,6 +114,41 @@ export function buildTokenUrl(base: string | null, path: string, token: string):
   return `${base}${path}?token=${encodeURIComponent(token)}`;
 }
 
+/** The pages an emailed auth token lands on, on the app and in the hosted portal. */
+const AUTH_LINK_PATHS = {
+  verify: { app: '/verify', portal: '/verify-email' },
+  reset: { app: '/reset', portal: '/reset-password-link' },
+  signIn: { app: '/sign-in/magic', portal: '/sign-in-link' },
+  emailChange: { app: '/email-change', portal: '/email-change-link' },
+  invitation: { app: '/accept-invitation', portal: '/invitation-link' },
+} as const;
+
+export type AuthLinkPage = keyof typeof AUTH_LINK_PATHS;
+
+/**
+ * The page an emailed auth token links to when the caller names none: the
+ * app's own page on its resolved base URL, else the matching page of its
+ * hosted portal while the portal is on, else null. Pass the result to
+ * `buildTokenUrl(page, '', token)`.
+ *
+ * @example
+ * defaultAuthLinkPage({ authConfig: {}, slug: 'acme', hostedPortalEnabled: true }, 'verify');
+ * // 'https://portal.rekey.dev/acme/verify-email'
+ */
+export function defaultAuthLinkPage(
+  application: Pick<
+    Application,
+    'authConfig' | 'slug' | 'hostedPortalEnabled' | 'portalDomain' | 'portalDomainVerifiedAt'
+  >,
+  page: AuthLinkPage,
+  explicitBase?: string | null,
+): string | null {
+  const base = resolveAppUrl(application, explicitBase);
+  if (base !== null) return `${base}${AUTH_LINK_PATHS[page].app}`;
+  const portal = hostedPortalUrl(application);
+  return portal === null ? null : `${portal}${AUTH_LINK_PATHS[page].portal}`;
+}
+
 /**
  * The origins an Application has declared as its own: `authConfig.appUrl` plus
  * every `authConfig.redirectUrls` entry, each reduced to its origin so
@@ -188,7 +223,7 @@ function isOwnPortalUrl(application: TokenUrlApplication, url: string, candidate
   }
 
   if (!application.slug) return false;
-  const portal = hostedPortalUrl({ slug: application.slug, hostedPortalEnabled: true });
+  const portal = sharedPortalUrl(application.slug);
   if (portal === null) return false;
   const root = new URL(portal);
   if (candidate.origin !== root.origin) return false;

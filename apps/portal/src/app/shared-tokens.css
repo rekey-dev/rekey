@@ -1,0 +1,12 @@
+/* Values the portal pages and the checkout page must agree on. Each group maps
+   them onto its own names (--color-* in (portal)/globals.css, --ck-* in
+   (checkout)/checkout.css). Muted text is 7.5:1 on #fafafa and 7.8:1 on white,
+   and is the colour `readableSurface` checks operator surfaces against. */
+:root {
+  --rk-fg: #171717;
+  --rk-muted-fg: #525252;
+  --rk-border: #e5e5e5;
+  --rk-radius: 8px;
+  --rk-focus-width: 2px;
+  --rk-focus-offset: 2px;
+}

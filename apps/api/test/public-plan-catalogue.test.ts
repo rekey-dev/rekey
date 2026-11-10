@@ -81,6 +81,20 @@ describe('the plan catalogue', () => {
       }
     });
 
+    it("names the Application's free default plan at the top of the page, and null when there is none", async () => {
+      const page = async () =>
+        (
+          await app.inject({ method: 'GET', url: '/api/v1/billing/plans', headers: { authorization: `Bearer ${w.publishableKey}` } })
+        ).json().data as { defaultPlanSlug: unknown };
+      expect((await page()).defaultPlanSlug).toBeNull();
+      const row = await prisma.application.findUniqueOrThrow({ where: { id: w.applicationId } });
+      await prisma.application.update({
+        where: { id: w.applicationId },
+        data: { billingConfig: { ...(row.billingConfig as object), defaultPlanSlug: 'free' } as never },
+      });
+      expect((await page()).defaultPlanSlug).toBe('free');
+    });
+
     it('still carries what a pricing page shows', async () => {
       await w.createPlan({ slug: 'pack', name: '100 credits', price: { currency: 'USD', amount: 1000 }, kind: 'CREDIT', creditsAmount: 100 });
       await w.createPlan({ slug: 'free', name: 'Free', });

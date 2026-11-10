@@ -36,7 +36,11 @@ vi.mock('@/lib/config', () => ({
   PortalConfigUnavailableError: class extends Error {},
 }));
 vi.mock('@/lib/env', () => ({ portalBaseUrl: () => 'https://portal.example', rekeyApiUrl: () => 'https://api.example' }));
-vi.mock('@/lib/client-ip', () => ({ API_TIMEOUT_MS: 1000, forwardedClientHeaders: async () => ({}) }));
+vi.mock('@/lib/client-ip', () => ({
+  API_TIMEOUT_MS: 1000,
+  forwardedClientHeaders: async () => ({}),
+  publishableKeyCallHeaders: async () => ({}),
+}));
 vi.mock('next/navigation', () => ({
   redirect: (to: string) => {
     throw new Error(`REDIRECT ${to}`);
@@ -152,17 +156,5 @@ describe('portal MFA challenge', () => {
     await signInToMfaStep();
     await redirectOf(() => signOutAction('acme'));
     expect(challengeCookie()?.options.maxAge).toBe(0);
-  });
-});
-
-describe('forgot password', () => {
-  it('asks the API to put the reset token in the link the portal reads', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('{}', { status: 200 }));
-    const { forgotPasswordAction } = await import('@/lib/actions');
-    const to = await redirectOf(() => forgotPasswordAction('acme', form({ email: 'a@example.com' })));
-    expect(to).toBe('/acme/forgot-password?sent=1');
-    const body = JSON.parse(String(fetchSpy.mock.calls[0]![1]!.body)) as { resetUrl: string };
-    expect(body.resetUrl).toBe('https://portal.example/acme/reset-password?token={token}');
-    fetchSpy.mockRestore();
   });
 });

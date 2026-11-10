@@ -331,7 +331,7 @@ timestamps) except `device.limit_reached`, which has no row to describe.
 | `device.blocked` | An operator blocked the device. Sign-in from that fingerprint is refused until it is unblocked; its sessions were revoked. |
 | `device.unblocked` | An operator lifted the block. The device is RELEASED and takes a slot again on its next sign-in, subject to the limit. |
 | `device.limit_reached` | A new device was refused because the end-user is at `max_devices`. `data.devices` lists the active devices filling the cap, so you can prompt the user to release one. |
-| `license.deactivated` | A machine gave back its license seat — the customer's software called `POST /licenses/deactivate`, or an operator released the activation (`data.releasedBy`). `data.license` carries id, endUserId and kind; `data.machineFingerprint` names the machine. |
+| `license.deactivated` | A machine gave back its license seat: the customer's software called `POST /licenses/deactivate`, the licence holder removed the machine from their account, or an operator released the activation (`data.releasedBy`: `client`, `end_user` or `operator`). `data.license` carries id, endUserId and kind; `data.machineFingerprint` names the machine. |
 
 ### Support mode
 

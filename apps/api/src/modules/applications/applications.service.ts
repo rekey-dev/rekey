@@ -18,7 +18,9 @@ import { cachedSwr } from '../../lib/swr-cache.js';
 import { dashboardBusy, dashboardSlots } from '../../lib/compute-semaphore.js';
 import { withReadOnlyBudget } from '../../lib/read-budget.js';
 import { RekeyError } from '../../lib/error.js';
-import { resolveAppUrl } from '../../lib/app-url.js';
+import { defaultAuthLinkPage } from '../../lib/app-url.js';
+import { refreshCorsOrigins } from '../../lib/cors-origins.js';
+import { assertPortalDomainClaimable, normalisePortalDomain } from './portal-domain.js';
 import { emailService, lockEmailCoupling } from '../email/email.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { generatePublicKey } from '../../lib/keys.js';
@@ -537,7 +539,7 @@ export const applicationsService = {
       if (clearAppUrl) delete merged.appUrl;
       if (clearHostedAuthorize) delete merged.hostedAuthorizeUrl;
       const next = AuthConfigSchema.parse(merged);
-      if (strandsNewSignUps(next) && !strandsNewSignUps(current)) {
+      if (strandsNewSignUps(next, app) && !strandsNewSignUps(current, app)) {
         throw verificationLinkUnavailable();
       }
       return tx.application.update({
@@ -609,33 +611,56 @@ export const applicationsService = {
   },
 
   /**
-   * Patch the hosted-portal config (Portal V2): the opt-in master switch and
-   * branding. Custom-domain binding + DNS verification is a separate (phase-2)
-   * flow, so it's not patched here. Toggling `enabled` auto-allows the hosted
-   * portal origin for this app's publishable key (see lib/portal-origins).
+   * Patch the hosted-portal config (Portal V2): the opt-in master switch,
+   * branding and the custom domain CLAIM. Verifying the domain is
+   * `verifyPortalDomain` (./portal-domain.ts). Toggling `enabled` auto-allows
+   * the hosted portal origin for this app's publishable key (see
+   * lib/portal-origins).
    */
   async updatePortalConfig(args: {
     applicationId: string;
     enabled?: boolean | undefined;
     branding?: Record<string, unknown> | undefined;
-    /** Custom portal domain, or null to clear it. Setting/changing it resets verification. */
+    /** Custom portal domain, or '' / null to clear it. Setting/changing it resets verification. */
     portalDomain?: string | null | undefined;
   }): Promise<Application> {
-    const app = await this.get(args.applicationId); // 404s on a bad id
-    // Changing the domain invalidates any prior verification.
-    const domainChanged =
-      args.portalDomain !== undefined && args.portalDomain !== app.portalDomain;
-    return prisma.application.update({
-      where: { id: args.applicationId },
-      data: {
-        ...(args.enabled !== undefined && { hostedPortalEnabled: args.enabled }),
-        ...(args.branding !== undefined && { portalBranding: args.branding as object }),
-        ...(args.portalDomain !== undefined && {
-          portalDomain: args.portalDomain || null,
-        }),
-        ...(domainChanged && { portalDomainVerifiedAt: null }),
-      },
+    await this.get(args.applicationId); // 404s on a bad id
+    const portalDomain =
+      args.portalDomain === undefined ? undefined : args.portalDomain ? normalisePortalDomain(args.portalDomain) : null;
+    const { updated, domainChanged } = await prisma.$transaction(async (tx) => {
+      // The auth-config update takes the same lock, so turning verification on
+      // and the portal off at once cannot both pass against the old row.
+      await lockEmailCoupling(tx, args.applicationId);
+      const app = await tx.application.findUniqueOrThrow({ where: { id: args.applicationId } });
+      if (args.enabled === false) {
+        const config = AuthConfigSchema.parse(app.authConfig);
+        const portalOff = { ...app, hostedPortalEnabled: false };
+        if (strandsNewSignUps(config, portalOff) && !strandsNewSignUps(config, app)) {
+          throw verificationLinkUnavailable('portal_off');
+        }
+      }
+      const domainChanged = portalDomain !== undefined && portalDomain !== app.portalDomain;
+      if (domainChanged && portalDomain !== null) {
+        await assertPortalDomainClaimable(args.applicationId, portalDomain);
+      }
+      const updated = await tx.application.update({
+        where: { id: args.applicationId },
+        data: {
+          ...(args.enabled !== undefined && { hostedPortalEnabled: args.enabled }),
+          ...(args.branding !== undefined && { portalBranding: args.branding as object }),
+          ...(domainChanged && {
+            portalDomain,
+            portalDomainVerifiedAt: null,
+            portalDomainCheckedAt: null,
+            portalDomainCheckFailures: 0,
+            portalDomainLapsedAt: null,
+          }),
+        },
+      });
+      return { updated, domainChanged };
     });
+    if (domainChanged || args.enabled !== undefined) await refreshCorsOrigins();
+    return updated;
   },
 
   /**
@@ -1095,16 +1120,20 @@ export interface ApplicationStats {
 
 /**
  * True when the config requires a verified email but no verification link can
- * be built. Sign-up then sends nothing and the gate refuses every new user, so
- * the account is unreachable (#357). A caller-supplied `verifyUrl` cannot save
- * it either: `assertAllowedTokenUrl` needs the same appUrl or redirect URLs
- * that make a link resolvable here. Its other allowance, the app's own hosted
- * portal, has no verification page.
+ * be built, neither on the app's own URL nor in its hosted portal. Sign-up then
+ * sends nothing and the gate refuses every new user, so the account is
+ * unreachable (#357).
  */
-function strandsNewSignUps(config: AuthConfig): boolean {
+function strandsNewSignUps(
+  config: AuthConfig,
+  app: Pick<Application, 'slug' | 'hostedPortalEnabled' | 'portalDomain' | 'portalDomainVerifiedAt'>,
+): boolean {
   return (
     config.requireEmailVerification &&
-    resolveAppUrl({ authConfig: config as Prisma.JsonObject }) === null
+    defaultAuthLinkPage(
+      { ...app, authConfig: config as Prisma.JsonObject },
+      'verify',
+    ) === null
   );
 }
 
@@ -1114,16 +1143,32 @@ function strandsNewSignUps(config: AuthConfig): boolean {
  * is refused, so an Application already in that state can still be edited
  * and repaired.
  */
-function verificationLinkUnavailable(): RekeyError {
+function verificationLinkUnavailable(change: 'require' | 'portal_off' = 'require'): RekeyError {
+  const setAppUrl =
+    'set the Application URL or add an http(s) redirect URL (Panel → Application → Authentication → ' +
+    'Methods, or `appUrl` / `redirectUrls` in an auth-config update)';
+  if (change === 'portal_off') {
+    return new RekeyError({
+      statusCode: 409,
+      code: 'EMAIL_VERIFICATION_URL_REQUIRED',
+      message:
+        'The hosted portal cannot be turned off yet: this Application requires a verified email and the ' +
+        "portal's verify-email page is the only place its verification link can go, so new users could " +
+        'never confirm their address.',
+      fix: `First ${setAppUrl}, then turn the portal off. Or stop requiring a verified email first.`,
+    });
+  }
   return new RekeyError({
     statusCode: 409,
     code: 'EMAIL_VERIFICATION_URL_REQUIRED',
     message:
-      'A verified email cannot be required yet: this Application has no Application URL or http(s) ' +
-      'redirect URL, so no verification link can be built and new users could never confirm their address.',
+      'A verified email cannot be required yet: this Application has no Application URL, no http(s) ' +
+      'redirect URL and no hosted portal in use, so no verification link can be built and new users could ' +
+      'never confirm their address.',
     fix:
-      'Set the Application URL or add an http(s) redirect URL (Panel → Application → Authentication → Methods, ' +
-      'or `appUrl` / `redirectUrls` in the same auth-config update), then require a verified email. ' +
-      'Setting DEFAULT_APP_URL on the API also works, for every Application on this deployment.',
+      `Either ${setAppUrl}, or turn on the hosted portal (Panel → Application → Billing → Portal) on a ` +
+      "deployment that sets PUBLIC_PORTAL_URL, so the link goes to the portal's verify-email page. Then " +
+      'require a verified email. Setting DEFAULT_APP_URL on the API also works, for every Application on ' +
+      'this deployment.',
   });
 }

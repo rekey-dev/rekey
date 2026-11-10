@@ -132,6 +132,10 @@ services:
       # for portal password-reset links. Same origin as the portal's
       # PORTAL_BASE_URL below, or portal resets fail with AUTH_URL_NOT_ALLOWED.
       PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-http://localhost:3050}
+      # Optional. The same value as the panel's and portal's below. Needed for
+      # the portal to sign in customers of an Application with
+      # deviceBinding: required. openssl rand -hex 32
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
       # Who can create operator (admin) accounts: open | invite | closed.
       #
       # `open` is kept as the default because first-boot has to be able to
@@ -260,6 +264,9 @@ services:
       # X-Forwarded-For it receives was written by the client. Set it to the
       # number of proxies in front if you add one. docs/rate-limits.md.
       PORTAL_TRUSTED_PROXY_HOPS: ${PORTAL_TRUSTED_PROXY_HOPS:-}
+      # Optional. Sent to the API as X-Rekey-Caller-Secret; must match the
+      # api service's value.
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
     networks:
       rekey-edge:
         ipv4_address: ${REKEY_PORTAL_EDGE_IP:-10.203.53.11}

@@ -865,12 +865,11 @@ Stripe does not make every plan read `false`, though it is the reason when it
 is the only provider. The readiness costs one extra query per page, whatever
 the number of plans on it.
 
-`ready` describes checkout only. A free default plan (`billingConfig.defaultPlanSlug`) reads `ready: false` when no provider is connected, because nothing can check out on it, yet it still applies to every signed-in user. Do not filter your free tier out on `ready`; filter paid plans only.
+`ready` describes checkout only. A free default plan (`billingConfig.defaultPlanSlug`) reads `ready: false` when no provider is connected, because nothing can check out on it, yet it still applies to every signed-in user. Do not filter your free tier out on `ready`; filter paid plans only. The page names that plan as `defaultPlanSlug` (null when there is none), the one `POST /subscribe` activates, so offer a no-checkout start on it and on no other free plan.
 
 ```ts
-const { items } = await rekey.billing.getPlans();
-const freeSlug = 'free'; // your billingConfig.defaultPlanSlug
-const shown = items.filter((p) => p.slug === freeSlug || p.checkout.ready);
+const { items, defaultPlanSlug } = await rekey.billing.getPlans();
+const shown = items.filter((p) => p.slug === defaultPlanSlug || p.checkout.ready);
 ```
 
 ### Checking one feature
@@ -922,21 +921,20 @@ If the user already started checkout for the same plan and bailed, repeated call
 
 ```ts
 // Pricing page (server-side render)
-const FREE_PLAN_SLUG = 'free'; // your billingConfig.defaultPlanSlug
-
 export async function pricingPage(country: string) {
-  const { items: plans, page } = await rekey.billing.getPlans(undefined, { country });
+  const { items: plans, page, defaultPlanSlug } = await rekey.billing.getPlans(undefined, { country });
   // → {
   //     items: [{ slug: 'pro_monthly', interval: 'MONTH', isFree: false,
   //               price: { currency: 'USD', amount: 999, formatted: '$9.99', reason: 'default', ... }, ... }],
-  //     page:  { total: 4, limit: 50, offset: 0, hasMore: false }
+  //     page:  { total: 4, limit: 50, offset: 0, hasMore: false },
+  //     defaultPlanSlug: 'free',
   //   }
   // Every list endpoint returns this envelope. `page.hasMore` is how you learn
   // the response was a window and not the whole catalogue: pass
   // `{ offset: page.offset + page.limit }` for the next one.
   // Hide plans checkout would refuse, but never the free tier: with no provider
   // connected it reads ready: false and still applies to every signed-in user.
-  const shown = plans.filter((p) => p.slug === FREE_PLAN_SLUG || p.checkout.ready);
+  const shown = plans.filter((p) => p.slug === defaultPlanSlug || p.checkout.ready);
   return { shown, hasMore: page.hasMore };
 }
 ```

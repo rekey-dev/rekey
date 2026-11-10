@@ -1,6 +1,6 @@
 import type { Application } from '@prisma/client';
 import type { OAuthProviderSummaryDto } from '@rekey.dev/shared-types';
-import { usableProvider } from './oauth.service.js';
+import { offeredInPortal, usableProvider } from './oauth.service.js';
 import { listOAuthProviderNames, oauthProviderDisplayName } from './providers/index.js';
 
 /**
@@ -14,11 +14,11 @@ import { listOAuthProviderNames, oauthProviderDisplayName } from './providers/in
  *
  * @example
  * ```ts
- * listEnabledOAuthProviders(application); // [{ id: 'google', name: 'Google' }]
+ * listEnabledOAuthProviders(application); // [{ id: 'google', name: 'Google', hostedPortal: false }]
  * ```
  */
 export function listEnabledOAuthProviders(application: Application): OAuthProviderSummaryDto[] {
   return listOAuthProviderNames()
     .filter((name) => usableProvider(application, name))
-    .map((name) => ({ id: name, name: oauthProviderDisplayName(name) }));
+    .map((name) => ({ id: name, name: oauthProviderDisplayName(name), hostedPortal: offeredInPortal(application, name) }));
 }

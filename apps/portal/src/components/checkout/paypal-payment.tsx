@@ -26,7 +26,7 @@ type Phase =
   | 'loading'
   | 'ready'
   | 'processing'
-  | 'cancelled'
+  | 'canceled'
   | 'failed'
   | 'unconfirmed'
   | 'script_failed'
@@ -54,7 +54,7 @@ const LOAD_TIMEOUT_MS = 10_000;
 export const PAYMENT_MESSAGES: Partial<Record<Phase, string>> = {
   loading: 'Loading secure payment…',
   processing: 'Processing…',
-  cancelled: 'Payment not completed. You have not been charged.',
+  canceled: 'Payment not completed. You have not been charged.',
   // PayPal's onError does not say whether an approval went through, so this never says nothing was charged.
   failed: 'PayPal could not complete this payment. If you approved it in PayPal, check your PayPal activity before paying again. Otherwise try again, or continue on PayPal.',
   script_failed: 'The secure payment form did not load.',
@@ -117,7 +117,7 @@ export function PaypalPayment({
             if (next === 'unconfirmed') return setPhase('unconfirmed');
             await poll();
           },
-          onCancel: () => setPhase('cancelled'),
+          onCancel: () => setPhase('canceled'),
           onError: () => setPhase('failed'),
         }),
       );

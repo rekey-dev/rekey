@@ -71,7 +71,7 @@ vi.mock('@/lib/config', async (importOriginal) => {
   };
 });
 
-vi.mock('@/lib/env', () => ({ rekeyApiUrl: () => 'https://api.test' }));
+vi.mock('@/lib/env', () => ({ rekeyApiUrl: () => 'https://api.test', portalBaseUrl: () => 'https://portal.test' }));
 
 let refreshCalls = 0;
 let replays = 0;

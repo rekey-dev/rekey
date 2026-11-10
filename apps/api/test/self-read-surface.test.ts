@@ -525,6 +525,9 @@ describe("the signed-in user's read surface", () => {
      */
     const ROUTES: Record<string, 'read' | 'write'> = {
       'POST /api/v1/auth/change-password': 'write',
+      'POST /api/v1/auth/email-code': 'write',
+      'POST /api/v1/auth/email-change/confirm': 'write',
+      'POST /api/v1/auth/set-password': 'write',
       'POST /api/v1/auth/send-verification': 'write',
       'POST /api/v1/auth/passkey/register/start': 'write',
       'POST /api/v1/auth/passkey/register/complete': 'write',
@@ -537,6 +540,7 @@ describe("the signed-in user's read surface", () => {
       'POST /api/v1/auth/mfa/setup': 'write',
       'POST /api/v1/auth/mfa/setup-confirm': 'write',
       'POST /api/v1/auth/mfa/challenge': 'write',
+      'POST /api/v1/auth/mfa/backup-codes': 'write',
       'POST /api/v1/auth/mfa/disable': 'write',
       'GET /api/v1/auth/oauth/identities': 'read',
       'POST /api/v1/auth/oauth/{provider}/link/start': 'write',
@@ -548,7 +552,9 @@ describe("the signed-in user's read surface", () => {
       'GET /api/v1/users/me/organizations/{id}': 'read',
       'PATCH /api/v1/users/me/organizations/{id}': 'write',
       'GET /api/v1/users/me/organizations/{id}/members': 'read',
+      'GET /api/v1/users/me/organizations/{id}/invitations': 'read',
       'POST /api/v1/users/me/organizations/{id}/invitations': 'write',
+      'POST /api/v1/users/me/organizations/{id}/invitations/{invId}/resend': 'write',
       'POST /api/v1/users/me/organizations/{id}/invitations/{invId}/revoke': 'write',
       'PATCH /api/v1/users/me/organizations/{id}/members/{euid}': 'write',
       'DELETE /api/v1/users/me/organizations/{id}/members/{euid}': 'write',
@@ -597,7 +603,7 @@ describe("the signed-in user's read surface", () => {
       });
       // Reads first: some writes below (sign-out-everywhere) end every session.
       const reads = routes.filter((r) => r.kind === 'read');
-      expect(reads).toHaveLength(8);
+      expect(reads).toHaveLength(9);
       for (const { route, method, path } of reads) {
         for (const key of [readKey, writeKey]) {
           const res = await asUser(method, concrete(path, true), u.accessToken, key);

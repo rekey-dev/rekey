@@ -17,6 +17,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
+import { portalDomainRecord, verifyPortalDomain } from '../applications/portal-domain.js';
 import {
   APPLICATION_LIST_SORTS,
   APPLICATION_LIST_STATUSES,
@@ -117,7 +118,7 @@ import {
   revokeSessionForEndUser,
 } from '../../lib/refresh-tokens.js';
 import { authService, deliverVerificationEmail } from '../auth/auth.service.js';
-import { authRateLimit } from '../../lib/rate-limit.js';
+import { authRateLimit, globalRateLimitMax } from '../../lib/rate-limit.js';
 import { positiveBoundedInt } from '../../lib/bounded-int.js';
 import { ok, okPage, okArray, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
@@ -1036,8 +1037,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                         'of this Application is this plus `/<slug>`, and only while ' +
                         '`hostedPortalEnabled` is true.',
                     },
+                    portalDomainTxtRecord: {
+                      type: 'object',
+                      nullable: true,
+                      description:
+                        'The DNS TXT record that proves control of `portalDomain`, or null when none is set. ' +
+                        'Publish it, then POST `/portal/domain/verify`.',
+                      properties: { name: { type: 'string' }, value: { type: 'string' } },
+                      required: ['name', 'value'],
+                    },
                   },
-                  required: ['portalBaseUrl'],
+                  required: ['portalBaseUrl', 'portalDomainTxtRecord'],
                 },
               ],
             },
@@ -1059,6 +1069,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...withBillingDefaults(application),
         mcpUrl: mcpIssuer(application.slug),
         portalBaseUrl: portalBaseOrigin(),
+        portalDomainTxtRecord: application.portalDomain ? portalDomainRecord(id, application.portalDomain) : null,
         // The capabilities the panel renders from. Computed from what the gate
         // already resolved, so it cannot disagree with what the gate enforces.
         access: { level: access.level, scopes: [...access.scopes].sort() },
@@ -1677,7 +1688,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             409:
               'EMAIL_EVENT_REQUIRED_BY_AUTH_CONFIG: the change needs an email that is switched ' +
               'off; or EMAIL_VERIFICATION_URL_REQUIRED: a verified email would be required with ' +
-              'no Application URL or http(s) redirect URL to build the verification link on.',
+              'no Application URL, http(s) redirect URL or hosted portal to build the verification link on.',
           }),
         },
       },
@@ -3736,6 +3747,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             redirectUri: { type: 'string', format: 'uri' },
             scopes: { type: 'array', items: { type: 'string' } },
             issuerUrl: { type: 'string', format: 'uri' },
+            hostedPortal: {
+              type: 'boolean',
+              default: false,
+              description:
+                "Offer this provider in the Application's hosted portal. Register the portal's sign-in page " +
+                '(`<PUBLIC_PORTAL_URL>/<slug>/oauth/callback`) in the provider console first. Stored in `oauthConfig`.',
+            },
           },
         },
         response: {
@@ -3745,8 +3763,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               properties: {
                 provider: { type: 'string', enum: ['google', 'github', 'microsoft', 'discord', 'gitlab', 'slack', 'oidc'] },
                 configured: { type: 'boolean', enum: [true] },
+                hostedPortal: { type: 'boolean' },
               },
-              required: ['provider', 'configured'],
+              required: ['provider', 'configured', 'hostedPortal'],
             },
             'Confirmation, clientSecret is never echoed back.',
           ),
@@ -3774,6 +3793,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           redirectUri: z.string().url(),
           scopes: z.array(z.string()).optional(),
           issuerUrl: z.string().url().optional(),
+          hostedPortal: z.boolean().optional(),
         })
         .parse(req.body);
       // OIDC requires an issuerUrl; everything else ignores it.
@@ -3785,7 +3805,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       if (body.issuerUrl !== undefined && isPlainHttp(body.issuerUrl) && plainHttpRefused()) {
         throw urlNotHttps('The issuer URL');
       }
-      await oauthService.setProviderConfig({
+      const hostedPortal = await oauthService.setProviderConfig({
         applicationId: id,
         providerName: provider,
         public: {
@@ -3794,9 +3814,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ...(body.scopes !== undefined && { scopes: body.scopes }),
           ...(body.issuerUrl !== undefined && { issuerUrl: body.issuerUrl }),
         },
+        ...(body.hostedPortal !== undefined && { hostedPortal: body.hostedPortal }),
         clientSecret: body.clientSecret,
       });
-      return { success: true, data: { provider, configured: true } };
+      return { success: true, data: { provider, configured: true, hostedPortal } };
     },
   );
 
@@ -7003,13 +7024,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   const PortalConfigBody = z.object({
     enabled: z.boolean().optional(),
     branding: z.record(z.unknown()).optional(),
-    // Custom domain (hostname only, no scheme/path). Empty string clears it.
-    portalDomain: z
-      .union([
-        z.literal(''),
-        z.string().max(253).regex(/^[a-z0-9.-]+\.[a-z]{2,}$/i, 'must be a bare hostname like billing.yourapp.com'),
-      ])
-      .optional(),
+    // Custom domain, normalised and refused by `normalisePortalDomain`. Empty string clears it.
+    portalDomain: z.string().max(300).optional(),
   }).strict();
   app.patch(
     '/:id/portal',
@@ -7046,9 +7062,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             'The Application, patched portal configuration.',
           ),
           ...errs({
-            400: 'VALIDATION_ERROR: `portalDomain` is not a bare hostname, or a field failed schema validation.',
+            400:
+              'PORTAL_DOMAIN_INVALID: `portalDomain` is not a bare hostname. PORTAL_DOMAIN_RESERVED: it is ' +
+              "one of this deployment's own hosts. VALIDATION_ERROR: a field failed schema validation.",
             ...APP_WRITE_ERRORS,
-            409: 'PORTAL_DOMAIN_TAKEN: another Application already uses that portal domain.',
+            409:
+              'PORTAL_DOMAIN_TAKEN: another Application has already verified that portal domain; or ' +
+              "EMAIL_VERIFICATION_URL_REQUIRED: turning the portal off would leave a required email verification " +
+              "with no link, because the portal's verify-email page is the only one this Application has.",
           }),
         },
       },
@@ -7057,25 +7078,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = PortalConfigBody.parse(req.body ?? {});
-      let updated;
-      try {
-        updated = await applicationsService.updatePortalConfig({
-          applicationId: id,
-          ...(body.enabled !== undefined && { enabled: body.enabled }),
-          ...(body.branding !== undefined && { branding: body.branding }),
-          ...(body.portalDomain !== undefined && { portalDomain: body.portalDomain }),
-        });
-      } catch (e) {
-        if ((e as { code?: string }).code === 'P2002') {
-          throw new RekeyError({
-            statusCode: 409,
-            code: 'PORTAL_DOMAIN_TAKEN',
-            message: 'That portal domain is already in use by another application.',
-            fix: 'Pick a different hostname.',
-          });
-        }
-        throw e;
-      }
+      const updated = await applicationsService.updatePortalConfig({
+        applicationId: id,
+        ...(body.enabled !== undefined && { enabled: body.enabled }),
+        ...(body.branding !== undefined && { branding: body.branding }),
+        ...(body.portalDomain !== undefined && { portalDomain: body.portalDomain }),
+      });
       void recordSecurityEvent({
         type: 'app.portal_config_updated',
         actorType: 'operator',
@@ -7093,6 +7101,62 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           portalDomainVerifiedAt: updated.portalDomainVerifiedAt,
           portalBranding: updated.portalBranding,
         },
+      };
+    },
+  );
+
+  app.post(
+    '/:id/portal/domain/verify',
+    {
+      config: {
+        access: { scope: 'auth-config:write' },
+        // Each attempt is a DNS lookup on our resolver, driven by the caller.
+        rateLimit: {
+          max: globalRateLimitMax(10),
+          timeWindow: '1 minute',
+          keyGenerator: (req) => `pdverify:${String((req.params as { id?: unknown }).id).slice(0, 64)}`,
+        },
+      },
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'Verify the custom portal domain by its DNS TXT record',
+        description:
+          'Looks up the TXT record `_rekey-portal.<portalDomain>` and, when it carries this ' +
+          "Application's verification value (`portalDomainTxtRecord` on GET), marks the domain verified. " +
+          'Only a verified domain is honoured. Same access as the PATCH that sets the domain.',
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                portalDomain: { type: 'string' },
+                portalDomainVerifiedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['portalDomain', 'portalDomainVerifiedAt'],
+            },
+            'The domain is verified.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            409:
+              'PORTAL_DOMAIN_NOT_SET: no custom domain to verify. PORTAL_DOMAIN_TAKEN: another Application ' +
+              'has verified it. PORTAL_DOMAIN_CHANGED: the domain changed during the lookup.',
+            422: 'PORTAL_DOMAIN_NOT_VERIFIED: no TXT record with the expected value; the message names what was found.',
+            429: 'RATE_LIMITED: too many attempts. Honour the Retry-After header.',
+            503: 'PORTAL_DOMAIN_DNS_UNAVAILABLE: the DNS lookup did not complete.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const verified = await verifyPortalDomain(id, { actorId: req.tenantUser!.id, ...requestContext(req) });
+      return {
+        success: true,
+        data: { portalDomain: verified.portalDomain, portalDomainVerifiedAt: verified.portalDomainVerifiedAt },
       };
     },
   );

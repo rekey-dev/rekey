@@ -24,6 +24,7 @@ import { deliverVerificationEmail } from '../auth/auth.service.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from './providers/index.js';
+import { redirectUriFor } from './portal-return.js';
 import type { OAuthProviderConfig } from './providers/index.js';
 import {
   issueSessionOrMfaChallenge,
@@ -45,6 +46,8 @@ export interface OAuthPublicConfigEntry {
   scopes?: string[];
   /** Required for the generic `oidc` provider; ignored by static providers. */
   issuerUrl?: string;
+  /** The operator registered the hosted portal's sign-in page with the provider and offers it there. */
+  hostedPortal?: boolean;
 }
 
 /**
@@ -56,6 +59,19 @@ export type OAuthSignInResult = SignInOutcome;
 function publicConfig(application: Application, providerName: string): OAuthPublicConfigEntry | null {
   const cfg = (application.oauthConfig as unknown as Record<string, OAuthPublicConfigEntry | undefined>)[providerName];
   return cfg ?? null;
+}
+
+/** Whether the operator offers `providerName` in this Application's hosted portal. */
+export function offeredInPortal(application: Application, providerName: string): boolean {
+  return publicConfig(application, providerName)?.hostedPortal === true;
+}
+
+function redirectUriFrom(application: Application, providerName: string, configured: string, requested?: string): string {
+  return redirectUriFor(
+    application,
+    { name: providerName, configured, offeredInPortal: offeredInPortal(application, providerName) },
+    requested,
+  );
 }
 
 function decryptedSecrets(application: Application): Record<string, { clientSecret: string }> {
@@ -139,6 +155,8 @@ export const oauthService = {
     application: Application;
     providerName: string;
     state: string;
+    /** The hosted portal's sign-in page, in place of the configured redirect URI. */
+    redirectUri?: string;
   }): Promise<string> {
     const provider = getOAuthProvider(args.providerName);
     if (!provider) {
@@ -152,7 +170,7 @@ export const oauthService = {
     const cfg = buildProviderConfig(args.application, args.providerName);
     const scopes = publicConfig(args.application, args.providerName)?.scopes;
     return buildAuthUrlVia(provider, {
-      config: cfg,
+      config: { ...cfg, redirectUri: redirectUriFrom(args.application, args.providerName, cfg.redirectUri, args.redirectUri) },
       state: args.state,
       ...(scopes !== undefined && { scopes }),
     });
@@ -170,6 +188,8 @@ export const oauthService = {
     application: Application;
     providerName: string;
     code: string;
+    /** The redirect URI the sign-in was started with, when it was not the configured one. */
+    redirectUri?: string;
     device?: DeviceContext;
     /** Calling key kind, a `secret_only` app refuses creation via pub key. */
     authKind?: AuthKind;
@@ -184,7 +204,10 @@ export const oauthService = {
       });
     }
     const cfg = buildProviderConfig(args.application, args.providerName);
-    const identity = await provider.exchange({ config: cfg, code: args.code });
+    const identity = await provider.exchange({
+      config: { ...cfg, redirectUri: redirectUriFrom(args.application, args.providerName, cfg.redirectUri, args.redirectUri) },
+      code: args.code,
+    });
 
     // 1. Existing identity? Sign that user in.
     const existing = await prisma.oAuthIdentity.findUnique({
@@ -593,15 +616,19 @@ export const oauthService = {
   async setProviderConfig(args: {
     applicationId: string;
     providerName: string;
-    public: OAuthPublicConfigEntry;
+    public: Omit<OAuthPublicConfigEntry, 'hostedPortal'>;
+    /** Omitted keeps what is stored, so a secret rotation does not turn the portal offer off. */
+    hostedPortal?: boolean;
     clientSecret: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const application = await prisma.application.findUniqueOrThrow({
       where: { id: args.applicationId },
     });
+    const stored = (application.oauthConfig as unknown as Record<string, OAuthPublicConfigEntry>) ?? {};
+    const hostedPortal = args.hostedPortal ?? stored[args.providerName]?.hostedPortal ?? false;
     const newOauthConfig: Record<string, OAuthPublicConfigEntry> = {
-      ...((application.oauthConfig as unknown as Record<string, OAuthPublicConfigEntry>) ?? {}),
-      [args.providerName]: args.public,
+      ...stored,
+      [args.providerName]: { ...args.public, hostedPortal },
     };
     const oldSecrets = decryptedSecrets(application);
     const newSecrets: Record<string, { clientSecret: string }> = {
@@ -615,6 +642,7 @@ export const oauthService = {
         oauthCredentialsCiphertext: encryptJson(newSecrets),
       },
     });
+    return hostedPortal;
   },
 
   async removeProviderConfig(args: {

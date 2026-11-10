@@ -6,7 +6,7 @@ For a scheduled nudge you can cancel, such as an onboarding sequence, follow the
 
 ## Built-in account emails
 
-The built-in emails (password reset, email verification, magic link, welcome, two-factor enabled, password changed, payment failed) carry your Application's name and look, not Rekey's. They read the branding set in **Panel → Application → Billing → Portal**:
+The built-in emails (password reset, email verification, magic link, organization invitation, welcome, two-factor enabled, password changed, payment failed) carry your Application's name and look, not Rekey's. They read the branding set in **Panel → Application → Billing → Portal**:
 
 | Branding field | Used for |
 |---|---|
@@ -31,6 +31,7 @@ These are the `{{variables}}` a saved copy of each built-in email can use. Every
 | `email_verification` | `userEmail`, `verifyUrl`, `expiresAtIso`, `expiresAt` |
 | `magic_link_signin` | `userEmail`, `signInUrl`, `expiresAtIso`, `expiresAt` |
 | `workspace_invitation` | `inviteeEmail`, `inviterName`, `workspaceName`, `inviteUrl`, `expiresAtIso`, `expiresAt` |
+| `organization_invitation` | `inviteeEmail`, `inviterEmail`, `organizationName`, `roleName`, `inviteUrl`, `expiresAtIso`, `expiresAt` |
 | `welcome` | `userEmail`, `appUrl` |
 | `mfa_enabled` | `userEmail`, `enabledAtIso`, `enabledAt` |
 | `password_changed` | `userEmail`, `changedAtIso`, `changedAt` |
@@ -40,8 +41,14 @@ These are the `{{variables}}` a saved copy of each built-in email can use. Every
 | `operator_email_confirmed` | `userEmail`, `confirmedAtIso`, `confirmedAt`, `appUrl` |
 | `signup_existing_account` | `userEmail`, `appUrl` |
 | `signup_finish_setup` | `userEmail`, `resetUrl`, `expiresAtIso`, `expiresAt` |
+| `account_code` | `userEmail`, `code`, `action`, `expiresAtIso`, `expiresAt` |
+| `email_change_confirm` | `userEmail`, `previousEmail`, `confirmUrl`, `expiresAtIso`, `expiresAt` |
+| `email_change_requested` | `userEmail`, `newEmail`, `requestedAtIso`, `requestedAt` |
+| `email_change_address_taken` | `userEmail` |
 | `billing_payment_failed_reminder` | `userEmail`, `planName`, `amountDue`, `attempt`, `graceEndsAtIso`, `graceEndsAt`, `portalUrl` |
 | `billing_unapplied_payment` | `amount`, `provider`, `providerPaymentId`, `endUserEmail`, `receivedAtIso`, `receivedAt` |
+
+`organization_invitation` goes to the address an organization OWNER or ADMIN invites (`POST /api/v1/users/me/organizations/:id/invitations`, and again on resend). `roleName` is the role as people read it (`Admin` for the built-in `ADMIN`, a custom role's own name). `inviteUrl` is the `inviteUrl` the request named, else the app's `/accept-invitation` page on its App URL, else the hosted portal's `/invitation-link` (on the verified custom domain when there is one). With none of those, or past the recipient's auth-email cap, nothing is sent and the response's `emailSent` is false.
 
 `portalUrl` is the Application's hosted billing portal (`PUBLIC_PORTAL_URL` plus the slug), where the customer updates their payment method. It is empty when the hosted portal is off for the Application, and the default then leaves out its **Update payment method** button. Wrap a link to it in `{{#if portalUrl}}...{{/if}}` for the same effect in your own copy.
 
@@ -51,6 +58,10 @@ Three built-in emails exist for the account-takeover and enumeration rules in [a
 - `operator_account_claimed` is the operator version, sent by Rekey to the operator and not editable per Application. `reviewSummary` is one sentence per workspace the account owns or administers: every other member with their email and role, how many Applications it has, and how many live API keys, enabled webhook endpoints and billing providers those have, with how many keys and endpoints have no recorded creator and were left in place. It is sent when a claim removed something or left any of those to review.
 - `operator_email_verification` is the operator confirmation email, with the panel's `/verify-email` link. It says to sign in to the account and then confirm, to confirm only if you created the account yourself, and to ask for an emailed sign-in link if you did not. `operator_email_confirmed` follows a confirmation and says to reset the password if it was not you. Both are sent by Rekey to the operator and are not editable per Application; the second is a security notice and is not counted against the per-recipient limit.
 - `signup_existing_account` and `signup_finish_setup` go to the owner of an address when someone tries to sign up with it on an Application that requires a verified address, where sign-up itself must not say the address is taken. The first tells a verified owner to sign in or reset; the second gives an unverified one a link to choose a password. Keep `{{resetUrl}}` in a saved copy of the second: it is the only way in that mail offers.
+
+`account_code` carries a six-digit `code` a signed-in customer asked for to prove they can read their mailbox before they set a first password or delete their account; `action` says which, as "set a password" or "delete your account". Keep `{{code}}` in a saved copy: it is the whole point of the mail. It is counted against the per-recipient limit.
+
+Three built-in emails carry an email address change (`POST /api/v1/users/me/email`). `email_change_confirm` goes to the new address with the link that makes the change; keep `{{confirmUrl}}` in a saved copy, it is the only way to complete it. `email_change_requested` goes to the current address at the same time, naming the new one; it is a security notice and is not counted against the per-recipient limit. When the new address already belongs to another account, `email_change_address_taken` goes to it instead of the link, and the person who asked is told nothing different. In these three, `userEmail` is the address the mail goes to.
 
 The default `email_verification` copy carries a boxed line telling the reader to confirm only if they signed up themselves, because confirming keeps the password chosen at sign-up. If you saved your own copy of that email before 2.2.0, it does not have the line; consider adding it.
 ## Sender identity

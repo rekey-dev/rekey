@@ -14,12 +14,15 @@
  */
 
 import type { Application, EndUser } from '@prisma/client';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
-import { generateSecret, generateBackupCodes } from '../../lib/mfa.js';
+import { generateSecret, generateBackupCodes, matchTotpStep } from '../../lib/mfa.js';
+import { assertNotLocked, clearFailures, MFA_POLICY, registerFailure } from '../../lib/brute-force.js';
 import {
   acceptTotpCode,
+  claimTotpStep,
   matchMfaCode,
   mfaCodeReusedError,
   type BackupCodeStore,
@@ -271,6 +274,45 @@ export const mfaService = {
     kickDeliveries(deliveryIds);
   },
 
+  /**
+   * Replace the backup codes of an enrolled authenticator, invalidating every
+   * old one. Accepts only a current TOTP code: a backup code would let one
+   * leaked code mint ten, and a stolen session alone must not be able to mint
+   * any. Counted against the same lockout as every other MFA code check.
+   */
+  async regenerateBackupCodes(args: { endUserId: string; code: string }): Promise<string[]> {
+    const cred = await prisma.mfaCredential.findUnique({ where: { endUserId: args.endUserId } });
+    if (!cred?.enrolledAt) {
+      throw new RekeyError({
+        statusCode: 409,
+        code: 'MFA_NOT_ENROLLED',
+        message: 'This account has no two-factor authenticator, so it has no backup codes to replace.',
+        fix: 'Turn on two-factor first: POST /api/v1/auth/mfa/setup, then POST /api/v1/auth/mfa/setup-confirm. Setup returns the first set of backup codes.',
+      });
+    }
+    const lockScope = `eu:mfa:${args.endUserId}`;
+    await assertNotLocked(lockScope, 'MFA_TOO_MANY_ATTEMPTS');
+    const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
+    const step = matchTotpStep(base32, args.code);
+    if (step === null) {
+      await registerFailure(lockScope, MFA_POLICY);
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'MFA_CODE_INVALID',
+        message: 'New backup codes need a current code from the authenticator app. A backup code is not accepted.',
+        fix: 'Send `code` with the 6-digit code the authenticator app shows now.',
+      });
+    }
+    if (!(await claimTotpStep(base32, step))) throw mfaCodeReusedError('authenticator-only');
+    await clearFailures(lockScope);
+    const backups = generateBackupCodes();
+    await prisma.mfaCredential.update({
+      where: { endUserId: args.endUserId },
+      data: { backupCodesCiphertext: encryptJson(backups.hashes), usedBackupCodeHashes: [] },
+    });
+    return backups.plaintext;
+  },
+
   async status(endUserId: string): Promise<{ enabled: boolean; remainingBackupCodes: number | null }> {
     const cred = await prisma.mfaCredential.findUnique({ where: { endUserId } });
     if (!cred || !cred.enrolledAt) return { enabled: false, remainingBackupCodes: null };
@@ -280,7 +322,27 @@ export const mfaService = {
 
   /** True if this end-user has MFA enrolled, used by sign-in to gate the session. */
   async isEnrolled(endUserId: string): Promise<boolean> {
-    const cred = await prisma.mfaCredential.findUnique({ where: { endUserId } });
+    const cred = await prisma.mfaCredential.findUnique({
+      where: { endUserId },
+      select: { enrolledAt: true },
+    });
     return Boolean(cred?.enrolledAt);
   },
 };
+
+/**
+ * Whether the Application's `mfa: 'required'` policy is unmet for this user:
+ * the policy is `required` and they have no confirmed authenticator. A passkey
+ * does not count. Sign-in's `mfaEnrollmentRequired` flag and the session guard
+ * both decide with this, so they cannot disagree.
+ *
+ * @example
+ * if (await mfaEnrollmentOutstanding(application, endUser.id)) redirectToSetUp();
+ */
+export async function mfaEnrollmentOutstanding(
+  application: Pick<Application, 'authConfig'>,
+  endUserId: string,
+): Promise<boolean> {
+  if (AuthConfigSchema.parse(application.authConfig).mfa !== 'required') return false;
+  return !(await mfaService.isEnrolled(endUserId));
+}

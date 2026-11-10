@@ -27,6 +27,8 @@ import { authRateLimit } from '../../lib/rate-limit.js';
 import { ok, okFlag, errs } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 import { assertVerifiedForCredential } from '../auth/user-lifecycle.js';
+import { safeText } from '../../lib/branding.js';
+import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 
 const CodeBody = z.object({ code: z.string().min(1).max(64) });
 
@@ -73,6 +75,12 @@ function assertMfaEnabled(application: Application): void {
   }
 }
 
+/** The name a customer sees on the entry in their authenticator app: the one the portal header shows. */
+function authenticatorIssuer(application: Application): string {
+  const branding = (application.portalBranding ?? {}) as Record<string, unknown>;
+  return safeText(branding.displayName, 80) ?? safeText(application.name, 80) ?? 'Rekey';
+}
+
 export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   // Accepts the publishable key, like `POST /auth/mfa-verify` (the sign-in MFA
   // challenge) already does. `requireUserSession` is the authorizer for every
@@ -97,6 +105,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/status',
     {
+      config: { allowWithoutMfaEnrollment: true },
       schema: {
         tags: ['Public · MFA'],
         security: [
@@ -141,7 +150,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Rate-limited like the other code-bearing routes here: once a factor is
       // enrolled this accepts a `code`, so it becomes a guessing surface.
-      config: { rateLimit: authRateLimit(10) },
+      config: { rateLimit: authRateLimit(10), allowWithoutMfaEnrollment: true },
       // `code` is optional (first-time setup sends none), so a browser caller
       // may POST no body. Same normalisation as /disable, see the note there
       // for why declaring `schema.body` alone would 400 every existing SDK.
@@ -222,8 +231,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       }
       const result = await mfaService.setup({
         endUser: { ...req.endUser!, passwordHash: null } as never,
-        // Keep "Rekey" branded, could be made app-aware via Application.name later.
-        issuer: 'Rekey',
+        issuer: authenticatorIssuer(req.application!),
       });
       return reply.status(201).send({
         success: true,
@@ -243,7 +251,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Code-guessing surface, tight HTTP cap layered on top of the Redis
       // per-credential limiter (which fails open when Redis is down).
-      config: { rateLimit: authRateLimit(10) },
+      config: { rateLimit: authRateLimit(10), allowWithoutMfaEnrollment: true },
       schema: {
         tags: ['Public · MFA'],
         security: [
@@ -328,6 +336,70 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
         code: body.code,
       });
       return { success: true, data: { ok } };
+    },
+  );
+
+  app.post(
+    '/backup-codes',
+    {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      config: { rateLimit: authRateLimit(5) },
+      schema: {
+        tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
+        summary: 'Replace the backup codes with 10 new ones (one-time-show). Needs a current authenticator code.',
+        description:
+          'Every earlier backup code stops working. `code` must be the 6-digit code the authenticator app ' +
+          'shows now: a backup code is refused, and so is a missing code, for secret-key callers too, so a ' +
+          'stolen session alone cannot mint codes. Counted against the MFA lockout.',
+        body: {
+          type: 'object',
+          required: ['code'],
+          properties: { code: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                backupCodes: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Plaintext one-time backup codes. Shown exactly ONCE: only their hashes are stored.',
+                },
+              },
+              required: ['backupCodes'],
+            },
+            'The new backup codes.',
+          ),
+          ...errs({
+            ...USER_SESSION_ERRORS,
+            401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID: \`code\` is not the authenticator's current code (a backup code is refused here); or MFA_CODE_REUSED: that code was already accepted, wait for the next one.`,
+            403: `${USER_SESSION_ERRORS[403]}; or MFA_NOT_ENABLED: this Application's authConfig.mfa policy is "off"; or ${IMPERSONATION_DESC}`,
+            409: 'MFA_NOT_ENROLLED: this account has no confirmed authenticator.',
+            429: `${USER_SESSION_ERRORS[429]}; or MFA_TOO_MANY_ATTEMPTS: too many recent wrong codes for this user.`,
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      assertMfaEnabled(req.application!);
+      const body = CodeBody.parse(req.body);
+      const backupCodes = await mfaService.regenerateBackupCodes({ endUserId: req.endUser!.id, code: body.code });
+      const { ip, userAgent } = requestContext(req);
+      void recordSecurityEvent({
+        type: 'user.backup_codes_replaced',
+        actorType: 'end_user',
+        actorId: req.endUser!.id,
+        tenantId: req.application!.tenantId,
+        applicationId: req.application!.id,
+        ip,
+        userAgent,
+      });
+      return reply.status(201).send({ success: true, data: { backupCodes } });
     },
   );
 

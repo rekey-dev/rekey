@@ -285,6 +285,7 @@ const CODE_REUSED_FIX = {
   'sign-in':
     'Wait for the authenticator app to show a new 6-digit code and enter that one, or enter an unused backup code.',
   enrolment: 'Wait for the authenticator app to show a new 6-digit code and enter that one.',
+  'authenticator-only': 'Wait for the authenticator app to show a new 6-digit code and send that as `code`.',
   'step-up':
     'Wait for the authenticator app to show a new 6-digit code and send that as `code`, or send an unused backup code.',
 } as const;

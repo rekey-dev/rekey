@@ -4,7 +4,7 @@
  */
 
 import { expectTypeOf } from 'vitest';
-import type { Paged, PublicPlanDto, CheckoutResultDto, ValidateCouponResultDto } from '@rekey.dev/shared-types';
+import type { Paged, PublicPlanDto, PublicPlanPage, CheckoutResultDto, ValidateCouponResultDto } from '@rekey.dev/shared-types';
 import type { PricingGridProps, PricingPlan } from '../src/pricing-shared.js';
 import type { PricingTableProps, PortalPaymentDto, RekeyBrowserClient } from '../src/index.js';
 import type { PriceFallbackNoticeProps, CouponQuoteProps } from '../src/index.js';
@@ -59,7 +59,7 @@ expectTypeOf<ValidateCouponResultDto>().toMatchTypeOf<CouponQuoteProps['quote']>
 expectTypeOf<PortalPaymentDto['refundedAmount']>().toEqualTypeOf<number>();
 
 export async function browserClient(client: RekeyBrowserClient): Promise<void> {
-  expectTypeOf(await client.getPlans(undefined, { accessToken: 'token' })).toEqualTypeOf<Paged<PublicPlanDto>>();
+  expectTypeOf(await client.getPlans(undefined, { accessToken: 'token' })).toEqualTypeOf<PublicPlanPage>();
   expectTypeOf(await client.validateCoupon('token', { code: 'LAUNCH', planSlug: 'pro' })).toEqualTypeOf<ValidateCouponResultDto>();
   expectTypeOf(sdk.formatMoney).returns.toBeString();
 }

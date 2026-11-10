@@ -721,7 +721,7 @@ export function tenantRefreshRateLimit(
 }
 
 /**
- * Bucket for the public portal config route: (slug, client IP).
+ * Bucket for the public portal config routes: (slug or host, client IP).
  *
  * The hosted portal calls this server-side on every page load. What makes the
  * limit per VISITOR is not the slug but the client IP: the portal forwards the
@@ -736,8 +736,10 @@ export function tenantRefreshRateLimit(
  */
 export function portalConfigRateLimitKey(req: FastifyRequest): string {
   const params = req.params as Record<string, unknown> | undefined;
-  const raw = typeof params?.slug === 'string' ? params.slug : '-';
-  return `portal:${raw.slice(0, 120)}:${req.ip}`;
+  if (typeof params?.slug === 'string') return `portal:${params.slug.slice(0, 120)}:${req.ip}`;
+  const query = req.query as Record<string, unknown> | undefined;
+  const host = typeof query?.host === 'string' ? query.host.toLowerCase() : '-';
+  return `portalhost:${host.slice(0, 253)}:${req.ip}`;
 }
 
 export interface AuthRateLimitConfig {
@@ -863,6 +865,21 @@ export function passkeyStartRateLimit(maxPerMinute: number): AuthRateLimitConfig
 export function passkeyStartRateLimitKey(req: FastifyRequest): string {
   const app = req.application?.id ?? 'operator';
   return `passkeystart:${app}:${attributedAuthClientIp(req) ?? '-'}`;
+}
+
+/**
+ * Per-route config for reading an organization invitation by its token, which
+ * needs no session, per (Application, client IP). What it bounds is a caller
+ * guessing tokens; the per-Application ceiling still applies, and traffic with
+ * no vouched address is held by that ceiling alone, since keying it on the
+ * Application would let one guesser shut the preview off for everyone.
+ */
+export function invitationPreviewRateLimit(maxPerMinute: number): AuthRateLimitConfig {
+  return { ...authRateLimit(maxPerMinute), keyGenerator: invitationPreviewRateLimitKey, allowList: skipUnvouchedIp };
+}
+
+export function invitationPreviewRateLimitKey(req: FastifyRequest): string {
+  return `invitepreview:${req.application?.id ?? 'anon'}:${req.ip}`;
 }
 
 export function signUpRateLimitKey(req: FastifyRequest): string {

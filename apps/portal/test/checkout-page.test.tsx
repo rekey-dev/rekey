@@ -130,7 +130,7 @@ describe('checkout route', () => {
     expect(redirected).not.toHaveBeenCalled();
   });
 
-  it('checks an approved one-time order return once, and strips a cancelled one without asking', async () => {
+  it('checks an approved one-time order return once, and strips a canceled one without asking', async () => {
     lookup.mockResolvedValue({ kind: 'view', view: openView() });
     confirm.mockClear();
     await expect(
