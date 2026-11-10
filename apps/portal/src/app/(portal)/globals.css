@@ -1,40 +1,73 @@
+@import '../shared-tokens.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens — same vocabulary as apps/panel (see /design.md), but a
-   NEUTRAL theme: this surface is customer-facing, so it carries no Rekey
-   brand color. The primary is near-black; operators can re-skin later by
-   overriding these variables (branding is a follow-up, docs/portal.md).
-   Use via `bg-[var(--color-primary)]`, `border-[var(--color-border)]`, etc. */
+/* Design tokens: same vocabulary as apps/panel (see /design.md), but a
+   NEUTRAL theme, since this surface is customer-facing and carries no Rekey
+   brand colour. The operator's colours override --color-primary,
+   --color-primary-hover, --color-bg and --color-surface on the [slug] layout
+   (brandTokens in lib/config.ts). Use via `bg-[var(--color-primary)]` etc.
 
-:root {
+   The light values also apply under [data-scheme='light'], which the layout
+   sets when the operator chose any colour: their brand was picked against a
+   light page, so the dark tokens below never mix with it. */
+
+:root,
+[data-scheme='light'] {
   color-scheme: light;
 
-  /* Primary — neutral near-black. Reserved for CTAs and focus rings. */
+  /* Primary: neutral near-black. Reserved for CTAs and focus outlines. */
   --color-primary: #171717;        /* neutral-900 */
   --color-primary-hover: #404040;  /* neutral-700 */
   --color-primary-fg: #ffffff;
   --color-primary-soft: #f5f5f5;   /* neutral-100 */
   --color-primary-soft-fg: #262626;/* neutral-800 */
 
-  /* Surfaces — three depth tiers (design.md §2). */
+  /* Surfaces: three depth tiers (design.md §2). */
   --color-bg: #fafafa;             /* neutral-50 */
   --color-surface: #ffffff;
   --color-surface-muted: #fafafa;  /* neutral-50 */
-  --color-border: #e5e5e5;         /* neutral-200 */
+  --color-border: var(--rk-border);
 
   /* Text (design.md §3). */
-  --color-fg: #171717;             /* neutral-900 */
-  --color-muted-fg: #737373;       /* neutral-500 */
-  --color-faint-fg: #a3a3a3;       /* neutral-400 */
+  --color-fg: var(--rk-fg);
+  --color-muted-fg: var(--rk-muted-fg);
+  --color-faint-fg: #a3a3a3;       /* neutral-400, decoration only */
 
-  /* Semantic status colors — banner/status-badge foregrounds; soft fills are
-     derived with color-mix (10% tint) so one token covers text/dot/fill.
-     Note: the portal is currently light-only (no .dark block); dark values
-     belong here if/when a dark theme lands. */
+  /* Semantic status colours: banner and status-badge foregrounds; soft fills
+     are derived with color-mix (10% tint) so one token covers text/dot/fill. */
   --color-success: #15803d;        /* green-700 */
+  --color-warning: #b45309;        /* amber-700 */
   --color-danger: #b91c1c;         /* red-700 */
+  --color-danger-fg: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --color-primary: #fafafa;
+    --color-primary-hover: #d4d4d4;
+    --color-primary-fg: #171717;
+    --color-primary-soft: #262626;
+    --color-primary-soft-fg: #f5f5f5;
+
+    --color-bg: #0a0a0a;
+    --color-surface: #171717;
+    --color-surface-muted: #1f1f1f;
+    --color-border: #404040;
+
+    --color-fg: #f5f5f5;
+    --color-muted-fg: #a3a3a3;       /* 7.2:1 on the surface */
+    --color-faint-fg: #737373;
+
+    --color-success: #4ade80;
+    --color-warning: #fbbf24;
+    --color-danger: #f87171;
+    --color-danger-fg: #171717;
+  }
 }
 
 body {
@@ -46,4 +79,23 @@ body {
 /* Native form-control accent (checkbox, radio, range). */
 :root {
   accent-color: var(--color-primary);
+}
+
+/* One keyboard focus style for everything a customer can reach, as on the
+   checkout page. */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: var(--rk-focus-width) solid var(--color-primary);
+  outline-offset: var(--rk-focus-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
+  }
 }

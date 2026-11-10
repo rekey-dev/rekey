@@ -12,6 +12,8 @@ import { dangerButtonClass } from '@/components/Button';
 import { savedStateKey } from '@/lib/saved-state-key';
 import { Banner } from '@/components/Banner';
 import { portalBase } from '@/lib/portal-base';
+import { portalDomainState, type PortalDomainState } from '@/lib/auth-config';
+import { formatDate } from '@/lib/date';
 
 async function patchPortal(applicationId: string, body: Record<string, unknown>, flag: string): Promise<void> {
   await api({
@@ -81,6 +83,56 @@ async function saveDomain(applicationId: string, formData: FormData): Promise<vo
   }
 }
 
+async function verifyDomain(applicationId: string): Promise<void> {
+  'use server';
+  try {
+    await api({
+      method: 'POST',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/portal/domain/verify`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/portal?${await errorQuery(err)}`);
+    }
+    throw err;
+  }
+  redirect(`/applications/${applicationId}/portal?e=domain_verified`);
+}
+
+function DomainStatus({
+  state,
+  verifiedAt,
+  lapsedAt,
+}: {
+  state: PortalDomainState;
+  verifiedAt: string | null | undefined;
+  lapsedAt: string | null | undefined;
+}): React.JSX.Element {
+  if (state === 'verified' && verifiedAt) {
+    return <span className="text-green-600">Verified on {formatDate(verifiedAt)}</span>;
+  }
+  if (state === 'lapsed' && lapsedAt) {
+    return <span className="text-red-600">Verification lapsed on {formatDate(lapsedAt)}</span>;
+  }
+  if (state === 'not_set') return <span>Not set</span>;
+  return <span className="text-amber-600">Pending verification</span>;
+}
+
+function DnsRecord({ type, name, value }: { type: string; name: string; value: string }): React.JSX.Element {
+  return (
+    <dl className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1 rounded bg-[var(--color-surface)] px-2 py-1.5 font-mono">
+      <dt className="text-[var(--color-muted-fg)]">Type</dt>
+      <dd className="col-span-2">{type}</dd>
+      <dt className="text-[var(--color-muted-fg)]">Name</dt>
+      <dd className="break-all">{name}</dd>
+      <CopyButton value={name} label="Copy" />
+      <dt className="text-[var(--color-muted-fg)]">Value</dt>
+      <dd className="break-all">{value}</dd>
+      <CopyButton value={value} label="Copy" />
+    </dl>
+  );
+}
+
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
@@ -94,7 +146,7 @@ const STATUS_COPY: Record<'off' | 'live' | 'unserved', { title: string; body: st
 };
 
 const ERR: Record<string, string> = {
-  PORTAL_DOMAIN_TAKEN: 'That domain is already used by another application.',
+  PORTAL_DOMAIN_TAKEN: 'Another application has already verified that domain.',
   INVALID_LOGO_URL: 'Logo URL must be a full http(s) link (e.g. https://…/logo.png).',
   INVALID_SUPPORT_URL: 'Support URL must be a full http(s) link.',
   INVALID_POLICY_URL: 'Terms, privacy and refund links must be full http(s) links.',
@@ -137,7 +189,7 @@ export default async function PortalPage({
     refundUrl?: string;
   };
   const domain = app.portalDomain ?? '';
-  const domainVerified = Boolean(app.portalDomainVerifiedAt);
+  const domainState = portalDomainState(app);
 
   return (
     <div className="space-y-6">
@@ -275,34 +327,60 @@ export default async function PortalPage({
             <span className="text-xs font-medium">Domain</span>
             <input name="portalDomain" defaultValue={domain} placeholder="billing.yourapp.com" className={inputCls} />
           </label>
-          {domain && (
-            <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs space-y-1.5">
-              <p className="font-medium text-[var(--color-fg)]">
-                Status:{' '}
-                {domainVerified ? (
-                  <span className="text-green-600">Verified and live</span>
-                ) : (
-                  <span className="text-amber-600">Pending DNS verification</span>
-                )}
+          <p className="text-xs text-[var(--color-faint-fg)]">Clear the field and save to remove the domain.</p>
+          <StickyFormFooter label="Save domain" />
+        </ActionForm>
+        <p className="mt-4 text-xs font-medium text-[var(--color-fg)]">
+          Status: <DomainStatus state={domainState} verifiedAt={app.portalDomainVerifiedAt} lapsedAt={app.portalDomainLapsedAt} />
+        </p>
+        {domain && (
+          <div className="mt-2 space-y-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs">
+            {domainState === 'lapsed' && (
+              <p className="text-[var(--color-muted-fg)]">
+                A regular DNS check stopped finding the TXT record below, so customers are no longer sent to this
+                domain. Publish the record again, then verify.
               </p>
+            )}
+            <div className="space-y-1.5">
+              <p className="font-medium text-[var(--color-fg)]">1. Point the domain at the portal</p>
               {portalHost ? (
-                <>
-                  <p className="text-[var(--color-muted-fg)]">Add this DNS record at your domain provider, then verification completes automatically:</p>
-                  <code className="block rounded bg-[var(--color-surface)] px-2 py-1 font-mono">
-                    CNAME&nbsp;&nbsp;{domain}&nbsp;&nbsp;→&nbsp;&nbsp;{portalHost}
-                  </code>
-                </>
+                <DnsRecord type="CNAME" name={domain} value={portalHost} />
               ) : (
                 <p className="text-[var(--color-muted-fg)]">
-                  The DNS record points at this deployment&apos;s hosted portal, which is not configured. Set{' '}
+                  This deployment has no hosted portal URL, so there is no host to point at. Set{' '}
                   <code>PUBLIC_PORTAL_URL</code> on the API to see it.
                 </p>
               )}
-              <p className="text-[var(--color-faint-fg)]">TLS is provisioned automatically once the record resolves. Clear the field and save to remove the domain.</p>
             </div>
-          )}
-          <StickyFormFooter label="Save domain" />
-        </ActionForm>
+            {app.portalDomainTxtRecord && (
+              <div className="space-y-1.5">
+                <p className="font-medium text-[var(--color-fg)]">2. Prove you control it</p>
+                <p className="text-[var(--color-muted-fg)]">Publish this TXT record at your DNS provider. Keep it in place: it is checked again regularly.</p>
+                <DnsRecord type="TXT" name={app.portalDomainTxtRecord.name} value={app.portalDomainTxtRecord.value} />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <p className="font-medium text-[var(--color-fg)]">3. Verify</p>
+              <ActionForm action={verifyDomain.bind(null, id)}>
+                <SubmitButton pendingLabel="Checking DNS…">{domainState === 'verified' ? 'Check again' : 'Verify domain'}</SubmitButton>
+                {domainState !== 'verified' && (
+                  <p className="text-[var(--color-faint-fg)]">
+                    Verifying switches the links in your emails to this domain right away. Verify only after the domain already reaches your portal over HTTPS.
+                  </p>
+                )}
+              </ActionForm>
+              <p className="text-[var(--color-muted-fg)]">
+                DNS changes can take a while to reach every resolver. If verification fails right after you add
+                the records, wait a few minutes and try again.
+              </p>
+            </div>
+            <p className="text-[var(--color-faint-fg)]">
+              Verification proves you control the domain. Serving it also needs HTTPS for that host: on a
+              self-hosted deployment, tell your reverse proxy about the host and give it a certificate (see{' '}
+              <code>docs/portal.md</code>); on a hosted deployment, it depends on what that deployment supports.
+            </p>
+          </div>
+        )}
       </div>
 
       {!app.billingConfig.enabled && (

@@ -550,7 +550,9 @@ export const AuthConfigSchema = z.object({
    *   - `optional`, end-users may enroll; enrolled users are challenged at
    *                  sign-in (the default, preserves prior behaviour).
    *   - `required`, sign-in returns `mfaEnrollmentRequired: true` for users
-   *                  who haven't enrolled yet, so the app can force setup.
+   *                  who haven't enrolled yet, and every user-session route
+   *                  except enrolment, `/auth/me` and sign-out answers 403
+   *                  `MFA_ENROLLMENT_REQUIRED` until they do.
    */
   mfa: z.enum(['off', 'optional', 'required']).default('optional'),
   /**
@@ -1091,6 +1093,13 @@ export const SignUpRequestSchema = z.object({
    * 403 `EMAIL_VERIFIED_REQUIRES_SECRET_KEY`.
    */
   emailVerified: z.boolean().optional(),
+  /**
+   * Where the confirmation email links, with `{token}` replaced by the token.
+   * Must be on an origin the Application registered or inside its own hosted
+   * portal; anything else is refused with 400 `AUTH_URL_NOT_ALLOWED` and no
+   * account is created.
+   */
+  verifyUrl: z.string().max(2048).optional(),
   device: DeviceBindingRequestSchema.optional(),
   /** What the client is, for the session list and platform stats. See `ClientHintSchema`. */
   client: ClientHintSchema.optional(),
@@ -1266,6 +1275,34 @@ export const ChangePasswordRequestSchema = z.object({
   newPassword: z.string().min(1).max(256),
 });
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>;
+
+/** What an emailed code (`POST /auth/email-code`) lets the signed-in user do. */
+export const EmailedCodePurposeSchema = z.enum(['set_password', 'delete_account']);
+export type EmailedCodePurpose = z.infer<typeof EmailedCodePurposeSchema>;
+
+export const EmailCodeRequestSchema = z.object({ purpose: EmailedCodePurposeSchema });
+export type EmailCodeRequest = z.infer<typeof EmailCodeRequestSchema>;
+
+/** A first password for an account that has none, proved with an emailed `set_password` code. */
+export const SetPasswordRequestSchema = z.object({
+  newPassword: z.string().min(1).max(256),
+  emailCode: z.string().min(1).max(16),
+});
+export type SetPasswordRequest = z.infer<typeof SetPasswordRequestSchema>;
+
+/** Ask to move the signed-in account to `newEmail`; `confirmUrl` carries a `{token}` placeholder. */
+export const EmailChangeRequestSchema = z.object({
+  newEmail: z.string().email().max(254),
+  confirmUrl: z.string().max(2048).optional(),
+});
+export type EmailChangeRequest = z.infer<typeof EmailChangeRequestSchema>;
+
+/** Spend an email change link: with the account's session, or with `password` where nobody is signed in. */
+export const EmailChangeConfirmRequestSchema = z.object({
+  token: z.string().min(1).max(512),
+  password: z.string().min(1).max(256).optional(),
+});
+export type EmailChangeConfirmRequest = z.infer<typeof EmailChangeConfirmRequestSchema>;
 
 // ============================================================================
 // Billing
@@ -1542,6 +1579,13 @@ export type PublicPlanDto = Omit<z.infer<typeof PublicPlanDtoSchema>, 'kind'> & 
   /** {@link Open}, always give your `switch` a default branch. */
   kind: PlanKindType;
 };
+
+/**
+ * `GET /billing/plans`: a page of plans plus `defaultPlanSlug`, the free plan
+ * `POST /billing/subscribe` activates (null when the Application has none).
+ * Offer a no-checkout start on that plan only.
+ */
+export type PublicPlanPage = Paged<PublicPlanDto> & { defaultPlanSlug: string | null };
 
 /**
  * One feature's value for a subject (`GET /billing/entitlements/features/:key`).
@@ -2380,6 +2424,12 @@ export const OAuthProviderSummaryDtoSchema = z
     id: z.string().min(1),
     /** Display name for the button, e.g. `"Google"`. */
     name: z.string().min(1),
+    /**
+     * The operator offers this provider in the Rekey-hosted customer portal: its
+     * console lists the portal's sign-in page as a redirect URI. Your own app
+     * can ignore it.
+     */
+    hostedPortal: z.boolean(),
   })
   .strict();
 export type OAuthProviderSummaryDto = z.infer<typeof OAuthProviderSummaryDtoSchema>;
@@ -2786,6 +2836,39 @@ export const OrganizationInvitationDtoSchema = z.object({
 });
 export type OrganizationInvitationDto = z.infer<typeof OrganizationInvitationDtoSchema>;
 
+/**
+ * An invitation nobody has accepted or revoked, as an OWNER or ADMIN lists it.
+ * Never carries the token: only its hash is stored. `expiresAt` may be in the
+ * past; resend issues a fresh link.
+ */
+export const OrganizationPendingInvitationDtoSchema = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  email: z.string(),
+  role: OrganizationRoleSchema,
+  /** Null when the inviter's account no longer exists. */
+  invitedBy: z.object({ endUserId: z.string(), email: z.string() }).nullable(),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+});
+export type OrganizationPendingInvitationDto = z.infer<typeof OrganizationPendingInvitationDtoSchema>;
+
+/**
+ * What an invitation offers, read by its token before the invited person has
+ * signed in. Addresses are masked (`j***@example.com`) because whoever holds
+ * the link has not proved they own either one.
+ */
+export const OrganizationInvitationPreviewDtoSchema = z.object({
+  organizationName: z.string(),
+  applicationName: z.string(),
+  role: OrganizationRoleSchema,
+  invitedEmail: z.string(),
+  /** The inviter's masked address; null when their account no longer exists. */
+  invitedBy: z.string().nullable(),
+  expiresAt: z.string().datetime(),
+});
+export type OrganizationInvitationPreviewDto = z.infer<typeof OrganizationInvitationPreviewDtoSchema>;
+
 // ============================================================================
 // Devices, the machines an end-user signs in from
 // ============================================================================
@@ -3033,6 +3116,8 @@ export type CurrentUserDto = EndUserDto & {
   activeOrganizationRole: string | null;
   /** The tier that role maps to. Gate organization permissions on this. */
   activeOrganizationBaseRole: OrganizationBaseRole | null;
+  /** Whether the user has a password: offer "change password" when true, "create a password" when false. */
+  hasPassword: boolean;
 };
 
 /** The properties a given `include` list adds. `MeIncluded<never>` is `{}`. */
@@ -3133,6 +3218,22 @@ export const LicenseActivationDtoSchema = z.object({
   releasedAt: z.string().datetime().nullable(),
 });
 export type LicenseActivationDto = z.infer<typeof LicenseActivationDtoSchema>;
+
+/**
+ * A machine on one of the caller's licences, as the end-user surface returns
+ * it. `fingerprintHint` is the start of the machine fingerprint, never the
+ * whole value: with the licence key, the full fingerprint verifies as that
+ * machine without taking a seat.
+ */
+export const EndUserLicenseActivationDtoSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable(),
+  fingerprintHint: z.string(),
+  status: z.enum(['ACTIVE', 'RELEASED']),
+  firstSeenAt: z.string().datetime(),
+  lastSeenAt: z.string().datetime(),
+});
+export type EndUserLicenseActivationDto = z.infer<typeof EndUserLicenseActivationDtoSchema>;
 
 /**
  * Result of POST /api/v1/licenses/deactivate. Always HTTP 200; branch on
@@ -3348,7 +3449,7 @@ export const WEBHOOK_EVENTS = [
   {
     name: 'password.changed',
     description:
-      "The end-user's password changed (authenticated change or reset-token flow). All their other sessions are revoked.",
+      "The end-user's password changed (authenticated change, reset-token flow, or a first password set on an account that had none; `data.via` is `change`, `reset` or `set`). All their sessions are revoked.",
   },
   {
     name: 'email.verified',
@@ -3466,7 +3567,7 @@ export const WEBHOOK_EVENTS = [
   {
     name: 'license.deactivated',
     description:
-      'A machine gave back its seat on a license: the customer\'s software called POST /licenses/deactivate, or an operator released the activation (`data.releasedBy`). Payload: `data.license` (id, endUserId, kind) and `data.machineFingerprint`.',
+      'A machine gave back its seat on a license: the customer\'s software called POST /licenses/deactivate, the licence holder (or an owner or admin of the organization it is pooled to) removed the machine from their account, or an operator released the activation (`data.releasedBy`: `client` | `end_user` | `operator`). Payload: `data.license` (id, endUserId, kind) and `data.machineFingerprint`.',
   },
   // Credits. One event per ledger entry, written in the transaction that wrote
   // the entry, so a balance change and its event commit together or not at

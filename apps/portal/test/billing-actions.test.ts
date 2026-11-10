@@ -7,7 +7,7 @@
  * when there was no picker to choose from, so an automatic pick lands on the
  * "checkout isn't available" copy instead.
  *
- * The cancel redirect names the subscription it cancelled, so the banner
+ * The cancel redirect names the subscription it canceled, so the banner
  * describes that one rather than whichever is listed first.
  */
 
@@ -45,7 +45,11 @@ vi.mock('@/lib/session', () => ({
 }));
 vi.mock('@/lib/config', () => ({ getPortalConfig: async () => ({ billingSubject: 'user' }) }));
 vi.mock('@/lib/env', () => ({ portalBaseUrl: () => 'https://portal.example', rekeyApiUrl: () => 'https://api.example' }));
-vi.mock('@/lib/client-ip', () => ({ API_TIMEOUT_MS: 1000, forwardedClientHeaders: async () => ({}) }));
+vi.mock('@/lib/client-ip', () => ({
+  API_TIMEOUT_MS: 1000,
+  forwardedClientHeaders: async () => ({}),
+  publishableKeyCallHeaders: async () => ({}),
+}));
 vi.mock('next/navigation', () => ({
   redirect: (to: string) => {
     throw new Error(`REDIRECT ${to}`);
@@ -181,7 +185,7 @@ describe('checkoutAction, a coupon code', () => {
 });
 
 describe('cancelSubscriptionAction', () => {
-  it('names the cancelled subscription in the redirect', async () => {
+  it('names the canceled subscription in the redirect', async () => {
     const to = await redirectOf(() => cancelSubscriptionAction('acme', null, 's_basic', form({})));
     expect(to).toBe('/acme?e=canceled&sub=s_basic');
   });

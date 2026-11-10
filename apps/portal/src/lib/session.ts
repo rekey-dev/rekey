@@ -1,7 +1,9 @@
 /**
  * Per-app portal session, httpOnly cookies, **scoped to the app's path**
  * (`/<slug>`) so app A's session can't be replayed on app B under the shared
- * portal host. Tokens never reach client JS.
+ * portal host. On an Application's custom domain they are scoped to `/`: the
+ * browser's URLs there have no slug, and the origin is the Application's own.
+ * Tokens never reach client JS.
  */
 
 import 'server-only';
@@ -14,7 +16,10 @@ import { neverConnected } from '@rekey.dev/shared-types/transport';
 import { rekeyApiUrl } from './env';
 import { PortalConfigUnavailableError, getPortalConfig, type PortalConfig } from './config';
 import { cookieSecure } from './cookie-secure';
-import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
+import { portalCustomHost } from './public-base';
+import { signInReturnPage, type SignInReturn } from './sign-in-return';
+import { API_TIMEOUT_MS, publishableKeyCallHeaders } from './client-ip';
+import { redirectWhenTwoFactorRequired } from './two-factor-redirect';
 import {
   RACED_COOKIE,
   RACED_MARK_MAX_AGE_SECONDS,
@@ -44,7 +49,7 @@ async function cookieOpts(slug: string, maxAge: number) {
     httpOnly: true,
     sameSite: 'lax' as const,
     secure: await cookieSecure(),
-    path: `/${slug}`,
+    path: (await portalCustomHost()) ? '/' : `/${slug}`,
     maxAge,
   };
 }
@@ -56,11 +61,13 @@ export async function portalClientFor(slug: string): Promise<RekeyBrowserClient 
   // The SDK's calls run on the portal server too (sign-in, MFA, refresh), so
   // they carry the vouched visitor address and a timeout like every other
   // portal call (lib/client-ip.ts). Sign-in limits are per client IP.
-  const forwarded = await forwardedClientHeaders();
-  const portalFetch: typeof fetch = (input, init) => {
+  const forwarded = await publishableKeyCallHeaders();
+  const portalFetch: typeof fetch = async (input, init) => {
     const merged = new Headers(init?.headers);
     for (const [name, value] of Object.entries(forwarded)) merged.set(name, value);
-    return fetch(input, { ...init, headers: merged, signal: init?.signal ?? AbortSignal.timeout(API_TIMEOUT_MS) });
+    const res = await fetch(input, { ...init, headers: merged, signal: init?.signal ?? AbortSignal.timeout(API_TIMEOUT_MS) });
+    await redirectWhenTwoFactorRequired(slug, res);
+    return res;
   };
   return new RekeyBrowserClient({
     apiUrl: rekeyApiUrl(),
@@ -152,6 +159,132 @@ export async function getMfaChallenge(): Promise<string | null> {
   return value ? value : null;
 }
 
+export const SIGN_IN_LINK = 'rekey_portal_sign_in_link';
+/** The API's sign-in link lives fifteen minutes; the cookie goes with it. */
+const SIGN_IN_LINK_MAX_AGE = 15 * 60;
+
+/**
+ * The emailed sign-in token, moved out of the link's URL so the page that
+ * spends it carries no token in its address, history or Referer.
+ */
+export async function writeSignInLink(sink: CookieSink, slug: string, token: string): Promise<void> {
+  sink.set(SIGN_IN_LINK, token, await cookieOpts(slug, SIGN_IN_LINK_MAX_AGE));
+}
+
+export async function getSignInLink(): Promise<string | null> {
+  const value = (await cookies()).get(SIGN_IN_LINK)?.value;
+  return value ? value : null;
+}
+
+export async function clearSignInLink(slug: string): Promise<void> {
+  (await cookies()).set(SIGN_IN_LINK, '', await cookieOpts(slug, 0));
+}
+
+export const SIGN_IN_EMAIL = 'rekey_portal_sign_in_email';
+/** Long enough to fix a mistyped password, short enough not to linger on a shared computer. */
+const SIGN_IN_EMAIL_MAX_AGE = 5 * 60;
+/** The API's own cap on an email address. */
+const MAX_EMAIL_LENGTH = 254;
+
+/**
+ * The address typed into a sign-in that failed, kept so the form can offer it
+ * again without the address riding in the URL, history or access logs.
+ * Server Actions only.
+ */
+export async function rememberSignInEmail(slug: string, email: string): Promise<void> {
+  if (email && email.length <= MAX_EMAIL_LENGTH) {
+    (await cookies()).set(SIGN_IN_EMAIL, email, await cookieOpts(slug, SIGN_IN_EMAIL_MAX_AGE));
+  }
+}
+
+export async function getSignInEmail(): Promise<string | undefined> {
+  return (await cookies()).get(SIGN_IN_EMAIL)?.value || undefined;
+}
+
+export async function clearSignInEmail(slug: string): Promise<void> {
+  (await cookies()).set(SIGN_IN_EMAIL, '', await cookieOpts(slug, 0));
+}
+
+export const RESET_PASSWORD_LINK = 'rekey_portal_reset_password';
+/** The API's reset token lives an hour; the cookie goes with it. */
+const RESET_PASSWORD_LINK_MAX_AGE = 60 * 60;
+
+/** The emailed reset token, moved out of the link's URL like the sign-in link's. */
+export async function writeResetPasswordLink(sink: CookieSink, slug: string, token: string): Promise<void> {
+  sink.set(RESET_PASSWORD_LINK, token, await cookieOpts(slug, RESET_PASSWORD_LINK_MAX_AGE));
+}
+
+export async function getResetPasswordLink(): Promise<string | null> {
+  const value = (await cookies()).get(RESET_PASSWORD_LINK)?.value;
+  return value ? value : null;
+}
+
+export async function clearResetPasswordLink(slug: string): Promise<void> {
+  (await cookies()).set(RESET_PASSWORD_LINK, '', await cookieOpts(slug, 0));
+}
+
+export const SIGN_IN_RETURN = 'rekey_portal_return';
+/** Long enough to outlast an emailed sign-in link. */
+const SIGN_IN_RETURN_MAX_AGE = 15 * 60;
+
+/**
+ * Remembers the page sign-in should land on, across the steps that leave the
+ * sign-in form: the code step, the emailed link and two-factor setup. Anything
+ * but a listed keyword is ignored. Server Actions only.
+ */
+export async function rememberSignInReturn(slug: string, raw: unknown): Promise<void> {
+  const page = signInReturnPage(raw);
+  if (page) (await cookies()).set(SIGN_IN_RETURN, page, await cookieOpts(slug, SIGN_IN_RETURN_MAX_AGE));
+}
+
+/** `rememberSignInReturn` for a Route Handler, written onto its response. */
+export async function writeSignInReturn(sink: CookieSink, slug: string, page: SignInReturn): Promise<void> {
+  sink.set(SIGN_IN_RETURN, page, await cookieOpts(slug, SIGN_IN_RETURN_MAX_AGE));
+}
+
+export async function getSignInReturn(): Promise<SignInReturn | null> {
+  return signInReturnPage((await cookies()).get(SIGN_IN_RETURN)?.value);
+}
+
+export async function clearSignInReturn(slug: string): Promise<void> {
+  (await cookies()).set(SIGN_IN_RETURN, '', await cookieOpts(slug, 0));
+}
+
+export const VERIFY_EMAIL_LINK = 'rekey_portal_verify_email';
+const VERIFY_EMAIL_LINK_MAX_AGE = 60 * 60;
+
+/** The emailed confirmation token, held like the sign-in link's until a button spends it. */
+export async function writeVerifyEmailLink(sink: CookieSink, slug: string, token: string): Promise<void> {
+  sink.set(VERIFY_EMAIL_LINK, token, await cookieOpts(slug, VERIFY_EMAIL_LINK_MAX_AGE));
+}
+
+export async function getVerifyEmailLink(): Promise<string | null> {
+  const value = (await cookies()).get(VERIFY_EMAIL_LINK)?.value;
+  return value ? value : null;
+}
+
+export async function clearVerifyEmailLink(slug: string): Promise<void> {
+  (await cookies()).set(VERIFY_EMAIL_LINK, '', await cookieOpts(slug, 0));
+}
+
+export const EMAIL_CHANGE_LINK = 'rekey_portal_email_change';
+/** The API's email change link lives an hour; the cookie goes with it. */
+const EMAIL_CHANGE_LINK_MAX_AGE = 60 * 60;
+
+/** The emailed email-change token, held like the sign-in link's until a button spends it. */
+export async function writeEmailChangeLink(sink: CookieSink, slug: string, token: string): Promise<void> {
+  sink.set(EMAIL_CHANGE_LINK, token, await cookieOpts(slug, EMAIL_CHANGE_LINK_MAX_AGE));
+}
+
+export async function getEmailChangeLink(): Promise<string | null> {
+  const value = (await cookies()).get(EMAIL_CHANGE_LINK)?.value;
+  return value ? value : null;
+}
+
+export async function clearEmailChangeLink(slug: string): Promise<void> {
+  (await cookies()).set(EMAIL_CHANGE_LINK, '', await cookieOpts(slug, 0));
+}
+
 /**
  * Refresh exchanges IN FLIGHT, keyed by a SHA-256 digest of the refresh token
  * being spent (never the token itself).
@@ -160,7 +293,7 @@ export async function getMfaChallenge(): Promise<string | null> {
  * presented token, and a second exchange of the same token is refused. So
  * callers presenting the same token at the same moment wait on one exchange.
  * The portal used to make that collision the default: `[slug]/layout.tsx` and
- * `[slug]/page.tsx` both call `getPortalUser(slug)` and React renders them
+ * `[slug]/(overview)/page.tsx` both call `getPortalUser(slug)` and React renders them
  * concurrently, the same failure the panel diagnosed in production ("5 of 8
  * refreshes in a 40-minute session returned 401").
  *

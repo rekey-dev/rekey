@@ -8,13 +8,15 @@
  * THIS file ships the public verification endpoint
  * (POST /api/v1/licenses/verify), that's what the customer's software
  * calls at startup with the raw license key + a machine fingerprint, and
- * the signed-in end-user's own list (GET /api/v1/users/me/licenses).
+ * the signed-in end-user's own list (GET /api/v1/users/me/licenses) with each
+ * licence's machines, which they can free a seat from.
  */
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { licensesService } from './licenses.service.js';
-import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import { licensesSelfService } from './licenses-self.service.js';
+import { requirePublishableOrSecretKey, requireScope, requireScopeByMethod } from '../../middleware/api-key-auth.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { licenseRateLimit } from '../../lib/rate-limit.js';
@@ -164,11 +166,27 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
  * authorizer and there is no id to aim it at anyone else.
  */
 const SelfLicensesQuery = PaginationQuery.extend({ organizationId: z.string().min(1).optional() });
+const LicenseParam = z.object({ licenseId: z.string().min(1) });
+const ActivationParam = LicenseParam.extend({ activationId: z.string().min(1) });
+
+const SELF_ERRORS = {
+  401:
+    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID: the Application key is ' +
+    'missing or unknown; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / ' +
+    'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED: the user JWT is missing, ' +
+    'invalid, issued by another Application, or its impersonation has ended.',
+  403:
+    "IP_NOT_ALLOWED: a secret-key caller's IP is outside the allowlist; or " +
+    "ORIGIN_NOT_ALLOWED: a publishable-key caller's Origin is outside the CORS allowlist; " +
+    'or BILLING_DISABLED: billing is not enabled for this application; or ' +
+    'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks `billing:read` (GET) or `billing:write` (DELETE).',
+  429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
+} as const;
 
 export async function licensesSelfRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireBillingEnabled);
-  app.addHook('onRequest', requireScope('billing:read'));
+  app.addHook('onRequest', requireScopeByMethod({ read: 'billing:read', write: 'billing:write' }));
   app.addHook('onRequest', requireUserSession);
 
   app.get(
@@ -225,6 +243,100 @@ export async function licensesSelfRoutes(app: FastifyInstance): Promise<void> {
         skip,
       });
       return { success: true, data: paged(items, total, take, skip) };
+    },
+  );
+
+  app.get(
+    '/:licenseId/activations',
+    {
+      schema: {
+        tags: ['Public · Licenses'],
+        summary: 'List the machines on one of your licences',
+        description:
+          'Every machine that verified the licence, those holding a seat (`ACTIVE`) first. The ' +
+          'licence must be issued to the caller or pooled to an organization they belong to; any ' +
+          'other id is 404. The fingerprint is shortened to `fingerprintHint`.',
+        security: [{ publishableKey: [], userToken: [] }, { apiKey: [], userToken: [] }],
+        params: { type: 'object', properties: { licenseId: { type: 'string' } }, required: ['licenseId'] },
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('EndUserLicenseActivation'), "A page of the licence's machines."),
+          ...errs({
+            ...SELF_ERRORS,
+            404: 'LICENSE_NOT_FOUND: the licence is not issued to the caller nor pooled to an organization they belong to.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { licenseId } = LicenseParam.parse(req.params);
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const { items, total } = await licensesSelfService.listActivationsForEndUser({
+        applicationId: req.application!.id,
+        endUserId: req.endUser!.id,
+        licenseId,
+        take,
+        skip,
+      });
+      return {
+        success: true,
+        data: paged(
+          items.map((a) => ({
+            ...a,
+            firstSeenAt: a.firstSeenAt.toISOString(),
+            lastSeenAt: a.lastSeenAt.toISOString(),
+          })),
+          total,
+          take,
+          skip,
+        ),
+      };
+    },
+  );
+
+  app.delete(
+    '/:licenseId/activations/:activationId',
+    {
+      schema: {
+        tags: ['Public · Licenses'],
+        summary: 'Free the seat a machine holds on one of your licences',
+        description:
+          'Gives the seat back without the licence key, for a machine the customer no longer has. ' +
+          'Same policy and `license.deactivated` webhook (`releasedBy: "end_user"`) as POST ' +
+          '/licenses/deactivate, and the same body: `ok: false` with `reason` for a revoked or ' +
+          'expired licence, `released: false` when the machine held no seat. A personal licence is ' +
+          "its holder's to manage; one pooled to an organization needs that organization's OWNER " +
+          'or ADMIN tier.',
+        security: [{ publishableKey: [], userToken: [] }, { apiKey: [], userToken: [] }],
+        params: {
+          type: 'object',
+          properties: { licenseId: { type: 'string' }, activationId: { type: 'string' } },
+          required: ['licenseId', 'activationId'],
+        },
+        response: {
+          200: ok(ref('LicenseDeactivateResult'), 'Outcome, check `ok` before `released`.'),
+          ...errs({
+            ...SELF_ERRORS,
+            403:
+              `${SELF_ERRORS[403]} Or ORGANIZATION_ROLE_INSUFFICIENT: the licence is pooled to an ` +
+              'organization where the caller is on the MEMBER tier; or ORGANIZATION_ROLE_DISABLED: ' +
+              "the caller's role there is switched off.",
+            404:
+              'LICENSE_NOT_FOUND: the licence is not issued to the caller nor pooled to an organization ' +
+              'they belong to; or LICENSE_ACTIVATION_NOT_FOUND: no activation with that id on the licence.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { licenseId, activationId } = ActivationParam.parse(req.params);
+      const result = await licensesSelfService.releaseActivationForEndUser({
+        applicationId: req.application!.id,
+        endUserId: req.endUser!.id,
+        licenseId,
+        activationId,
+      });
+      return { success: true, data: result };
     },
   );
 }

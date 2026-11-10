@@ -25,7 +25,7 @@ import {
 import { prisma } from '../../lib/prisma.js';
 import { authService } from './auth.service.js';
 import { applicationDisabled } from '../../middleware/api-key-auth.js';
-import { resolveImpersonation } from '../../middleware/user-session.js';
+import { assertMfaEnrolledUnlessImpersonating, resolveImpersonation } from '../../middleware/user-session.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 import { accessTokenEndedByStamp } from '../../lib/session-stamp.js';
@@ -137,6 +137,7 @@ async function verifyTokenOnlySession(req: FastifyRequest): Promise<void> {
     presented,
     application.id,
     application.tokenGeneration,
+    { acceptPortal: req.internalCaller },
   );
   if (!claims) throw invalid;
   // An operator's impersonation token ends when its audit row does, here as on
@@ -145,7 +146,7 @@ async function verifyTokenOnlySession(req: FastifyRequest): Promise<void> {
   const impersonation = await resolveImpersonation(claims, application.id);
   if (impersonation) req.impersonation = impersonation;
 
-  const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
+  const { endUser, sessionsInvalidBefore, sessionEnded, hasPassword } = await authService.getByIdForSession(
     claims.applicationId,
     claims.sub,
     claims,
@@ -156,6 +157,8 @@ async function verifyTokenOnlySession(req: FastifyRequest): Promise<void> {
   if (accessTokenEndedByStamp(claims, sessionsInvalidBefore) || sessionEnded) throw invalid;
 
   req.endUser = endUser;
+  req.endUserHasPassword = hasPassword;
+  req.portalSession = claims.typ === 'eu_portal';
   if (claims.dev) req.deviceId = claims.dev;
   verifiedClaims.set(req, claims);
 }
@@ -228,11 +231,17 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
                         'Set when the record was erased under GDPR. Null for a live user.',
                     },
                     erasedBy: { type: 'string', nullable: true },
+                    hasPassword: {
+                      type: 'boolean',
+                      description:
+                        'Whether this user has a password, so a client can offer "change" or "create". Never the hash.',
+                    },
                   },
                   required: [
                     'activeOrganizationId',
                     'activeOrganizationRole',
                     'activeOrganizationBaseRole',
+                    'hasPassword',
                     'role',
                     'updatedAt',
                   ],
@@ -250,6 +259,11 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       const include = parseMeInclude(req.query);
       const claims = verifiedClaims.get(req)!;
       const endUser = req.endUser!;
+      const loadApplication = () =>
+        prisma.application.findUniqueOrThrow({ where: { id: claims.applicationId } });
+      // The bare record stays readable so a client can see who is signed in and
+      // send them to set up two-factor; the billing and device reads do not.
+      if (include.size > 0) await assertMfaEnrolledUnlessImpersonating(req, await loadApplication(), endUser.id);
       const active = await organizationsService.activeRoleFor({
         applicationId: claims.applicationId,
         endUserId: claims.sub,
@@ -260,8 +274,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
         deviceId: req.deviceId,
         activeOrganizationId: claims.oid,
         activeOrganizationRole: active,
-        loadApplication: () =>
-          prisma.application.findUniqueOrThrow({ where: { id: claims.applicationId } }),
+        loadApplication,
       });
       return {
         success: true,
@@ -270,6 +283,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
           activeOrganizationId: claims.oid ?? null,
           activeOrganizationRole: active?.role ?? null,
           activeOrganizationBaseRole: active?.baseRole ?? null,
+          hasPassword: req.endUserHasPassword === true,
           ...included,
         },
       };

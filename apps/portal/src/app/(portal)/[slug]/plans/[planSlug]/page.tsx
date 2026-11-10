@@ -11,9 +11,13 @@ import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { checkoutAction } from '@/lib/actions';
 import { decodedSegment, managedBillingOrg, planReviewPath } from '@/lib/billing-subject';
+import { activeOrganizationOf } from '@/lib/organizations';
 import { getPortalConfig } from '@/lib/config';
 import { couponCodeOf, quoteCoupon, type CouponQuote } from '@/lib/coupon-quote';
 import { getPortalUser, portalClientFor } from '@/lib/session';
+import { planSignInPath } from '@/lib/sign-in-return';
+import { redirectWhileTwoFactorOutstanding } from '@/lib/two-factor';
+import { redirectWhileProfileOutstanding } from '@/lib/profile-completion';
 import { PlanReview } from '@/components/plan-review';
 
 /** Shown when the checkout refused a code the quote had accepted a moment before. */
@@ -28,19 +32,21 @@ export default async function PlanReviewPage({
 }): Promise<React.JSX.Element> {
   const { slug, planSlug: segment } = await params;
   const sp = await searchParams;
+  const wanted = decodedSegment(segment);
   const session = await getPortalUser(slug);
-  if (!session) redirect(`/${slug}/login`);
+  if (!session) redirect(planSignInPath(slug, wanted));
+  await redirectWhileTwoFactorOutstanding(slug, session.accessToken);
+  await redirectWhileProfileOutstanding(slug, session.user, `plan:${wanted ?? ''}`);
 
   const config = await getPortalConfig(slug);
   const client = await portalClientFor(slug);
   if (!config || !client || !config.billingEnabled) redirect(`/${slug}`);
 
-  const team = config.billingSubject === 'org' ? await managedBillingOrg(client, session.accessToken) : null;
+  const team = config.billingSubject === 'org' ? await managedBillingOrg(client, session.accessToken, activeOrganizationOf(session.user)) : null;
   // A member of a team-billed app may look at the plans and cannot change them.
   if (config.billingSubject === 'org' && team === null) redirect(`/${slug}`);
   const orgId = team?.id ?? null;
 
-  const wanted = decodedSegment(segment);
   const [plans, held] = await Promise.all([
     client.getPlans({ limit: 100 }, { accessToken: session.accessToken }).then((r) => r.items),
     client
@@ -51,6 +57,8 @@ export default async function PlanReviewPage({
   const plan = plans.find((p) => p.slug === wanted);
   if (!plan) redirect(`/${slug}?error=PLAN_NOT_FOUND`);
   if (held.some((s) => s.planId === plan.id)) redirect(`/${slug}`);
+  // A free plan has no checkout. The overview starts it.
+  if (plan.isFree) redirect(`/${slug}`);
   if (!plan.checkout.ready) redirect(`/${slug}?error=PLAN_UNAVAILABLE`);
 
   const code = couponCodeOf(sp.coupon);

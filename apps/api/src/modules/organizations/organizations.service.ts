@@ -44,6 +44,7 @@
  */
 
 import type {
+  Application,
   Organization,
   OrganizationBaseRole,
   OrganizationMembership,
@@ -58,6 +59,8 @@ import { organizationRolesService } from '../organization-roles/organization-rol
 import { withSavepoint } from '../../lib/savepoint.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import { assertAllowedTokenUrl } from '../../lib/app-url.js';
+import { mailInvitation } from './organization-invitation-email.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -90,7 +93,7 @@ function canManage(caller: OrganizationBaseRole, target: OrganizationBaseRole): 
   return false;
 }
 
-function hashInviteToken(raw: string): string {
+export function hashInviteToken(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
 }
 
@@ -438,17 +441,22 @@ export const organizationsService = {
   },
 
   /**
-   * Create an invitation. Hash-only storage; raw shown once.
-   * Caller's role must `canManage` the target role.
+   * Create an invitation and email its link to the invited address.
+   * Hash-only storage; raw shown once. Caller's role must `canManage` the
+   * target role. `emailSent` is false when nothing went out (see
+   * `mailInvitation`); the invitation stands either way.
    */
   async createInvitation(args: {
-    application: { id: string };
+    application: Application;
     actorEndUserId: string;
     organizationId: string;
     email: string;
     /** Omit to use the Application's default organization role. */
     role?: string | undefined;
-  }): Promise<{ rawToken: string; invitation: InvitationDto }> {
+    /** The emailed link, with `{token}` where the token goes. Must be on one of the Application's own origins. */
+    inviteUrl?: string | undefined;
+  }): Promise<{ rawToken: string; invitation: InvitationDto; emailSent: boolean }> {
+    assertAllowedTokenUrl(args.application, args.inviteUrl, 'inviteUrl');
     const actor = await this.requireMembership(args);
     // The target role is caller-supplied, so it goes through the strict
     // resolver: an unknown name is a 400 here rather than an invitation that
@@ -514,7 +522,21 @@ export const organizationsService = {
       return { invitation: row, deliveryIds: ids };
     });
     kickDeliveries(deliveryIds);
-    return { rawToken: raw, invitation: shapeInvitation(invitation) };
+    const [organization, inviter] = await Promise.all([
+      prisma.organization.findUniqueOrThrow({ where: { id: args.organizationId }, select: { name: true } }),
+      prisma.endUser.findUniqueOrThrow({ where: { id: args.actorEndUserId }, select: { email: true } }),
+    ]);
+    const emailSent = await mailInvitation({
+      application: args.application,
+      to: email,
+      rawToken: raw,
+      inviteUrl: args.inviteUrl,
+      inviterEmail: inviter.email,
+      organizationName: organization.name,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt,
+    });
+    return { rawToken: raw, invitation: shapeInvitation(invitation), emailSent };
   },
 
   /**

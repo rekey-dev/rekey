@@ -33,7 +33,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { organizationsService } from '../modules/organizations/organizations.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../middleware/api-key-auth.js';
-import { requireUserSession } from '../middleware/user-session.js';
+import { assertMfaEnrolledUnlessImpersonating, requireUserSession } from '../middleware/user-session.js';
 import { RekeyError } from '../lib/error.js';
 import { authService } from '../modules/auth/auth.service.js';
 import { mfaService } from '../modules/mfa/mfa.service.js';
@@ -42,6 +42,10 @@ import { assertStepUp } from '../lib/step-up.js';
 import { prisma } from '../lib/prisma.js';
 import { recordSecurityEvent, requestContext } from '../lib/security-events.js';
 import { refuseWhileImpersonating } from '../middleware/impersonation.js';
+import { authRateLimit } from '../lib/rate-limit.js';
+import { CREDENTIAL_BODY_LIMIT } from '../lib/body-limits.js';
+import { requestEmailChange } from '../modules/auth/email-change.js';
+import { assertEmailedCode, hasPasswordOrAuthenticator } from '../modules/auth/emailed-code.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { ok, errs, ref } from '../lib/openapi.js';
 import {
@@ -140,8 +144,19 @@ const END_USER_SELF_SCHEMA = {
           description: 'Set when the record was erased under GDPR. Null for a live user.',
         },
         erasedBy: { type: 'string', nullable: true },
+        hasPassword: {
+          type: 'boolean',
+          description: 'Whether this user has a password, so a client can offer "change" or "create". Never the hash.',
+        },
       },
-      required: ['activeOrganizationId', 'activeOrganizationRole', 'activeOrganizationBaseRole', 'role', 'updatedAt'],
+      required: [
+        'activeOrganizationId',
+        'activeOrganizationRole',
+        'activeOrganizationBaseRole',
+        'hasPassword',
+        'role',
+        'updatedAt',
+      ],
     },
   ],
 };
@@ -192,6 +207,7 @@ async function selfRecord<U extends { id: string }>(req: FastifyRequest, endUser
       activeOrganizationId: req.activeOrganizationId ?? null,
       activeOrganizationRole: active?.role ?? null,
       activeOrganizationBaseRole: active?.baseRole ?? null,
+      hasPassword: req.endUserHasPassword === true,
     },
   };
 }
@@ -208,6 +224,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/',
     {
+      config: { allowWithoutMfaEnrollment: true },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Get the current end-user (resolved from the user JWT)',
@@ -243,6 +260,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const include = parseMeInclude(req.query);
+      if (include.size > 0) await assertMfaEnrolledUnlessImpersonating(req, req.application!, req.endUser!.id);
       // Each value needs the scope of the route that already serves it, so a
       // narrow key cannot read here what it is refused there. A publishable
       // request carries no scopes and passes, as it does on those routes.
@@ -341,6 +359,80 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post(
+    '/email',
+    {
+      onRequest: requireScope('auth:write'),
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Mails two addresses on every call; the per-recipient cap applies to the new one too.
+      config: { rateLimit: authRateLimit(5) },
+      preHandler: refuseWhileImpersonating("change this account's email address"),
+      schema: {
+        tags: ['Public · Auth'],
+        summary: "Ask to change the current end-user's email address",
+        description:
+          'Mails a confirmation link to `newEmail` and a notice to the current address. Nothing changes ' +
+          'until the link is confirmed with POST /api/v1/auth/email-change/confirm, by a session of this ' +
+          'account or with its current password. The answer is the same whether or not `newEmail` already ' +
+          'has an account; when it does, that address is told so instead of getting a link, and the change ' +
+          'cannot complete. The link works once, for an hour; a newer request, a password change, a reset ' +
+          'or sign-out everywhere cancels it.\n\n' +
+          '`confirmUrl` is the page the link opens, with a `{token}` placeholder, on a registered origin. ' +
+          "Without it the link goes to `/email-change` on the app's URL, or to the hosted portal.",
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
+        body: {
+          type: 'object',
+          required: ['newEmail'],
+          properties: {
+            newEmail: { type: 'string', format: 'email', maxLength: 254 },
+            confirmUrl: { type: 'string', maxLength: 2048 },
+          },
+        },
+        response: {
+          202: ok(
+            { type: 'object', properties: { sent: { type: 'boolean', enum: [true] } }, required: ['sent'] },
+            'The confirmation link and the notice were mailed.',
+          ),
+          ...errs({
+            400:
+              'EMAIL_CHANGE_SAME_ADDRESS: `newEmail` is already the address on the account; or ' +
+              'EMAIL_CHANGE_URL_REQUIRED: no `confirmUrl` and no app URL or hosted portal to link to; or ' +
+              'AUTH_URL_INVALID / AUTH_URL_NOT_ALLOWED: `confirmUrl` is not an http(s) URL on a registered origin.',
+            401: USERS_ME_ERRORS[401],
+            403:
+              `${USERS_ME_ERRORS[403]} Or EMAIL_CHANGE_DOMAIN_NOT_ALLOWED: the application does not accept ` +
+              "accounts at that address's domain; or IMPERSONATION_ACTION_FORBIDDEN: the token is an operator impersonation session.",
+            429: 'RATE_LIMITED; or AUTH_EMAIL_RECIPIENT_CAPPED: `newEmail` has had the most auth emails allowed for now.',
+            503: 'EMAIL_CHANGE_NOT_SENT: the Application could not send the email; nothing was requested.',
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      const body = z
+        .object({ newEmail: z.string().email().max(254), confirmUrl: z.string().max(2048).optional() })
+        .parse(req.body);
+      const result = await requestEmailChange({
+        application: req.application!,
+        endUserId: req.endUser!.id,
+        newEmail: body.newEmail,
+        ...(body.confirmUrl !== undefined && { confirmUrl: body.confirmUrl }),
+      });
+      void recordSecurityEvent({
+        type: 'user.email_change_requested',
+        actorType: 'end_user',
+        actorId: req.endUser!.id,
+        tenantId: req.application!.tenantId,
+        applicationId: req.application!.id,
+        ...requestContext(req),
+      });
+      return reply.status(202).send({ success: true, data: result });
+    },
+  );
+
   app.delete(
     '/',
     {
@@ -356,8 +448,9 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           'answers 410 END_USER_ERASED because the token died with the account. An operator\'s ' +
           'impersonation session is refused (403 IMPERSONATION_ACTION_FORBIDDEN).\n\n' +
           'A publishable (browser) caller must confirm with `password`, or `code` when MFA is enrolled, ' +
-          'so a stolen token cannot delete an account. A secret-key caller is the trusted gate and ' +
-          'sends neither.\n\n' +
+          'so a stolen token cannot delete an account. An account with neither confirms with `emailCode`, ' +
+          'from POST /api/v1/auth/email-code { "purpose": "delete_account" }. A secret-key caller is the ' +
+          'trusted gate and sends none of them.\n\n' +
           'The Application decides who may call it with `authConfig.accountDeletion`: `self_service` ' +
           '(default), `server_only` (secret key only) or `off`.\n\n' +
           'Refused with 409 `ACCOUNT_HAS_ACTIVE_SUBSCRIPTION` while a subscription is still billing ' +
@@ -371,6 +464,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             password: { type: 'string', maxLength: 1024 },
             code: { type: 'string', maxLength: 64 },
+            emailCode: { type: 'string', maxLength: 16 },
           },
         },
         response: {
@@ -383,10 +477,10 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
             'The account is erased.',
           ),
           ...errs({
-            400: 'STEP_UP_UNAVAILABLE: a browser caller whose account has no password and no MFA has nothing to confirm with.',
             401:
-              'STEP_UP_REQUIRED: a browser caller sent no valid `password` or `code`; or the user token is ' +
-              'missing, invalid or already ended.',
+              'STEP_UP_REQUIRED: a browser caller sent no valid `password` or `code`; or EMAIL_CODE_REQUIRED: the ' +
+              'account has no password and no MFA, and no `emailCode` came; or EMAIL_CODE_INVALID: `emailCode` is ' +
+              'wrong, used, expired or out of tries; or the user token is missing, invalid or already ended.',
             403:
               'API_KEY_SCOPE_INSUFFICIENT: a secret key without `auth:write`; or ' +
               'IMPERSONATION_ACTION_FORBIDDEN: the token is an operator impersonation session; or ' +
@@ -422,7 +516,19 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
               : 'Delete the account from your backend with a secret key, or change Account deletion in the panel (Application, Auth).',
         });
       }
-      if (req.authKind === 'publishable') {
+      if (req.authKind === 'publishable' && !(await hasPasswordOrAuthenticator(endUserId))) {
+        // A mailbox is the only thing the session does not already prove.
+        const { emailCode } = req.body as { emailCode?: unknown };
+        if (typeof emailCode !== 'string' || emailCode === '') {
+          throw new RekeyError({
+            statusCode: 401,
+            code: 'EMAIL_CODE_REQUIRED',
+            message: 'This account has no password and no two-factor, so deleting it needs a code emailed to its address.',
+            fix: 'Ask for one with POST /api/v1/auth/email-code { "purpose": "delete_account" }, then send it here as `emailCode`.',
+          });
+        }
+        await assertEmailedCode(endUserId, 'delete_account', emailCode);
+      } else if (req.authKind === 'publishable') {
         const proof = req.body as { password?: unknown; code?: unknown };
         await assertStepUp({
           endUserId,

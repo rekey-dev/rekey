@@ -26,6 +26,7 @@ export type EmailEventKey =
   | 'email_verification'
   | 'magic_link_signin'
   | 'workspace_invitation'
+  | 'organization_invitation'
   | 'welcome'
   | 'mfa_enabled'
   | 'password_changed'
@@ -35,6 +36,10 @@ export type EmailEventKey =
   | 'operator_email_confirmed'
   | 'signup_existing_account'
   | 'signup_finish_setup'
+  | 'account_code'
+  | 'email_change_confirm'
+  | 'email_change_requested'
+  | 'email_change_address_taken'
   | 'billing_payment_failed_reminder'
   | 'billing_unapplied_payment';
 
@@ -61,6 +66,7 @@ const HOUR = 60 * 60 * 1000;
 const reset = sampleAt(HOUR);
 const verify = sampleAt(24 * HOUR);
 const magic = sampleAt(15 * 60 * 1000);
+const code = sampleAt(10 * 60 * 1000);
 const invite = sampleAt(7 * 24 * HOUR);
 const now = sampleAt(0);
 const grace = sampleAt(14 * 24 * HOUR);
@@ -108,6 +114,28 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       inviterName: 'Alex',
       workspaceName: 'Acme Inc',
       inviteUrl: 'https://your-app.example.com/accept-invite?token=…',
+      expiresAtIso: invite.iso,
+      expiresAt: invite.plain,
+    },
+  },
+  organization_invitation: {
+    key: 'organization_invitation',
+    label: 'Organization invitation',
+    variables: [
+      'inviteeEmail',
+      'inviterEmail',
+      'organizationName',
+      'roleName',
+      'inviteUrl',
+      'expiresAtIso',
+      'expiresAt',
+    ] as const,
+    sampleValues: {
+      inviteeEmail: 'newteammate@example.com',
+      inviterEmail: 'alex@example.com',
+      organizationName: 'Acme Inc',
+      roleName: 'Member',
+      inviteUrl: 'https://your-app.example.com/accept-invitation?token=…',
       expiresAtIso: invite.iso,
       expiresAt: invite.plain,
     },
@@ -206,6 +234,47 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       expiresAtIso: reset.iso,
       expiresAt: reset.plain,
     },
+  },
+  account_code: {
+    key: 'account_code',
+    label: 'Emailed code to confirm an account change',
+    variables: ['userEmail', 'code', 'action', 'expiresAtIso', 'expiresAt'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      code: '048213',
+      action: 'set a password',
+      expiresAtIso: code.iso,
+      expiresAt: code.plain,
+    },
+  },
+  email_change_confirm: {
+    key: 'email_change_confirm',
+    label: 'Confirm a new email address',
+    variables: ['userEmail', 'previousEmail', 'confirmUrl', 'expiresAtIso', 'expiresAt'] as const,
+    sampleValues: {
+      userEmail: 'new@example.com',
+      previousEmail: 'sample@example.com',
+      confirmUrl: 'https://your-app.example.com/email-change?token=…',
+      expiresAtIso: reset.iso,
+      expiresAt: reset.plain,
+    },
+  },
+  email_change_requested: {
+    key: 'email_change_requested',
+    label: 'Email address change requested (to the old address)',
+    variables: ['userEmail', 'newEmail', 'requestedAtIso', 'requestedAt'] as const,
+    sampleValues: {
+      userEmail: 'sample@example.com',
+      newEmail: 'new@example.com',
+      requestedAtIso: now.iso,
+      requestedAt: now.plain,
+    },
+  },
+  email_change_address_taken: {
+    key: 'email_change_address_taken',
+    label: 'Email change to an address that already has an account',
+    variables: ['userEmail'] as const,
+    sampleValues: { userEmail: 'new@example.com' },
   },
   billing_payment_failed_reminder: {
     key: 'billing_payment_failed_reminder',

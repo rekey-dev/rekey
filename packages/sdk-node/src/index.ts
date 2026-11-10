@@ -37,6 +37,10 @@ import type {
   JwkRsaPublic,
   JwksDto,
   ChangePasswordRequest,
+  EmailCodeRequest,
+  SetPasswordRequest,
+  EmailChangeRequest,
+  EmailChangeConfirmRequest,
   CheckoutResultDto,
   ConsumeCreditsRequest,
   ConsumeCreditsResultDto,
@@ -54,6 +58,7 @@ import type {
   LicenseVerifyResultDto,
   LicenseDeactivateRequest,
   LicenseDeactivateResultDto,
+  EndUserLicenseActivationDto,
   DeviceDto,
   EndUserDeviceDto,
   SupportModeDto,
@@ -65,12 +70,14 @@ import type {
   OAuthProvidersListDto,
   OrganizationDto,
   OrganizationInvitationDto,
+  OrganizationPendingInvitationDto,
+  OrganizationInvitationPreviewDto,
   OrganizationMemberDto,
   OrganizationWithRoleDto,
   OrganizationRoleDefDto,
   OrganizationRole,
   OrganizationBaseRole,
-  PublicPlanDto,
+  PublicPlanPage,
   ProvidersListDto,
   RekeyErrorShape,
   ResetPasswordRequest,
@@ -121,6 +128,7 @@ export type {
   EndUserLicenseDto,
   FeatureCheckDto,
   PublicPlanDto,
+  PublicPlanPage,
   PublicPlanCheckoutDto,
   MeInclude,
   MeIncluded,
@@ -186,12 +194,15 @@ export type {
   OrganizationRoleDefDto,
   OrganizationMemberDto,
   OrganizationInvitationDto,
+  OrganizationPendingInvitationDto,
+  OrganizationInvitationPreviewDto,
   OrganizationRole,
   OrganizationBaseRole,
   LicenseDto,
   LicenseStatusType,
   LicenseVerifyResultDto,
   LicenseActivationDto,
+  EndUserLicenseActivationDto,
   LicenseDeactivateRequest,
   LicenseDeactivateResultDto,
   DeviceDto,
@@ -1456,6 +1467,70 @@ class AuthClient {
   }
 
   /**
+   * Email the user a six-digit code to their verified address, proving they
+   * can read it before `setPassword(...)` (`purpose: 'set_password'`) or
+   * a browser's `DELETE /api/v1/users/me` (`'delete_account'`, only for an
+   * account with no password and no two-factor). The code is never in the
+   * response.
+   *
+   * @example
+   *   await rekey.auth.requestEmailCode(accessToken, { purpose: 'set_password' });
+   */
+  requestEmailCode(accessToken: string, input: EmailCodeRequest): Promise<{ sent: true; expiresAt: string }> {
+    return this.client.send('POST', '/api/v1/auth/email-code', input, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * Set a first password on an account that has none (it joined by emailed
+   * link or a social provider), with the code from `requestEmailCode`. Every
+   * session ends afterwards, this one included.
+   *
+   * @example
+   *   await rekey.auth.setPassword(accessToken, { newPassword, emailCode: '048213' });
+   */
+  setPassword(accessToken: string, input: SetPasswordRequest): Promise<{ ok: true }> {
+    return this.client.send('POST', '/api/v1/auth/set-password', input, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * Ask to change the user's email address. Mails a link to `newEmail` and a
+   * notice to the current address; the answer is the same whether or not
+   * `newEmail` already has an account. Nothing changes until
+   * `confirmEmailChange(...)`.
+   *
+   * @example
+   *   await rekey.auth.requestEmailChange(accessToken, {
+   *     newEmail: 'new@example.com',
+   *     confirmUrl: 'https://app.example.com/email-change?token={token}',
+   *   });
+   */
+  requestEmailChange(accessToken: string, input: EmailChangeRequest): Promise<{ sent: true }> {
+    return this.client.send('POST', '/api/v1/users/me/email', input, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * Spend an email change link. Pass the account's `accessToken`, or
+   * `password` where the user is not signed in. Every session ends afterwards.
+   *
+   * @example
+   *   await rekey.auth.confirmEmailChange({ token, password }, null);
+   */
+  confirmEmailChange(input: EmailChangeConfirmRequest, accessToken: string | null): Promise<{ ok: true; email: string }> {
+    return this.client.send(
+      'POST',
+      '/api/v1/auth/email-change/confirm',
+      input,
+      accessToken ? { 'X-Rekey-User-Token': accessToken } : undefined,
+    );
+  }
+
+  /**
    * Revoke every refresh token for the calling user. "Sign out of all
    * devices." The caller's access token remains valid until 15-min expiry,
    * clear it client-side for full logout.
@@ -1548,7 +1623,12 @@ class AuthClient {
   /**
    * List the current user's active sessions (live refresh tokens), newest
    * first. Each carries the User-Agent + IP captured at issue time and an
-   * `id` you can pass to `revokeSession(...)`.
+   * `id` you can pass to `revokeSession(...)`. `current` marks the session
+   * `accessToken` belongs to.
+   *
+   * @example
+   *   const { items } = await rekey.auth.listSessions(accessToken);
+   *   const others = items.filter((s) => !s.current);
    */
   listSessions(
     accessToken: string,
@@ -1560,6 +1640,8 @@ class AuthClient {
       expiresAt: string;
       userAgent: string | null;
       ip: string | null;
+      deviceId: string | null;
+      current: boolean;
     }>
   > {
     return this.client.send('GET', `/api/v1/auth/sessions${listQuery(page)}`, undefined, {
@@ -1626,6 +1708,20 @@ class AuthClient {
    */
   mfaChallenge(accessToken: string, code: string): Promise<{ ok: boolean }> {
     return this.client.send('POST', '/api/v1/auth/mfa/challenge', { code }, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * Replace the user's backup codes with 10 new ones; every earlier backup
+   * code stops working. Needs the authenticator's current 6-digit `code`: a
+   * backup code is refused (MFA_CODE_INVALID). Show the codes once.
+   *
+   * @example
+   *   const { backupCodes } = await rekey.auth.replaceBackupCodes(accessToken, '123456');
+   */
+  replaceBackupCodes(accessToken: string, code: string): Promise<{ backupCodes: string[] }> {
+    return this.client.send('POST', '/api/v1/auth/mfa/backup-codes', { code }, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1875,21 +1971,81 @@ class OrganizationsClient {
   }
 
   /**
-   * Invite a user. Returns the raw token ONCE, surface via your own
-   * email/share channel. OWNER + ADMIN only.
+   * Invite a user. OWNER + ADMIN only. Rekey emails the invited address a
+   * link in your Application's branding (`emailSent` says whether it went
+   * out) and returns the raw token ONCE as well.
+   *
+   * @example
+   * ```ts
+   * const { emailSent, token } = await rekey.organizations.invite(accessToken, orgId, {
+   *   email: 'sam@acme.com',
+   *   inviteUrl: 'https://app.acme.com/join?token={token}',
+   * });
+   * if (!emailSent) shareYourself(token);
+   * ```
    */
   invite(
     accessToken: string,
     organizationId: string,
     /**
      * `role` is a catalog NAME from `listRoles()`, not a fixed tier. Omit it to
-     * use the Application's default organization role.
+     * use the Application's default organization role. `inviteUrl` is the
+     * emailed link with `{token}` where the token goes, on an origin the
+     * Application registered; omit it for the default page.
      */
-    input: { email: string; role?: OrganizationRole },
-  ): Promise<{ invitation: OrganizationInvitationDto; token: string }> {
+    input: { email: string; role?: OrganizationRole; inviteUrl?: string },
+  ): Promise<{ invitation: OrganizationInvitationDto; token: string; emailSent: boolean }> {
     return this.client.send(
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations`,
+      input,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+
+  /**
+   * Invitations nobody has accepted or revoked yet, newest first. OWNER +
+   * ADMIN only. Never carries a token; expired ones are included so you can
+   * offer `resendInvitation`.
+   *
+   * @example
+   * ```ts
+   * const { items } = await rekey.organizations.listInvitations(accessToken, orgId);
+   * const stale = items.filter((i) => new Date(i.expiresAt) < new Date());
+   * ```
+   */
+  listInvitations(
+    accessToken: string,
+    organizationId: string,
+    page?: ListPage,
+  ): Promise<Paged<OrganizationPendingInvitationDto>> {
+    return this.client.send(
+      'GET',
+      `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations${listQuery(page)}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+
+  /**
+   * Issue and email a fresh link for a pending invitation; the old link
+   * stops working. The new invitation has a new id. Needs the authority to
+   * invite that address at that role.
+   *
+   * @example
+   * ```ts
+   * const { invitation, emailSent } = await rekey.organizations.resendInvitation(accessToken, orgId, invitationId);
+   * ```
+   */
+  resendInvitation(
+    accessToken: string,
+    organizationId: string,
+    invitationId: string,
+    input?: { inviteUrl?: string },
+  ): Promise<{ invitation: OrganizationInvitationDto; token: string; emailSent: boolean }> {
+    return this.client.send(
+      'POST',
+      `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
       input,
       { 'X-Rekey-User-Token': accessToken },
     );
@@ -1967,6 +2123,22 @@ class OrganizationsClient {
       undefined,
       { 'X-Rekey-User-Token': accessToken },
     );
+  }
+
+  /**
+   * What an invitation offers, read by its raw token with no user session:
+   * organization and application names, the role, and masked addresses. A
+   * token that cannot be accepted any more rejects with
+   * `ORGANIZATION_INVITATION_UNAVAILABLE`.
+   *
+   * @example
+   * ```ts
+   * const invite = await rekey.organizations.previewInvitation({ token });
+   * console.log(`${invite.organizationName}, as ${invite.role}`);
+   * ```
+   */
+  previewInvitation(input: { token: string }): Promise<OrganizationInvitationPreviewDto> {
+    return this.client.send('POST', '/api/v1/auth/organizations/invitation-preview', input);
   }
 
   /**
@@ -2096,6 +2268,54 @@ class LicensesClient {
     return this.client.send('GET', `/api/v1/users/me/licenses/${query ? `?${query}` : ''}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
+  }
+
+  /**
+   * The machines on one of the signed-in end-user's licences, those holding a
+   * seat first. The licence must be theirs or pooled to an organization they
+   * belong to (else 404 `LICENSE_NOT_FOUND`). Needs `billing:read` on a secret key.
+   *
+   * @example
+   * ```ts
+   * const { items } = await rekey.licenses.listMyActivations(accessToken, licenseId);
+   * const inUse = items.filter((a) => a.status === 'ACTIVE').length;
+   * ```
+   */
+  listMyActivations(
+    accessToken: string,
+    licenseId: string,
+    page?: ListPage,
+  ): Promise<Paged<EndUserLicenseActivationDto>> {
+    return this.client.send(
+      'GET',
+      `/api/v1/users/me/licenses/${encodeURIComponent(licenseId)}/activations${listQuery(page)}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+
+  /**
+   * Free the seat a machine holds, from the end-user's account rather than
+   * with the key. Same policy and body as `deactivate`. A licence pooled to an
+   * organization needs its OWNER or ADMIN tier. Needs `billing:write` on a secret key.
+   *
+   * @example
+   * ```ts
+   * const result = await rekey.licenses.releaseMyActivation(accessToken, licenseId, activationId);
+   * if (!result.ok) showLicenseError(result.reason);
+   * ```
+   */
+  releaseMyActivation(
+    accessToken: string,
+    licenseId: string,
+    activationId: string,
+  ): Promise<LicenseDeactivateResultDto> {
+    return this.client.send(
+      'DELETE',
+      `/api/v1/users/me/licenses/${encodeURIComponent(licenseId)}/activations/${encodeURIComponent(activationId)}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
   }
 }
 
@@ -3181,7 +3401,7 @@ class BillingClient {
    * }
    * ```
    */
-  getPlans(page?: ListPage, opts?: { country?: string; accessToken?: string }): Promise<Paged<PublicPlanDto>> {
+  getPlans(page?: ListPage, opts?: { country?: string; accessToken?: string }): Promise<PublicPlanPage> {
     const query = new URLSearchParams();
     if (page?.limit !== undefined) query.set('limit', String(page.limit));
     if (page?.offset !== undefined) query.set('offset', String(page.offset));

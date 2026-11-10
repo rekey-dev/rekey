@@ -204,7 +204,16 @@ const PlansQuery = z.object({ country: z.string().regex(COUNTRY_INPUT).optional(
  */
 async function optionalEndUserId(req: FastifyRequest, reply: FastifyReply): Promise<string | undefined> {
   if (typeof req.headers['x-rekey-user-token'] !== 'string') return undefined;
-  await requireUserSession(req, reply);
+  try {
+    await requireUserSession(req, reply);
+  } catch (err) {
+    // An unenrolled user under `mfa: required` reads public data as a visitor would.
+    if (err instanceof RekeyError && err.code === 'MFA_ENROLLMENT_REQUIRED') {
+      delete req.endUser;
+      return undefined;
+    }
+    throw err;
+  }
   return req.endUser?.id;
 }
 
@@ -313,7 +322,24 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         response: {
-          200: okPage(ref('PublicPlan'), 'A page of active plans for the calling application.'),
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                items: { type: 'array', items: ref('PublicPlan'), description: 'The rows of this page.' },
+                page: ref('PageMeta'),
+                defaultPlanSlug: {
+                  type: 'string',
+                  nullable: true,
+                  description:
+                    "The Application's free default plan, the one POST /billing/subscribe activates; " +
+                    'null when it has none. Offer a no-checkout start on that plan only.',
+                },
+              },
+              required: ['items', 'page', 'defaultPlanSlug'],
+            },
+            'A page of active plans for the calling application, and which one is the free default.',
+          ),
           ...errs({
             400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
             ...READ_GATE_ERRORS,
@@ -347,7 +373,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 activeOrganizationId: req.activeOrganizationId,
               }),
       });
-      return { success: true, data: paged(items, total, take, skip) };
+      return {
+        success: true,
+        data: { ...paged(items, total, take, skip), defaultPlanSlug: billingConfig.defaultPlanSlug ?? null },
+      };
     },
   );
 

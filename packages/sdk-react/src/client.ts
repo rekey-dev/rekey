@@ -27,10 +27,11 @@
 import type {
   CancelReason,
   CurrentUserDto,
-  EndUserDto,
   EndUserLicenseDto,
+  EndUserLicenseActivationDto,
+  LicenseDeactivateResultDto,
   FeatureCheckDto,
-  PublicPlanDto,
+  PublicPlanPage,
   RekeyErrorShape,
   SignUpRequest,
   SignInRequest,
@@ -44,6 +45,9 @@ import type {
   ValidateCouponRequest,
   ValidateCouponResultDto,
   OrganizationWithRoleDto,
+  OrganizationInvitationDto,
+  OrganizationPendingInvitationDto,
+  OrganizationInvitationPreviewDto,
   ProvidersListDto,
   OAuthProvidersListDto,
   TrialEligibilityDto,
@@ -58,6 +62,9 @@ import type {
   ContactListPublicDto,
   ListSubscribeRequest,
   ProfileStateDto,
+  EmailCodeRequest,
+  SetPasswordRequest,
+  EmailChangeRequest,
 } from '@rekey.dev/shared-types';
 // NOTE the subpath. `RekeyError` is the ONLY value this package imports from
 // shared-types, everything above is a type and erases. Importing it from the
@@ -188,9 +195,9 @@ export class RekeyBrowserClient {
    * Override `meEndpoint` only for deployments that expose the resolution
    * under a different path.
    */
-  async getCurrentUser(accessToken: string, meEndpoint = '/api/v1/auth/me'): Promise<EndUserDto | null> {
+  async getCurrentUser(accessToken: string, meEndpoint = '/api/v1/auth/me'): Promise<CurrentUserDto | null> {
     try {
-      const res = await this.raw<EndUserDto>('GET', meEndpoint, undefined, { accessToken });
+      const res = await this.raw<CurrentUserDto>('GET', meEndpoint, undefined, { accessToken });
       return res.data;
     } catch (err) {
       if (err instanceof RekeyError && isSignedOutCode(err.code)) {
@@ -319,10 +326,10 @@ export class RekeyBrowserClient {
    * const label = items[0]?.price?.formatted ?? 'Free';
    * ```
    */
-  getPlans(page?: ListPage, opts?: { accessToken?: string }): Promise<Paged<PublicPlanDto>> {
+  getPlans(page?: ListPage, opts?: { accessToken?: string }): Promise<PublicPlanPage> {
     const path = `/api/v1/billing/plans${listQuery(page)}`;
-    if (opts?.accessToken) return this.selfService<Paged<PublicPlanDto>>('GET', path, undefined, opts.accessToken);
-    return this.bootstrap<Paged<PublicPlanDto>>('GET', path, undefined);
+    if (opts?.accessToken) return this.selfService<PublicPlanPage>('GET', path, undefined, opts.accessToken);
+    return this.bootstrap<PublicPlanPage>('GET', path, undefined);
   }
 
   /**
@@ -422,6 +429,22 @@ export class RekeyBrowserClient {
   }
 
   /**
+   * What an organization invitation offers, read by its token before the
+   * invited person signs in: organization and application names, the role,
+   * and masked addresses. A token that cannot be accepted any more rejects
+   * with `ORGANIZATION_INVITATION_UNAVAILABLE`. Needs only the publishable key.
+   *
+   * @example
+   * const invite = await client.previewOrganizationInvitation(tokenFromLink);
+   * // `${invite.invitedBy} invited you to ${invite.organizationName}`
+   */
+  previewOrganizationInvitation(token: string): Promise<OrganizationInvitationPreviewDto> {
+    return this.bootstrap<OrganizationInvitationPreviewDto>('POST', '/api/v1/auth/organizations/invitation-preview', {
+      token,
+    });
+  }
+
+  /**
    * Verify a license key for this machine. The license `key` is the entitlement
    * bearer; the publishable key only identifies the Application. `ok=false` is a
    * normal result for an invalid/expired license, not an exception.
@@ -496,6 +519,48 @@ export class RekeyBrowserClient {
       'GET',
       `/api/v1/users/me/organizations/${listQuery(page)}`,
       undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * Pending invitations of an organization the signed-in user is an OWNER or
+   * ADMIN of, newest first. Never carries a token.
+   *
+   * @example
+   * const { items } = await client.listOrganizationInvitations(accessToken, orgId);
+   */
+  listOrganizationInvitations(
+    accessToken: string,
+    organizationId: string,
+    page?: ListPage,
+  ): Promise<Paged<OrganizationPendingInvitationDto>> {
+    return this.selfService<Paged<OrganizationPendingInvitationDto>>(
+      'GET',
+      `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations${listQuery(page)}`,
+      undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * Issue and email a fresh link for a pending invitation; the old link stops
+   * working. `inviteUrl` (with `{token}`) must be on an origin the Application
+   * registered.
+   *
+   * @example
+   * const { invitation, emailSent } = await client.resendOrganizationInvitation(accessToken, orgId, invitationId);
+   */
+  resendOrganizationInvitation(
+    accessToken: string,
+    organizationId: string,
+    invitationId: string,
+    input?: { inviteUrl?: string },
+  ): Promise<{ invitation: OrganizationInvitationDto; token: string; emailSent: boolean }> {
+    return this.selfService<{ invitation: OrganizationInvitationDto; token: string; emailSent: boolean }>(
+      'POST',
+      `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
+      input,
       accessToken,
     );
   }
@@ -588,6 +653,47 @@ export class RekeyBrowserClient {
     return this.selfService<Paged<EndUserLicenseDto>>(
       'GET',
       `/api/v1/users/me/licenses/${query ? `?${query}` : ''}`,
+      undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * The machines on one of the signed-in user's licences, those holding a
+   * seat first, each with a label and the start of its fingerprint.
+   *
+   * @example
+   * const { items } = await client.listLicenseActivations(accessToken, licenseId);
+   */
+  listLicenseActivations(
+    accessToken: string,
+    licenseId: string,
+    page?: ListPage,
+  ): Promise<Paged<EndUserLicenseActivationDto>> {
+    return this.selfService<Paged<EndUserLicenseActivationDto>>(
+      'GET',
+      `/api/v1/users/me/licenses/${encodeURIComponent(licenseId)}/activations${listQuery(page)}`,
+      undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * Free the seat a machine holds on one of the signed-in user's licences,
+   * without the key. A licence pooled to an organization needs its OWNER or
+   * ADMIN tier.
+   *
+   * @example
+   * const result = await client.releaseLicenseActivation(accessToken, licenseId, activationId);
+   */
+  releaseLicenseActivation(
+    accessToken: string,
+    licenseId: string,
+    activationId: string,
+  ): Promise<LicenseDeactivateResultDto> {
+    return this.selfService<LicenseDeactivateResultDto>(
+      'DELETE',
+      `/api/v1/users/me/licenses/${encodeURIComponent(licenseId)}/activations/${encodeURIComponent(activationId)}`,
       undefined,
       accessToken,
     );
@@ -821,7 +927,10 @@ export class RekeyBrowserClient {
   /**
    * Erase the signed-in user's own account. It cannot be undone. From the
    * browser the user confirms with their `password`, or `code` when MFA is on.
-   * Throws STEP_UP_REQUIRED (401) without a valid one,
+   * An account with neither confirms with `emailCode`, from
+   * `requestEmailCode(accessToken, { purpose: 'delete_account' })`.
+   * Throws STEP_UP_REQUIRED (401) without a valid one, EMAIL_CODE_REQUIRED or
+   * EMAIL_CODE_INVALID (401) for the emailed code,
    * ACCOUNT_HAS_ACTIVE_SUBSCRIPTION (409) while a subscription still bills, and
    * ACCOUNT_SELF_DELETION_DISABLED (403) when the Application keeps deletion on
    * its server (`authConfig.accountDeletion` `server_only` or `off`).
@@ -829,8 +938,61 @@ export class RekeyBrowserClient {
    * @example
    *   await client.deleteAccount(accessToken, { password });
    */
-  deleteAccount(accessToken: string, proof: { password?: string; code?: string }): Promise<{ erased: true; erasedAt: string }> {
+  deleteAccount(
+    accessToken: string,
+    proof: { password?: string; code?: string; emailCode?: string },
+  ): Promise<{ erased: true; erasedAt: string }> {
     return this.selfService<{ erased: true; erasedAt: string }>('DELETE', '/api/v1/users/me/', proof, accessToken);
+  }
+
+  /**
+   * Replace the signed-in user's two-factor backup codes with 10 new ones;
+   * every earlier backup code stops working. Needs the authenticator's current
+   * 6-digit `code`: a backup code is refused (MFA_CODE_INVALID). Show the
+   * codes once, they cannot be read again.
+   *
+   * @example
+   *   const { backupCodes } = await client.replaceBackupCodes(accessToken, '123456');
+   */
+  replaceBackupCodes(accessToken: string, code: string): Promise<{ backupCodes: string[] }> {
+    return this.selfService<{ backupCodes: string[] }>('POST', '/api/v1/auth/mfa/backup-codes', { code }, accessToken);
+  }
+
+  /**
+   * Email the signed-in user a six-digit code to their verified address. It
+   * proves they can read the mailbox before `setPassword` (`'set_password'`)
+   * or `deleteAccount` with `emailCode` (`'delete_account'`, for an account
+   * with no password and no two-factor).
+   *
+   * @example
+   *   await client.requestEmailCode(accessToken, { purpose: 'set_password' });
+   */
+  requestEmailCode(accessToken: string, input: EmailCodeRequest): Promise<{ sent: true; expiresAt: string }> {
+    return this.selfService<{ sent: true; expiresAt: string }>('POST', '/api/v1/auth/email-code', input, accessToken);
+  }
+
+  /**
+   * Set a first password on an account that has none, with the code from
+   * `requestEmailCode`. Every session ends afterwards, this one included.
+   *
+   * @example
+   *   await client.setPassword(accessToken, { newPassword, emailCode: '048213' });
+   */
+  setPassword(accessToken: string, input: SetPasswordRequest): Promise<{ ok: true }> {
+    return this.selfService<{ ok: true }>('POST', '/api/v1/auth/set-password', input, accessToken);
+  }
+
+  /**
+   * Ask to change the signed-in user's email address. Mails a link to
+   * `newEmail` and a notice to the current address; the answer is the same
+   * whether or not `newEmail` already has an account. The address changes
+   * when the link is confirmed (`POST /api/v1/auth/email-change/confirm`).
+   *
+   * @example
+   *   await client.requestEmailChange(accessToken, { newEmail: 'new@example.com' });
+   */
+  requestEmailChange(accessToken: string, input: EmailChangeRequest): Promise<{ sent: true }> {
+    return this.selfService<{ sent: true }>('POST', '/api/v1/users/me/email', input, accessToken);
   }
 
   // ---------- internals ----------

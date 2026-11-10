@@ -32,6 +32,11 @@ before you had a catalog resolving to the authority they always had.
 | Assign a role | an org OWNER/ADMIN, **their own end-user token** | `PATCH /users/me/organizations/:id/members/:euid` |
 | Assign a role as the operator | operator, tenant session | Panel → Application → Organizations, `POST` / `PATCH /tenant/applications/:id/organizations/:orgId/members`, or the `add_organization_member` / `set_organization_member_role` MCP tools |
 | Read the catalog | any signed-in end-user | `GET /users/me/organizations/roles` |
+| Invite (Rekey emails the link) | an org OWNER/ADMIN, their own end-user token | `POST /users/me/organizations/:id/invitations` with `{ email, role?, inviteUrl? }` |
+| List pending invitations | an org OWNER/ADMIN, their own end-user token | `GET /users/me/organizations/:id/invitations` |
+| Resend or revoke an invitation | an org OWNER/ADMIN; resend also needs the authority to invite to that role | `POST /users/me/organizations/:id/invitations/:invId/resend` or `.../revoke` |
+| Free a seat on a licence pooled to the organization | an org OWNER/ADMIN; any member may list its machines | `DELETE /users/me/licenses/:licenseId/activations/:activationId` |
+| Preview an invitation | whoever holds its link, publishable key, no session | `POST /auth/organizations/invitation-preview` with `{ token }`: organization and application names, the role, masked addresses, expiry |
 
 Over the operator MCP, write access defines and assigns MEMBER-tier roles only. A role
 with an OWNER or ADMIN `baseRole`, and assigning one, needs admin access

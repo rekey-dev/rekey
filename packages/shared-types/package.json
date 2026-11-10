@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/shared-types",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -29,6 +29,11 @@
       "types": "./dist/checkout.d.ts",
       "import": "./dist/checkout.js",
       "default": "./dist/checkout.js"
+    },
+    "./profile-limits": {
+      "types": "./dist/profile-limits.d.ts",
+      "import": "./dist/profile-limits.js",
+      "default": "./dist/profile-limits.js"
     },
     "./currency": {
       "types": "./dist/currency/index.d.ts",

@@ -239,6 +239,27 @@ Step 3 is the one that surprises people. Pointing the redirect URI at
 `api.rekey.dev`, or at a Rekey-hosted page, breaks the flow, because Rekey is
 not what the provider is redirecting to.
 
+The one exception is the hosted portal ([portal.md](portal.md)). It runs the
+same four steps for its own sign-in page, passing `redirectUri` to both `start`
+and `callback` in place of the configured one. The API takes nothing there but
+this Application's portal page, `<PUBLIC_PORTAL_URL>/<slug>/oauth/callback`
+(or `/oauth/callback` on its verified custom domain), and answers anything
+else with `OAUTH_REDIRECT_URI_NOT_ALLOWED`. Your own app leaves `redirectUri`
+out and nothing changes for it.
+
+Offering a provider in the portal is opt-in, per provider, because it only
+works once the provider's console lists the portal page too. Register
+`<PUBLIC_PORTAL_URL>/<slug>/oauth/callback` (and the custom-domain form, if
+you have one) in the provider's console first, then tick **Offer in the hosted
+portal** on that provider (Panel → Application → Authentication → Sign-in
+providers, shown while the hosted portal is on; the panel shows the exact URL
+with a copy button), or send `hostedPortal: true` to
+`PUT /api/v1/tenant/applications/:id/oauth-config/:provider`. It is stored with
+the provider's entry in `oauthConfig` and starts off. Until it is on, the
+portal shows no button for the provider and the API refuses the portal page
+with `OAUTH_PROVIDER_NOT_IN_PORTAL`. `GET /api/v1/auth/oauth/providers`
+reports it per provider as `hostedPortal`.
+
 ### Which buttons to show
 
 `GET /api/v1/auth/oauth/providers` lists the providers an end-user can sign in
@@ -391,6 +412,8 @@ to move everyone first). See
 ### Acting as an OpenID Connect provider for another app
 
 When this Application is the identity provider, `GET /api/v1/mcp/:slug/oauth/authorize`
+sends the browser to the Application's hosted portal when the portal is on (see
+[oidc-provider.md](oidc-provider.md#where-the-user-signs-in)), and otherwise
 renders a built-in email + password page. That is right for a deployment with no
 front end of its own, and **a dead end for an Application whose users sign in
 with Google**: they have no password, so the only way through is a reset on an
@@ -668,13 +691,39 @@ Headers: Authorization: Bearer rp_live_…  +  X-Rekey-User-Token: <jwt>
 - Verifies `currentPassword` first — wrong returns `INVALID_CREDENTIALS`.
 - On success, every refresh token for the user is revoked. Access tokens minted before the call, the caller's own included, are refused on their next use.
 
+### Set a first password (authenticated)
+
+```
+POST /api/v1/auth/email-code     { purpose: "set_password" }
+POST /api/v1/auth/set-password   { newPassword, emailCode }
+Headers: Authorization: Bearer <key>  +  X-Rekey-User-Token: <jwt>
+→ 200 { ok: true }
+```
+
+For an account that joined by emailed link or a social provider and has no password. The first call emails a six-digit code to the account's verified address; the second sets the password with it. The code works once, for 10 minutes, five wrong tries end it, and it is never in a response. A session alone is not enough, for browser and server callers alike: a password outlives every session. The same length and breach checks as sign-up apply, and every session ends afterwards, as after a password change. An account that already has a password gets `PASSWORD_ALREADY_SET` from both calls, and no code is sent.
+
+### Change email address (authenticated)
+
+```
+POST /api/v1/users/me/email            { newEmail, confirmUrl? }   → 202 { sent: true }
+POST /api/v1/auth/email-change/confirm { token, password? }        → 200 { ok: true, email }
+```
+
+The request mails a link to the new address and a notice naming it to the current one. Nothing changes until the link's `token` is confirmed, with the same account's `X-Rekey-User-Token` or, where nobody is signed in, its current `password`. The link is an email-verification token for the new address, valid for an hour.
+
+- **The answer never says whether the new address has an account.** When it does, that address is mailed `email_change_address_taken` instead of a link, and the change cannot complete. A confirmation that finds the address taken since answers `EMAIL_ALREADY_EXISTS`: whoever holds the link reads that mailbox.
+- **The new address must pass the sign-up domain rules** (`signupRestrictions`), at the request and again at the confirmation.
+- **On confirmation:** the new address is the account's and is verified; every session ends, the caller's included; unspent verification, reset and sign-in links mailed to the old address stop working. Linked sign-in providers, passkeys and two-factor stay: they are not keyed by the address.
+- **A pending change is cancelled** by a newer request, by a password change or reset, and by sign-out everywhere.
+
 ### How much auth email one address can be sent
 
 Reset, magic-link and verification requests take an address from anyone holding the publishable key. The request limits count by caller, so on their own they would let a caller on many addresses fill one inbox. Auth email is therefore also counted by **recipient**: 5 an hour and 15 a UTC day to one mailbox per Application, from any caller and any IP (`AUTH_EMAIL_RECIPIENT_HOURLY_CAP`, `AUTH_EMAIL_RECIPIENT_DAILY_CAP`).
 
 - `a+1@example.com` and `a+2@example.com` are one mailbox. For Gmail, dots in the local part and `googlemail.com` are ignored too.
 - **Counted:** password reset, magic link, verification (including the resend routes and the signed-in `POST /auth/send-verification`), welcome, the two sign-up notices, and operator-triggered resets and resends from the panel. Operator mail has its own count per mailbox: reset, sign-in link, invitation and the confirmation email, including the one sent at sign-up.
-- **Not counted:** security notices (`password_changed`, `mfa_enabled`, `account_claimed`, `operator_account_claimed`, `operator_email_confirmed`).
+- **Not counted:** security notices (`password_changed`, `mfa_enabled`, `account_claimed`, `email_change_requested`, `operator_account_claimed`, `operator_email_confirmed`).
+- **Also counted:** the emailed code (`account_code`), and the mail to the new address of an email change (`email_change_confirm` or `email_change_address_taken`).
 - **Also counted:** a built-in template test send from the panel, to the address it is sent to.
 - **Over the limit, from a publishable key:** `/auth/forgot-password`, `/auth/magic-link/request` and `/auth/resend-verification` answer 200 with their usual constant body and send nothing. The allowance is spent before the address is looked up, so a known and an unknown address behave the same and the limit says nothing about whether an account exists.
 - **Over the limit, from a secret key, or on the signed-in resend:** 429 `AUTH_EMAIL_RECIPIENT_CAPPED` with `Retry-After`.
@@ -832,7 +881,8 @@ The auth module enforces:
 
   Turning it on takes effect immediately for accounts that already exist, so send the verification email (above) before enforcing it. A blocked user can ask for a fresh link themselves with **`POST /api/v1/auth/resend-verification`** (`{ email }`, no session — that is the point, since this gate is what denies them one). It answers 200 with a constant body whatever happened, so it discloses nothing about which addresses have accounts, and it is rate-limited per (Application, address, IP) and per recipient exactly like `/auth/forgot-password`. `POST /auth/send-verification` remains the authenticated version, for a user who *has* a session and is changing their address. Other routes back in: the original email, a magic link if that method is enabled, or an operator flipping the flag from Panel → Application → End-users.
 
-  One prerequisite for both: a verification link has to be *buildable*. If the Application has no `appUrl`, no usable `redirectUrls` origin and the deployment has no `DEFAULT_APP_URL`, the automatic sign-up send and `resend-verification` are **skipped entirely** rather than mailing a confirmation with no button in it, and an `auth.email_delivery_failed` event is recorded naming the setting to fix. Set the Application URL (Panel → Application → Auth) before enabling the gate, or pass `verifyUrl` per call.
+  One prerequisite for both: a verification link has to be *buildable*. If the Application has no `appUrl`, no usable `redirectUrls` origin, no hosted portal turned on and the deployment has no `DEFAULT_APP_URL`, the automatic sign-up send and `resend-verification` are **skipped entirely** rather than mailing a confirmation with no button in it, and an `auth.email_delivery_failed` event is recorded naming the setting to fix. Set the Application URL (Panel → Application → Auth) before enabling the gate, or pass `verifyUrl` per call. An Application with no web page of its own (a desktop app, say) can turn on the hosted portal instead: with no `appUrl` the verification, password-reset and sign-in links then go to the portal's `/<slug>/verify-email`, `/<slug>/reset-password` and `/<slug>/sign-in-link` pages, and the portal cannot be turned off while verification depends on it.
+- **`mfa`** (default **`optional`**): `off` refuses MFA setup (`MFA_NOT_ENABLED`); `optional` lets each user enrol; `required` still gives an unenrolled user a session at sign-in, flagged `mfaEnrollmentRequired: true`, but every user-session route then refuses that session with **403 `MFA_ENROLLMENT_REQUIRED`** until the user confirms an authenticator. The exceptions are the routes needed to enrol, see who is signed in, or leave: `GET /auth/mfa/status`, `POST /auth/mfa/setup`, `POST /auth/mfa/setup-confirm`, `POST /auth/send-verification` (setup needs a confirmed address), `POST /auth/sign-out-everywhere`, and `GET /auth/me` and `GET /users/me` without `include`. Sign-in, refresh and sign-out take no user session and are unaffected. A secret-key caller acting with the user's token is refused the same way; an operator impersonation session is not refused, since the operator cannot enrol for the user. Only a confirmed TOTP authenticator counts, not a passkey. Switching an Application to `required` holds back its existing unenrolled sessions on their next call. Your backend's offline verification of the access token (JWKS) cannot see this, so check `mfaEnrollmentRequired` or `GET /auth/mfa/status` yourself if you serve data on a locally verified token.
 - **`welcomeEmail`** (default **`on_signup`**) decides when the `welcome` mail goes out. It is sent once, fire-and-forget, to accounts created by password sign-up, magic-link sign-up or OAuth-first sign-up; operator-created and imported users never get one, an OAuth user who comes back or links a provider to an existing account does not get it again, and the per-event switch (Panel → Application → Email) still applies on top.
 
   | `welcomeEmail` | Address verified at creation (magic link, a vouching OAuth provider) | Unverified address, `requireEmailVerification` off | Unverified address, `requireEmailVerification` on |

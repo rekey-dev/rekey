@@ -13,7 +13,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { safeCssColor, safeHttpUrl, supportLink } from '@/lib/config';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { brandTokens, followsColorScheme, safeCssColor, safeHttpUrl, supportLink } from '@/lib/config';
+import { MUTED_TEXT } from '@/lib/checkout-format';
 
 describe('safeCssColor', () => {
   it('accepts hex colours of every legal length', () => {
@@ -52,11 +55,60 @@ describe('safeCssColor', () => {
     expect(safeCssColor('#fff}html{display:none')).toBeUndefined();
   });
 
+  it('rejects keywords that paint nothing or inherit, in any case', () => {
+    for (const keyword of ['transparent', 'currentColor', 'CURRENTCOLOR', 'inherit', 'Initial', 'unset', 'revert', 'revert-layer']) {
+      expect(safeCssColor(keyword)).toBeUndefined();
+    }
+  });
+
   it('returns undefined for empty and missing input so the caller can skip it', () => {
     expect(safeCssColor(undefined)).toBeUndefined();
     expect(safeCssColor('')).toBeUndefined();
     // Whitespace-only trims to empty, which is not a colour.
     expect(safeCssColor('   ')).toBeUndefined();
+  });
+});
+
+describe('brandTokens', () => {
+  it('keeps brand colours the portal text stays readable on', () => {
+    expect(brandTokens({ primaryColor: '#0f766e', backgroundColor: '#fafafa', surfaceColor: '#ffffff' })).toEqual({
+      '--color-primary': '#0f766e',
+      '--color-primary-hover': 'color-mix(in srgb, #0f766e 85%, black)',
+      '--color-bg': '#fafafa',
+      '--color-surface': '#ffffff',
+    });
+  });
+
+  it('checks surfaces against the muted text colour the pages actually use', () => {
+    const shared = readFileSync(fileURLToPath(new URL('../src/app/shared-tokens.css', import.meta.url)), 'utf8');
+    const globals = readFileSync(fileURLToPath(new URL('../src/app/(portal)/globals.css', import.meta.url)), 'utf8');
+    expect(/--rk-muted-fg:\s*([^;]+);/.exec(shared)?.[1]).toBe(MUTED_TEXT);
+    expect(globals.split('@media (prefers-color-scheme: dark)')[0]).toContain('--color-muted-fg: var(--rk-muted-fg);');
+  });
+
+  it('drops a dark background so the default stands', () => {
+    expect(brandTokens({ backgroundColor: '#111111' })).toEqual({});
+  });
+
+  it('drops a primary too faint for white button text', () => {
+    expect(brandTokens({ primaryColor: '#ffeb3b' })).toEqual({});
+  });
+
+  it('drops a primary too faint against the chosen surface', () => {
+    expect(brandTokens({ primaryColor: '#0f766e', surfaceColor: '#d4d4d4' })).toEqual({ '--color-surface': '#d4d4d4' });
+  });
+
+  it('falls back for colours the contrast check cannot read', () => {
+    expect(brandTokens({ primaryColor: 'rgb(15, 118, 110)', backgroundColor: 'rebeccapurple', surfaceColor: 'white' })).toEqual({});
+  });
+});
+
+describe('followsColorScheme', () => {
+  it('follows a dark preference only when the operator set no colour, even one the contrast check refused', () => {
+    expect(followsColorScheme({ displayName: 'Acme', logoUrl: 'https://acme.test/logo.png' })).toBe(true);
+    expect(followsColorScheme({ primaryColor: '#0f766e' })).toBe(false);
+    expect(followsColorScheme({ backgroundColor: '#111111' })).toBe(false);
+    expect(followsColorScheme({ surfaceColor: '#ffffff' })).toBe(false);
   });
 });
 

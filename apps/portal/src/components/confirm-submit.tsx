@@ -26,12 +26,14 @@ import { useFormStatus } from 'react-dom';
  */
 function ConfirmActions({
   label,
+  cancelLabel,
   pendingLabel,
   confirmClassName,
   cancelClassName,
   onCancel,
 }: {
   label: string;
+  cancelLabel: string;
   pendingLabel: string;
   confirmClassName: string;
   cancelClassName: string;
@@ -47,7 +49,7 @@ function ConfirmActions({
         disabled={pending}
         className={cancelClassName + lock}
       >
-        Keep it
+        {cancelLabel}
       </button>
       <button
         type="submit"
@@ -66,6 +68,8 @@ export function ConfirmSubmit({
   title,
   message,
   confirmLabel,
+  cancelLabel = 'Keep it',
+  triggerName,
   pendingLabel,
   variant = 'primary',
   size = 'md',
@@ -79,9 +83,14 @@ export function ConfirmSubmit({
   message: string;
   /** Confirm button text. Defaults to `label`. */
   confirmLabel?: string;
+  /** Dismiss button text. */
+  cancelLabel?: string;
+  /** Accessible name of the trigger when `label` repeats down a list. Starts with `label`. */
+  triggerName?: string;
   /** Confirm button text while the action is in flight. */
   pendingLabel?: string;
-  variant?: 'primary' | 'neutral';
+  /** `danger` is for removing or ending something: red trigger text and a red confirm button. */
+  variant?: 'primary' | 'neutral' | 'danger';
   size?: 'sm' | 'md';
   /**
    * Optional extra content rendered inside the dialog, between the message and
@@ -92,17 +101,17 @@ export function ConfirmSubmit({
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const baseId = React.useId();
 
-  // Same keyboard focus ring as <Button> (components/button.tsx). The buttons
-  // here keep their compact py-1.5 padding, which Button's fixed base classes
-  // would override, so the ring classes are applied directly instead.
-  const focusRing =
-    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]';
-
   const pad = size === 'sm' ? 'px-3 py-1.5 text-xs' : 'px-3 py-1.5 text-sm';
   const triggerCls =
     variant === 'primary'
-      ? `rounded-md bg-[var(--color-primary)] font-medium text-[var(--color-primary-fg)] ${pad} ${focusRing}`
-      : `rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg)] ${pad} ${focusRing}`;
+      ? `min-h-11 rounded-md bg-[var(--color-primary)] font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] ${pad}`
+      : variant === 'danger'
+        ? `min-h-11 rounded-md border border-[var(--color-border)] font-medium text-[var(--color-danger)] hover:bg-[var(--color-bg)] ${pad}`
+        : `min-h-11 rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg)] ${pad}`;
+  const confirmFill =
+    variant === 'danger'
+      ? 'bg-[var(--color-danger)] text-[var(--color-danger-fg)]'
+      : 'bg-[var(--color-primary)] text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)]';
 
   const open = (): void => {
     try {
@@ -115,12 +124,13 @@ export function ConfirmSubmit({
 
   return (
     <>
-      <button type="button" className={triggerCls} onClick={open}>
+      <button type="button" className={triggerCls} onClick={open} aria-label={triggerName}>
         {label}
       </button>
       <dialog
         ref={dialogRef}
         aria-labelledby={`${baseId}-title`}
+        aria-describedby={`${baseId}-message`}
         className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-fg)] backdrop:bg-black/50"
         onClick={(e) => {
           if (e.target === dialogRef.current) close();
@@ -129,15 +139,18 @@ export function ConfirmSubmit({
         <h2 id={`${baseId}-title`} className="text-base font-semibold">
           {title}
         </h2>
-        <p className="mt-1 text-sm text-[var(--color-muted-fg)]">{message}</p>
+        <p id={`${baseId}-message`} className="mt-1 text-sm text-[var(--color-muted-fg)]">
+          {message}
+        </p>
         {children && <div className="mt-4">{children}</div>}
         <div className="mt-5 flex items-center justify-end gap-2">
           <ConfirmActions
             label={confirmLabel ?? label}
+            cancelLabel={cancelLabel}
             pendingLabel={pendingLabel ?? 'Working…'}
             onCancel={close}
-            cancelClassName={`rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)] ${focusRing}`}
-            confirmClassName={`rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] ${focusRing}`}
+            cancelClassName={`min-h-11 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)]`}
+            confirmClassName={`min-h-11 rounded-md px-3 py-1.5 text-sm font-medium ${confirmFill}`}
           />
         </div>
       </dialog>

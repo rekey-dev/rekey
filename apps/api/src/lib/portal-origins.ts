@@ -19,16 +19,36 @@ export function portalBaseOrigin(): string | null {
 }
 
 /**
- * Where an Application's end users manage their billing: the shared portal
- * host plus the slug, or null when the Application has not enabled the hosted
- * portal or this deployment runs none.
+ * The shared portal host plus the slug, where every portal-enabled Application
+ * is served whether or not it has a custom domain. Null when this deployment
+ * runs no hosted portal.
  *
  * @example
- * hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true }); // 'https://portal.rekey.dev/acme'
+ * sharedPortalUrl('acme'); // 'https://portal.rekey.dev/acme'
  */
-export function hostedPortalUrl(app: Pick<Application, 'slug' | 'hostedPortalEnabled'>): string | null {
+export function sharedPortalUrl(slug: string): string | null {
   const base = portalBaseOrigin();
-  return app.hostedPortalEnabled && base !== null ? `${base}/${encodeURIComponent(app.slug)}` : null;
+  return base === null ? null : `${base}/${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Where an Application's end users manage their billing: its verified custom
+ * domain with no slug path, else the shared portal host plus the slug. Null
+ * when the Application has not enabled the hosted portal, or has no verified
+ * domain and this deployment runs no shared portal.
+ *
+ * @example
+ * hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true, portalDomain: null, portalDomainVerifiedAt: null });
+ * // 'https://portal.rekey.dev/acme'
+ * hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true, portalDomain: 'billing.acme.com', portalDomainVerifiedAt: new Date() });
+ * // 'https://billing.acme.com'
+ */
+export function hostedPortalUrl(
+  app: Pick<Application, 'slug' | 'hostedPortalEnabled' | 'portalDomain' | 'portalDomainVerifiedAt'>,
+): string | null {
+  if (!app.hostedPortalEnabled) return null;
+  if (app.portalDomain && app.portalDomainVerifiedAt) return `https://${app.portalDomain}`;
+  return sharedPortalUrl(app.slug);
 }
 
 /**

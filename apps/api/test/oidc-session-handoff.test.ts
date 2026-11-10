@@ -275,10 +275,10 @@ describe('app-authorised session handoff', () => {
     const fx = await bootstrap();
     const { challenge } = pkce();
     const res = await handoff(fx, { challenge, key: fx.publishableKey });
-    expect(res.statusCode).toBe(401);
-    // Refused by `requireApiKey` on the prefix, before the handler, the
-    // browser-shipped credential can never reach this endpoint.
-    expect((res.json().error as { code: string }).code).toBe('API_KEY_INVALID');
+    expect(res.statusCode).toBe(403);
+    // Only the hosted portal, proven by the deployment caller secret, may
+    // answer with a publishable key; a browser holding one never can.
+    expect((res.json().error as { code: string }).code).toBe('SESSION_HANDOFF_FORBIDDEN');
   });
 
   it('needs auth:write: a key minted only for credits:grant cannot mint a session code', async () => {
@@ -410,6 +410,7 @@ describe('app-authorised session handoff', () => {
       // Allow would actually give, and `wat` is not grantable.
       scope: 'openid email',
       account: { email: fx.euEmail },
+      organizations: [],
     });
     expect(res.json()).not.toHaveProperty('code');
     expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
@@ -436,7 +437,8 @@ describe('app-authorised session handoff', () => {
     expect(noUser.json().error.code).toBe('USER_TOKEN_MISSING');
 
     const publishable = await handoff(fx, { challenge, endpoint: 'preview', key: fx.publishableKey });
-    expect(publishable.statusCode).toBe(401);
+    expect(publishable.statusCode).toBe(403);
+    expect(publishable.json().error.code).toBe('SESSION_HANDOFF_FORBIDDEN');
 
     expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
   });

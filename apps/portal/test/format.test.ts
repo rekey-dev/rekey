@@ -5,10 +5,23 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { formatMoney, formatPlanPrice, refundLine, subscriptionPriceLabel } from '@/lib/format';
+import { formatDate, formatMoney, formatPlanPrice, planPriceBesideName, refundLine, subscriptionPriceLabel } from '@/lib/format';
+import { statusLabel } from '@/components/status-badge';
 import { PLANS, subscription } from './fixtures/billing';
 
 const priced = (formatted: string) => ({ isFree: false, price: { formatted } });
+
+describe('planPriceBesideName', () => {
+  it('leaves out a price that would only repeat the name, whatever its case', () => {
+    expect(planPriceBesideName(PLANS.free)).toBeNull();
+    expect(planPriceBesideName({ ...PLANS.free, name: 'FREE' })).toBeNull();
+  });
+
+  it('keeps the price beside any other name', () => {
+    expect(planPriceBesideName({ ...PLANS.free, name: 'Starter' })).toBe('Free');
+    expect(planPriceBesideName(PLANS.proDefault)).toBe('$19.00 /month');
+  });
+});
 
 describe('formatPlanPrice', () => {
   it('shows the price resolved for this buyer, not the plan default', () => {
@@ -54,16 +67,16 @@ describe('subscriptionPriceLabel', () => {
 
 describe('refundLine', () => {
   it('is silent when nothing was refunded', () => {
-    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 0 })).toBeNull();
+    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 0 }, 'en-US')).toBeNull();
   });
 
   it("names the part refunded and the charge, in the payment's own currency", () => {
-    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 500 })).toBe('Refunded $5.00 of $19.00');
-    expect(refundLine({ amount: 1500, currency: 'JPY', refundedAmount: 500 })).toBe('Refunded ¥500 of ¥1,500');
+    expect(refundLine({ amount: 1900, currency: 'USD', refundedAmount: 500 }, 'en-US')).toBe('Refunded $5.00 of $19.00');
+    expect(refundLine({ amount: 1500, currency: 'JPY', refundedAmount: 500 }, 'en-US')).toBe('Refunded ¥500 of ¥1,500');
   });
 
   it('names only the amount for a full refund', () => {
-    expect(refundLine({ amount: 149900, currency: 'INR', refundedAmount: 149900 })).toBe('Refunded ₹1,499.00');
+    expect(refundLine({ amount: 149900, currency: 'INR', refundedAmount: 149900 }, 'en-US')).toBe('Refunded ₹1,499.00');
   });
 });
 
@@ -78,11 +91,44 @@ describe('formatMoney, the registry formatter', () => {
     ['EUR', 1999, '€19.99'],
     ['UGX', 500000, 'UGX\u00a0500,000'],
   ])('%s %i reads %s', (currency, minor, shown) => {
-    expect(formatMoney(minor, currency)).toBe(shown);
+    expect(formatMoney(minor, currency, 'en-US')).toBe(shown);
   });
 
   it('renders zero as an amount, and refuses a fraction of a minor unit', () => {
-    expect(formatMoney(0, 'USD')).toBe('$0.00');
-    expect(() => formatMoney(9.5, 'USD')).toThrow(RangeError);
+    expect(formatMoney(0, 'USD', 'en-US')).toBe('$0.00');
+    expect(() => formatMoney(9.5, 'USD', 'en-US')).toThrow(RangeError);
+  });
+});
+
+describe('formatMoney in the visitor locale', () => {
+  it("groups an Indian visitor's amounts in lakhs", () => {
+    expect(formatMoney(1500000000, 'INR', 'en-IN')).toBe('₹1,50,00,000.00');
+    expect(formatMoney(1500000000, 'INR', 'en-US')).toBe('₹15,000,000.00');
+  });
+});
+
+describe('formatDate, every date the portal shows', () => {
+  it('writes the medium date in the given locale', () => {
+    expect(formatDate('2026-10-15T12:00:00Z', 'en-US', 'UTC')).toBe('Oct 15, 2026');
+    expect(formatDate('2026-10-15T12:00:00Z', 'en-IN', 'UTC')).toBe('15 Oct 2026');
+  });
+
+  it("reads the day in the given zone, not the server's", () => {
+    expect(formatDate('2026-10-15T23:30:00Z', 'en-US', 'UTC')).toBe('Oct 15, 2026');
+    expect(formatDate('2026-10-15T23:30:00Z', 'en-US', 'Asia/Kolkata')).toBe('Oct 16, 2026');
+  });
+});
+
+describe("the words for a plan's cadence and a status", () => {
+  it('names the cadence from copy, and leaves an interval it does not know unnamed', () => {
+    expect(formatPlanPrice({ ...priced('$190.00'), kind: 'SUBSCRIPTION', interval: 'YEAR' })).toBe('$190.00 /year');
+    expect(formatPlanPrice({ ...priced('$5.00'), kind: 'SUBSCRIPTION', interval: 'FORTNIGHT' })).toBe('$5.00');
+  });
+
+  it('labels a status in customer words, never the enum name', () => {
+    expect(statusLabel('SUCCEEDED')).toBe('Paid');
+    expect(statusLabel('PAST_DUE')).toBe('Past due');
+    expect(statusLabel('PARTIALLY_REFUNDED')).toBe('Partially refunded');
+    expect(statusLabel('SOMETHING_NEW')).toBe('Unknown');
   });
 });

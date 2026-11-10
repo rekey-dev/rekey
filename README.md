@@ -115,6 +115,7 @@ Docs (`docs/`):
 | [external-billing.md](docs/external-billing.md) | Bring your own billing: an inbound-only provider fed by your own system's events |
 | [portal.md](docs/portal.md) | Hosted customer self-service billing portal |
 | [errors.md](docs/errors.md) | Error envelope + the complete code reference |
+| [migrating-to-2.4.md](docs/migrating-to-2.4.md) · [migrating-to-2.2.md](docs/migrating-to-2.2.md) | Upgrading a deployment and its integrations to 2.4 from 2.3, and to 2.2 from 2.1 |
 | [jwks.md](docs/jwks.md) · [oidc-provider.md](docs/oidc-provider.md) · [tenant-auth.md](docs/tenant-auth.md) · [mcp.md](docs/mcp.md) · [data-erasure.md](docs/data-erasure.md) | Everything else |
 
 ## Billing providers

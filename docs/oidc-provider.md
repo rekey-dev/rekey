@@ -63,6 +63,75 @@ decision before you point a relying party at this:
    secret key or the operator API. See
    [Where `profile` claims come from](#where-profile-claims-come-from).
 
+## Where the user signs in
+
+The authorization endpoint sends the browser to one of three pages, in this
+order:
+
+1. **Your own page**, when `hostedAuthorizeUrl` is set: the request is
+   forwarded with its parameters untouched. See
+   [auth.md](auth.md#acting-as-an-openid-connect-provider-for-another-app).
+2. **The hosted portal**, when the Application has the hosted portal on: the
+   browser goes to `<portal>/authorize?request=<id>` (the shared host plus the
+   slug, or the verified custom domain). The id is opaque; the client, redirect
+   URI, PKCE challenge, scope, `state` and `nonce` stay on the API, after the
+   same checks the built-in page makes. A request lives 15 minutes and is
+   answered once. The user signs in with whatever the portal offers (password,
+   emailed link, two-factor, required two-factor setup, email confirmation),
+   or carries on with the portal session they already have, and is then asked:
+   the Application's name, the client's name labelled as the app requesting
+   access, where the answer goes (the web host, or `127.0.0.1:<port>` described
+   as a program on this computer, or the app's own scheme), what each scope
+   allows, and which account is signed in, with **Allow**, **Cancel** and
+   **Not you? Use a different account**. Allow sends the code to the redirect
+   URI; Cancel sends `error=access_denied`. For a loopback or custom-scheme
+   redirect the portal opens it from a page that says the user can return to
+   the app and close the tab, with a link to open it again. See
+   [portal.md](portal.md).
+3. **The built-in page** otherwise: an email and password form served by the
+   API.
+
+No setting chooses between 2 and 3: an Application whose users already have a
+portal gets the page with every sign-in method it offers, and one without keeps
+the built-in page. A user who must still set up required two-factor, or confirm
+their address, does that on the portal and comes back to the request; until
+then nothing reaches the client, whose loopback listener simply keeps waiting.
+
+**The portal's credential.** `/oauth/authorize/preview` and `/grant` take the
+Application's secret key and the user's access token from your own server, as
+before. They also take what the portal holds: the publishable key, the user's
+token and the deployment caller secret (`X-Rekey-Caller-Secret`), naming the
+stored `request_id` instead of the request's parameters; `/oauth/authorize/deny`
+takes the publishable key and the caller secret. A publishable key without the
+caller secret is refused with `403 SESSION_HANDOFF_FORBIDDEN`: the publishable
+key and the user's token both reach browsers, and without the secret any script
+holding them could approve a client for the user without asking.
+
+**Devices.** Tokens from the authorization server never carry a device: not
+the `mcp_access` access token, not the refresh token of kind `mcp`, not the ID
+Token. So `max_devices` does not apply to a client that signs in through it.
+
+On an Application with `deviceBinding: 'required'` the hosted portal's session
+holds no device slot, so it cannot approve a client: `/preview` and `/grant`
+refuse it with `403 AUTHORIZATION_NEEDS_DEVICE_SESSION` (`details.client_name`
+names the client) and mint nothing. The portal still receives the browser,
+explains that the Application signs in from the app itself, and offers one
+button, **Go back to <client>**, which calls `/deny` so the client receives
+`access_denied` instead of waiting. Authorization for such an Application needs
+your own page, set as `hostedAuthorizeUrl`, calling `/grant` from your server
+with your secret key and an ordinary, device-bound session. The built-in page
+cannot help either: its sign-in needs a device and is refused with
+`DEVICE_FINGERPRINT_REQUIRED`.
+
+**What changes for an existing integration.** Nothing for an Application
+without the hosted portal, or with `hostedAuthorizeUrl` set. For one with the
+portal on, users who used to see the built-in password page now see the
+portal, except on one that binds sign-in to a device, where the portal can
+only send the client back (see **Devices** above). The `/preview` and `/grant` refusal for a publishable key changed from
+`401 API_KEY_INVALID` to `403 SESSION_HANDOFF_FORBIDDEN`, and the `/preview`
+answer gained `organizations`, the accounts an `mcp:account` grant could act
+for.
+
 ## Sign in from a relying party
 
 Any OpenID Connect client library works. Give it the issuer, not the discovery
@@ -329,10 +398,12 @@ Already-registered clients are unaffected.
 normal for MCP, where clients self-register as their first act; on a public
 OpenID Provider it means anyone can stand up a client with an attacker-chosen
 `client_name` and a redirect URI they control, and get a password prompt
-rendered on this deployment's own issuer origin. That is a phishing surface —
-`client_name` is HTML-escaped, the consent screen lists the real scopes, and
-PKCE plus redirect-URI binding stop a rogue client intercepting anyone else's
-code — but it is one you do not need after onboarding.
+rendered on this deployment's own issuer origin, or a consent screen on the
+Application's own portal. That is a phishing surface. `client_name` is
+escaped and labelled as the app's own claim, the consent screen names where the
+answer goes and lists the real scopes, and PKCE plus redirect-URI binding stop
+a rogue client intercepting anyone else's code, but it is a surface you do not
+need after onboarding.
 
 It defaults on because there is no operator-side client-creation surface yet: a
 default of `false` would break every deployment that already has MCP enabled and
@@ -347,12 +418,12 @@ error code at the authorization endpoint:
 
 | Feature | Behaviour |
 |---|---|
-| `prompt=none` | `login_required`. There is no AS-side SSO session to reuse; every authorization re-authenticates. |
+| `prompt=none` | `login_required`. Every authorization asks the user, even when the hosted portal already has them signed in. |
 | `request`, `request_uri` | `request_not_supported` / `request_uri_not_supported` |
 | `claims` request parameter | Not supported (`claims_parameter_supported: false`) |
 | `response_type` other than `code` | `unsupported_response_type` — no implicit or hybrid flow |
 | `code_challenge_method` other than `S256` | `invalid_request` — PKCE is mandatory |
-| `max_age` | Not enforced by the AS. `auth_time` is the real sign-in: normally seconds before the code, but up to 10 minutes earlier when the MCP organization step is shown (a grant including `mcp:account` for a user in an organization). A relying party with a tighter `max_age` compares `auth_time` and rejects. |
+| `max_age` | Not enforced by the AS. `auth_time` is the real sign-in: normally seconds before the code, but up to 10 minutes earlier when the MCP organization step is shown (a grant including `mcp:account` for a user in an organization). A relying party with a tighter `max_age` compares `auth_time` and rejects. On the hosted portal, and through `/oauth/authorize/grant` from your own page, `auth_time` is the moment the user allowed: the user may have signed in to the portal earlier, and the API does not know when. |
 | Signed/encrypted UserInfo responses | Not supported — plain JSON only |
 
 Two deliberate departures from the letter of the spec:
@@ -400,9 +471,10 @@ Not built (deliberately, listed so nobody assumes otherwise):
   see [Client registration](#client-registration).
 - No RP-initiated logout, front/back-channel logout, or session management.
 - No `client_secret` clients, no `private_key_jwt` — public clients + PKCE only.
-- No consent persistence: the end-user re-authenticates on every authorization,
-  and a hosted authorize page (`hostedAuthorizeUrl`) asks for consent every
-  time, because there is no stored grant to consult.
+- No consent persistence: the built-in page asks for a password on every
+  authorization, and the hosted portal and a hosted authorize page
+  (`hostedAuthorizeUrl`) ask for consent every time, because there is no
+  stored grant to consult.
 
 ## Tests
 

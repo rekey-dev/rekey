@@ -42,7 +42,7 @@ type Params = {
  * here with `subscription_id`, or for a one-time order with the order id as
  * `token` plus `PayerID`. It is only a claim: the API checks it with PayPal
  * like any approval, and completion still waits for the webhook. PayPal
- * appends these on a cancelled return too, so the query is stripped with a
+ * appends these on a canceled return too, so the query is stripped with a
  * redirect after one attempt: a refresh must not ask again.
  */
 async function confirmReturnFromPaypal(token: string, searchParams: Params['searchParams']): Promise<boolean> {

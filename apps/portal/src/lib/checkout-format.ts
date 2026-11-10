@@ -28,11 +28,22 @@ export function formatMoney(amountMinor: number, currency: string, locale: Check
   return formatRegistryMoney(amountMinor, currency, locale);
 }
 
-/** "month" / "year", or null for a one-time purchase. */
-export function intervalWord(interval: 'MONTH' | 'YEAR' | null): string | null {
+/** "month" / "year", or null for a one-time purchase or an interval this copy does not name. */
+export function intervalWord(interval: string | null | undefined): string | null {
   if (interval === 'MONTH') return 'month';
   if (interval === 'YEAR') return 'year';
   return null;
+}
+
+/**
+ * What a recurring price says before it is paid, or null for one that does not renew.
+ *
+ * @example
+ * renewalSentence('$19.00', 'MONTH'); // 'Renews automatically at $19.00 every month until you cancel.'
+ */
+export function renewalSentence(price: string, interval: string | null | undefined): string | null {
+  const every = intervalWord(interval);
+  return every === null ? null : `Renews automatically at ${price} every ${every} until you cancel.`;
 }
 
 /** WCAG relative luminance of a `#rgb` / `#rrggbb` colour, or null for anything else. */
@@ -48,8 +59,8 @@ function luminance(hex: string): number | null {
 }
 
 const MIN_TEXT_CONTRAST = 4.5;
-/** The page's secondary text (`--ck-muted-fg`), the lightest text drawn on a surface. */
-const MUTED_TEXT = '#525252';
+/** Secondary text (`--rk-muted-fg` in app/shared-tokens.css), the lightest text drawn on a surface on both pages. */
+export const MUTED_TEXT = '#525252';
 const DEFAULT_ACCENT = '#171717';
 
 function contrast(a: number, b: number): number {

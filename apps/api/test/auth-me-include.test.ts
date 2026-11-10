@@ -58,6 +58,7 @@ const BASELINE_KEYS = [
   'activeOrganizationId',
   'activeOrganizationRole',
   'activeOrganizationBaseRole',
+  'hasPassword',
 ];
 
 interface Session {
@@ -238,6 +239,21 @@ describe('GET /auth/me and /users/me ?include=', () => {
         }
         expect((await call('?include=')).body).toBe(absent.body);
         expect((await call('?include=,')).body).toBe(absent.body);
+      }
+    });
+  });
+
+  describe('hasPassword', () => {
+    it('says whether the user has a password on both routes, and never sends the hash', async () => {
+      const s = await signUp('has-password@example.com');
+      for (const call of [authMe, usersMe]) {
+        const data = dataOf(await call(s.accessToken, ''));
+        expect(data.hasPassword).toBe(true);
+        expect(data).not.toHaveProperty('passwordHash');
+      }
+      await prisma.endUser.update({ where: { id: s.endUser.id }, data: { passwordHash: null } });
+      for (const call of [authMe, usersMe]) {
+        expect(dataOf(await call(s.accessToken, '')).hasPassword).toBe(false);
       }
     });
   });

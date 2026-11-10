@@ -553,6 +553,41 @@ describe('end-user organizations', () => {
     expect(accept.json().error.code).toBe('ORGANIZATION_INVITATION_NOT_USABLE');
   });
 
+  it('the members list carries each member\'s base role on the wire', async () => {
+    const b = await bootstrap('members-base-role');
+    const headers = { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess };
+    const org = await app
+      .inject({ method: 'POST', url: '/api/v1/users/me/organizations/', headers, payload: { name: 'Acme', slug: 'acme' } })
+      .then((r) => r.json().data as { organization: { id: string } });
+    const invitee = await createMember(b, 'base-role-admin@example.com');
+    const inv = await app
+      .inject({
+        method: 'POST',
+        url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
+        headers,
+        payload: { email: 'base-role-admin@example.com', role: 'ADMIN' },
+      })
+      .then((r) => r.json().data as { token: string });
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/organizations/accept-invitation',
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': invitee.access },
+      payload: { token: inv.token },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/users/me/organizations/${org.organization.id}/members`,
+      headers,
+    });
+    expect(res.statusCode).toBe(200);
+    const items = res.json().data.items as Array<{ email: string; role: string; baseRole: string }>;
+    expect(items.map((m) => [m.role, m.baseRole])).toEqual([
+      ['OWNER', 'OWNER'],
+      ['ADMIN', 'ADMIN'],
+    ]);
+  });
+
   afterAll(async () => {
     await prisma.organizationInvitation.deleteMany({});
     await prisma.organizationMembership.deleteMany({});

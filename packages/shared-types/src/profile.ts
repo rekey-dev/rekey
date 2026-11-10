@@ -6,8 +6,7 @@ export type ProfileFieldType = (typeof PROFILE_FIELD_TYPES)[number];
 
 /** Most fields one Application may define. */
 export const MAX_PROFILE_FIELDS = 50;
-/** Longest `text` answer, in characters. */
-export const MAX_PROFILE_TEXT = 500;
+export { MAX_PROFILE_TEXT } from './profile-limits.js';
 
 /**
  * Keys a field may not use: names every JavaScript object inherits, which an

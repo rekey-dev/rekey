@@ -5,6 +5,11 @@
  *
  *   "eu_access"       , full session access token.
  *                        { typ, sub, applicationId, iat, exp }
+ *   "eu_portal"       , session of the hosted billing portal on an app that
+ *                        requires a device binding. Holds no device slot, so
+ *                        it is accepted only from a request that proved
+ *                        INTERNAL_CALLER_SECRET, and always HS256 so that no
+ *                        offline JWKS verifier can accept it.
  *   "eu_mfa_challenge", short-lived intermediate token issued at sign-in
  *                        when MFA is required. Holds an unauthenticated
  *                        identity; can only be exchanged at /auth/mfa-verify
@@ -26,7 +31,7 @@
  * signed with the deployment's JWKS key (lib/signing-keys.ts, published at
  * /.well-known/jwks.json) and carry `kid` + `gen`. Verifiers accept both via
  * `verifyUserAccessTokenAnyAlg` (strict per-alg dispatch, see its docblock).
- * MFA-challenge, MCP, and impersonation tokens stay HS256 regardless.
+ * MFA-challenge, MCP, impersonation and portal tokens stay HS256 regardless.
  *
  * OIDC ID Tokens (`issueIdToken`) are the exception that is ALWAYS RS256: they
  * are read by third-party relying parties that only ever see our JWKS, never a
@@ -96,7 +101,7 @@ export function peekTokenApplicationId(token: string): string | null {
   }
 }
 
-export type EndUserTokenType = 'eu_access' | 'eu_mfa_challenge';
+export type EndUserTokenType = 'eu_access' | 'eu_portal' | 'eu_mfa_challenge';
 
 export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType> {
   /** Token-type discriminator. */
@@ -185,7 +190,7 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
   exp: number;
 }
 
-export type UserSessionClaims = EndUserClaims<'eu_access'>;
+export type UserSessionClaims = EndUserClaims<'eu_access' | 'eu_portal'>;
 export type MfaChallengeClaims = EndUserClaims<'eu_mfa_challenge'>;
 
 // Short access lifetime, paired with a 30-day refresh token.
@@ -210,6 +215,8 @@ export interface IssueOptions {
   deviceId?: string;
   /** Refresh-token family → embedded as the `sid` claim (access tokens only). */
   sessionId?: string;
+  /** Access tokens only: mint an `eu_portal` token instead of `eu_access`. */
+  portal?: boolean;
   /** Embedded as the `mbx` claim (MFA challenges only). */
   mailboxProven?: boolean;
   /** Challenge tokens only, and only with `mailboxProven`: the identity to link once the code is given. */
@@ -264,7 +271,7 @@ export function issueUserAccessToken(
   options: IssueOptions = {},
 ): { token: string; expiresAt: Date } {
   return signEndUserToken(
-    'eu_access',
+    options.portal ? 'eu_portal' : 'eu_access',
     endUserId,
     applicationId,
     tokenGeneration,
@@ -288,6 +295,8 @@ export function issueUserAccessTokenRS256(
   key: ActiveSigningKey,
   options: IssueOptions = {},
 ): { token: string; expiresAt: Date } {
+  // Refused rather than minted as `eu_access`, which would hand out a slotless session as an ordinary one.
+  if (options.portal === true) throw new Error('A portal access token is always HS256.');
   const lifetime = options.lifetimeSeconds ?? DEFAULT_ACCESS_LIFETIME_SECONDS;
   const token = jwt.sign(
     {
@@ -317,7 +326,10 @@ export async function issueUserAccessTokenForApp(
   options: IssueOptions = {},
 ): Promise<{ token: string; expiresAt: Date }> {
   const { tokenAlg } = AuthConfigSchema.parse(application.authConfig);
-  if (tokenAlg === 'RS256') {
+  // A portal token holds no device slot. Signed with the JWKS key, any customer
+  // backend verifying offline with a library that ignores `typ` would accept it
+  // and the user would carry a slotless session out of the portal.
+  if (tokenAlg === 'RS256' && options.portal !== true) {
     const key = await getActiveSigningKey();
     return issueUserAccessTokenRS256(
       endUserId,
@@ -748,7 +760,7 @@ export function issueImpersonationToken(
 
 function verifyEndUserToken<TType extends EndUserTokenType>(
   token: string,
-  requiredType: TType,
+  acceptedTypes: readonly TType[],
   applicationId: string,
   tokenGeneration: number,
 ): EndUserClaims<TType> | null {
@@ -759,7 +771,7 @@ function verifyEndUserToken<TType extends EndUserTokenType>(
     if (
       typeof decoded !== 'object' ||
       decoded === null ||
-      (decoded as Record<string, unknown>).typ !== requiredType ||
+      !(acceptedTypes as readonly unknown[]).includes((decoded as Record<string, unknown>).typ) ||
       typeof (decoded as Record<string, unknown>).sub !== 'string' ||
       typeof (decoded as Record<string, unknown>).applicationId !== 'string'
     ) {
@@ -771,6 +783,19 @@ function verifyEndUserToken<TType extends EndUserTokenType>(
   }
 }
 
+export interface VerifyAccessOptions {
+  /**
+   * Accept an `eu_portal` token too. Pass `request.internalCaller` and nothing
+   * else: a portal session holds no device slot, so honoured on any other
+   * request it would let a browser sidestep `max_devices`.
+   */
+  acceptPortal?: boolean;
+}
+
+function acceptedAccessTypes(options: VerifyAccessOptions): readonly ('eu_access' | 'eu_portal')[] {
+  return options.acceptPortal === true ? ['eu_access', 'eu_portal'] : ['eu_access'];
+}
+
 /**
  * Verify a presented end-user access token. Returns claims on success,
  * `null` on any failure (bad signature, expired, malformed, wrong typ).
@@ -778,14 +803,18 @@ function verifyEndUserToken<TType extends EndUserTokenType>(
  *
  * **Refuses non-access typ.** An MFA challenge token (`eu_mfa_challenge`)
  * presented here returns `null`, it must be exchanged via /auth/mfa-verify
- * first.
+ * first. An `eu_portal` token returns `null` unless `acceptPortal` is set.
+ *
+ * @example
+ *   const claims = verifyUserAccessToken(token, app.id, app.tokenGeneration, { acceptPortal: req.internalCaller });
  */
 export function verifyUserAccessToken(
   token: string,
   applicationId: string,
   tokenGeneration: number,
+  options: VerifyAccessOptions = {},
 ): UserSessionClaims | null {
-  return verifyEndUserToken(token, 'eu_access', applicationId, tokenGeneration);
+  return verifyEndUserToken(token, acceptedAccessTypes(options), applicationId, tokenGeneration);
 }
 
 /**
@@ -803,7 +832,8 @@ export function verifyUserAccessToken(
  *     signing keys (`getPublicKeyByKid`, strict). Verified with that public
  *     key only (algorithms pinned to RS256), then the `gen` claim must match
  *     the app's current `tokenGeneration` (kill-switch parity with HS256's
- *     derived key).
+ *     derived key). `eu_access` only: a portal token is never RS256, so one
+ *     arriving that way was not minted by `issueUserAccessTokenForApp`.
  *   - anything else → null.
  *
  * Returns claims on success, null on any failure. Never throws.
@@ -812,6 +842,7 @@ export async function verifyUserAccessTokenAnyAlg(
   token: string,
   applicationId: string,
   tokenGeneration: number,
+  options: VerifyAccessOptions = {},
 ): Promise<UserSessionClaims | null> {
   let header: { alg?: unknown; kid?: unknown } | undefined;
   try {
@@ -822,7 +853,7 @@ export async function verifyUserAccessTokenAnyAlg(
   if (!header) return null;
 
   if (header.alg === 'HS256') {
-    return verifyUserAccessToken(token, applicationId, tokenGeneration);
+    return verifyUserAccessToken(token, applicationId, tokenGeneration, options);
   }
 
   if (header.alg === 'RS256') {
@@ -859,5 +890,5 @@ export function verifyMfaChallengeToken(
   applicationId: string,
   tokenGeneration: number,
 ): MfaChallengeClaims | null {
-  return verifyEndUserToken(token, 'eu_mfa_challenge', applicationId, tokenGeneration);
+  return verifyEndUserToken(token, ['eu_mfa_challenge'], applicationId, tokenGeneration);
 }

@@ -5,7 +5,7 @@
  * #338 fixed exactly this copy on the marketing site and left the portal, the
  * surface a merchant's own customers use, saying "your plan stays active until
  * the end of the current period" for every subscription, including the ones
- * cancelled on the spot with no refund.
+ * canceled on the spot with no refund.
  *
  * The PayPal shape is the one that mattered: no `currentPeriodEnd` for the
  * whole first period, which is where Rekey Cloud's live subscription sits.
@@ -24,7 +24,8 @@ describe('cancelCopy', () => {
     const copy = cancelCopy({ status: 'ACTIVE', currentPeriodEnd: inTwentyDays }, fmt);
 
     expect(copy.schedules).toBe(true);
-    expect(copy.label).toBe('Cancel at period end');
+    expect(copy.label).toBe('Cancel subscription');
+    expect(copy.confirmLabel).toBe('Cancel at period end');
     expect(copy.message).toContain(fmt(inTwentyDays));
     expect(copy.message).toContain('stays active until');
   });

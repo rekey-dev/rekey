@@ -108,6 +108,7 @@ import {
   DeviceDtoSchema,
   EndUserDeviceDtoSchema,
   LicenseActivationDtoSchema,
+  EndUserLicenseActivationDtoSchema,
   LicenseDeactivateResultDtoSchema,
   MfaChallengeResultDtoSchema,
   MonthlyRevenuePointSchema,
@@ -115,6 +116,8 @@ import {
   OAuthIntrospectionResponseSchema,
   OrganizationDtoSchema,
   OrganizationInvitationDtoSchema,
+  OrganizationPendingInvitationDtoSchema,
+  OrganizationInvitationPreviewDtoSchema,
   OrganizationMemberDtoSchema,
   OrganizationWithRoleDtoSchema,
   PlanDtoSchema,
@@ -923,6 +926,7 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   Device: DeviceDtoSchema,
   EndUserDevice: EndUserDeviceDtoSchema,
   LicenseActivation: LicenseActivationDtoSchema,
+  EndUserLicenseActivation: EndUserLicenseActivationDtoSchema,
   LicenseDeactivateResult: LicenseDeactivateResultDtoSchema,
 
   UsageRecord: UsageRecordDtoSchema,
@@ -942,6 +946,8 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   OrganizationWithRole: OrganizationWithRoleDtoSchema,
   OrganizationMember: OrganizationMemberDtoSchema,
   OrganizationInvitation: OrganizationInvitationDtoSchema,
+  OrganizationPendingInvitation: OrganizationPendingInvitationDtoSchema,
+  OrganizationInvitationPreview: OrganizationInvitationPreviewDtoSchema,
 
   WebhookEndpoint: WebhookEndpointDtoSchema,
   WebhookDelivery: WebhookDeliveryDtoSchema,

@@ -116,6 +116,83 @@ describe('Portal V2 API', () => {
     expect(JSON.stringify(res.json())).not.toContain('rp_live_');
   });
 
+  describe('GET /portal/config/:slug auth facts', () => {
+    async function authFacts(authConfig?: Record<string, unknown>): Promise<unknown> {
+      await enablePortal();
+      if (authConfig) {
+        const current = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+        await prisma.application.update({
+          where: { id: applicationId },
+          data: { authConfig: { ...(current.authConfig as object), ...authConfig } as never },
+        });
+      }
+      const res = await app.inject({ method: 'GET', url: '/api/v1/portal/config/portal-v2' });
+      expect(res.statusCode).toBe(200);
+      return res.json().data.auth;
+    }
+
+    const DEFAULTS = {
+      password: true,
+      magicLink: false,
+      signup: true,
+      emailVerificationRequired: false,
+      mfaRequired: false,
+      devices: false,
+      organizations: false,
+    };
+
+    it('reports the default application', async () => {
+      expect(await authFacts()).toEqual(DEFAULTS);
+    });
+
+    it('reports password off when only magic link is enabled', async () => {
+      expect(await authFacts({ methods: ['magic_link'] })).toEqual({
+        ...DEFAULTS,
+        password: false,
+        magicLink: true,
+      });
+    });
+
+    it('reports magic link on alongside password', async () => {
+      expect(await authFacts({ methods: ['password', 'magic_link'] })).toEqual({
+        ...DEFAULTS,
+        magicLink: true,
+      });
+    });
+
+    it('reports sign-up off for secret_only and invite_only', async () => {
+      expect(await authFacts({ signupMode: 'secret_only' })).toEqual({ ...DEFAULTS, signup: false });
+      expect(await authFacts({ signupMode: 'invite_only' })).toEqual({ ...DEFAULTS, signup: false });
+    });
+
+    it('reports sign-up on even with domain restrictions, and never exposes them', async () => {
+      const res = await authFacts({ signupRestrictions: { allowedDomains: ['acme.test'] } });
+      expect(res).toEqual(DEFAULTS);
+      expect(JSON.stringify(res)).not.toContain('acme.test');
+    });
+
+    it('reports email verification required', async () => {
+      expect(await authFacts({ requireEmailVerification: true })).toEqual({
+        ...DEFAULTS,
+        emailVerificationRequired: true,
+      });
+    });
+
+    it('reports MFA required only for the required policy', async () => {
+      expect(await authFacts({ mfa: 'optional' })).toEqual(DEFAULTS);
+      expect(await authFacts({ mfa: 'required' })).toEqual({ ...DEFAULTS, mfaRequired: true });
+    });
+
+    it('reports devices only when sign-in is bound to a device', async () => {
+      expect(await authFacts({ deviceBinding: 'optional' })).toEqual(DEFAULTS);
+      expect(await authFacts({ deviceBinding: 'required' })).toEqual({ ...DEFAULTS, devices: true });
+    });
+
+    it('reports organizations when customers may create them', async () => {
+      expect(await authFacts({ organizationsEnabled: true })).toEqual({ ...DEFAULTS, organizations: true });
+    });
+  });
+
   // ---------- self-service billing via publishable key + user token ----------
 
   it("GET /billing/subscription works with publishable key + the user's own token", async () => {

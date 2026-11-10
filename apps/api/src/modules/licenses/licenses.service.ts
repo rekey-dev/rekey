@@ -29,6 +29,7 @@ import { RekeyError } from '../../lib/error.js';
 import { generateLicenseKey, hashLicenseKey } from '../../lib/license-keys.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { devicesService } from '../devices/devices.service.js';
+import { inactiveReason, releaseSeat } from './license-seat-release.js';
 
 export type PublicLicense = Omit<License, 'keyHash'>;
 
@@ -488,29 +489,9 @@ export const licensesService = {
     });
     if (!license) return { ok: false, reason: 'unknown' };
     if (license.applicationId !== input.applicationId) return { ok: false, reason: 'wrong_application' };
-    if (license.status === 'REVOKED' || license.revokedAt !== null) return { ok: false, reason: 'revoked' };
-    if (license.expiresAt !== null && license.expiresAt <= new Date()) return { ok: false, reason: 'expired' };
-
-    const now = new Date();
-    const { released, deliveryIds } = await prisma.$transaction(async (tx) => {
-      const updated = await tx.licenseActivation.updateMany({
-        where: { licenseId: license.id, machineFingerprint: input.machineFingerprint, releasedAt: null },
-        data: { releasedAt: now },
-      });
-      if (updated.count !== 1) return { released: false, deliveryIds: [] };
-      const ids = await enqueueEvent(tx, {
-        applicationId: license.applicationId,
-        type: 'license.deactivated',
-        data: {
-          license: { id: license.id, endUserId: license.endUserId, kind: license.kind },
-          machineFingerprint: input.machineFingerprint,
-          releasedBy: 'client',
-        },
-      });
-      return { released: true, deliveryIds: ids };
-    });
-    kickDeliveries(deliveryIds);
-    return { ok: true, released };
+    const inactive = inactiveReason(license);
+    if (inactive) return { ok: false, reason: inactive };
+    return { ok: true, released: await releaseSeat(license, { machineFingerprint: input.machineFingerprint }, 'client') };
   },
 
   /**

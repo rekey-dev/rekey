@@ -23,6 +23,7 @@ import { pruneWebhookEvents } from '../modules/billing/webhooks/retention.js';
 import { pruneLogs, type LogArchiver } from './log-retention.js';
 import { resolveStalePendingSends } from '../modules/email/custom/custom-send.service.js';
 import { pruneExpiredSubmissions, pruneExpiredTombstones } from '../modules/contacts/submission-retention.js';
+import { recheckPortalDomains } from '../modules/applications/portal-domain.js';
 import { withLease, type LeaseOutcome, type LeaseRedis } from './sweep-lease.js';
 
 export const PRUNE_SWEEP_LEASE_KEY = 'lease:prune-sweep';
@@ -73,6 +74,9 @@ async function sweepOnce(options: PruneSweepOptions): Promise<void> {
   // List submissions past their list's own submissionRetentionDays.
   await step(log, 'expired list submissions', () => pruneExpiredSubmissions());
   await step(log, 'expired contact erasure tombstones', () => pruneExpiredTombstones());
+  // Not a prune: withdraws verification from custom portal domains whose DNS
+  // record is gone. It rides this sweep for its lease and its cadence.
+  await step(log, 'lapsed portal domains', () => recheckPortalDomains());
   // Inbound billing-webhook receipts; a provider retries for days, not months.
   const webhookDays = options.webhookEventRetentionDays;
   if (webhookDays !== null) {

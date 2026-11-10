@@ -2,7 +2,7 @@
  * End-user organization routes. Two plugins, registered under different
  * prefixes in `app.ts`:
  *
- *   - `organizationsAuthenticatedRoutes` (the 13 routes listed below, under
+ *   - `organizationsAuthenticatedRoutes` (the routes listed below, under
  *     `/api/v1/users/me/organizations`)
  *   - `organizationsAcceptInvitationRoutes` (under `/api/v1/auth/organizations`)
  *
@@ -18,6 +18,8 @@
  *   PATCH  /api/v1/users/me/organizations/:id                        update (name/metadata)
  *   GET    /api/v1/users/me/organizations/:id/members                list members
  *   POST   /api/v1/users/me/organizations/:id/invitations            create invite
+ *   GET    /api/v1/users/me/organizations/:id/invitations            list pending invites
+ *   POST   /api/v1/users/me/organizations/:id/invitations/:invId/resend
  *   POST   /api/v1/users/me/organizations/:id/invitations/:invId/revoke
  *   DELETE /api/v1/users/me/organizations/:id/members/:euid          remove a member (or self)
  *   PATCH  /api/v1/users/me/organizations/:id/members/:euid          change member role
@@ -44,24 +46,15 @@ import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { requestClient } from '../../lib/client-platform.js';
+import { ORG_AUTH_ERRORS } from './organization-route-errors.js';
+import {
+  INVITATION_CREATED_SCHEMA,
+  INVITE_URL_JSON_SCHEMA,
+  InviteUrl,
+  invitationCreatedBody,
+  registerPendingInvitationRoutes,
+} from './organization-invitations.routes.js';
 
-/**
- * The auth errors shared by every route in both plugins below,
- * `requirePublishableOrSecretKey` + the scope (`auth:read` for GET,
- * `auth:write` otherwise) + `requireUserSession` all run as `onRequest` hooks
- * before any handler.
- */
-const ORG_AUTH_ERRORS = {
-  401:
-    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID: missing or invalid ' +
-    'Application credential; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / ' +
-    'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED: missing, invalid, or ' +
-    "mismatched end-user token (X-Rekey-User-Token).",
-  403:
-    'IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED: the caller is outside the presented key\'s ' +
-    "allowlist; or API_KEY_SCOPE_INSUFFICIENT: a secret key was presented without the " +
-    'scope the method needs (`auth:read` for GET, `auth:write` for every other method).',
-} as const;
 
 /**
  * `setMemberRole` / `acceptInvitation` return a trimmed membership row without
@@ -133,6 +126,7 @@ const InviteBody = z.object({
   email: z.string().email().max(254),
   /** Optional. Falls back to the Application's default organization role. */
   role: OrgRoleZ.optional(),
+  inviteUrl: InviteUrl.optional(),
 });
 
 const ChangeRoleBody = z.object({
@@ -163,6 +157,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
   // creating, inviting, changing roles, leaving and switching need `auth:write`.
   app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
+  await registerPendingInvitationRoutes(app);
 
   app.post(
     '/',
@@ -435,6 +430,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
             endUserId: r.endUserId,
             email: r.email,
             role: r.role,
+            baseRole: r.baseRole,
             createdAt: r.createdAt.toISOString(),
           })),
           total,
@@ -450,7 +446,13 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
     {
       schema: {
         tags: ['Public · Organizations'],
-        summary: 'Invite a user (OWNER + ADMIN). Returns the raw token once.',
+        summary: 'Invite a user (OWNER + ADMIN). Emails the link; returns the raw token once.',
+        description:
+          'Emails the invited address a link in the Application\'s branding (the ' +
+          '`organization_invitation` email). The link is `inviteUrl` when given, else the app\'s ' +
+          '`/accept-invitation` page on its App URL, else its hosted portal\'s `/invitation-link`. ' +
+          'The mail counts against the address\'s auth-email cap and obeys the Application\'s email ' +
+          'switches; `emailSent` says whether it went out.',
         body: {
           type: 'object',
           required: ['email'],
@@ -462,31 +464,21 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
                 'A role name from the catalog (GET /users/me/organizations/roles). Built-ins: ' +
                 "OWNER, ADMIN, MEMBER. Omit to use the Application's default role.",
             },
+            inviteUrl: INVITE_URL_JSON_SCHEMA,
           },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         response: {
-          201: ok(
-            {
-              type: 'object',
-              properties: {
-                invitation: ref('OrganizationInvitation'),
-                token: {
-                  type: 'string',
-                  description: 'Raw invitation token. Shown exactly once, store it now.',
-                },
-                warning: { type: 'string' },
-              },
-              required: ['invitation', 'token', 'warning'],
-            },
-            'The created invitation.',
-          ),
+          201: ok(INVITATION_CREATED_SCHEMA, 'The created invitation.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
             403:
               `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER: the caller is not a member ` +
               'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT: the caller\'s role ' +
               'cannot invite to the requested role (ADMIN cannot invite an OWNER).',
+            400:
+              'AUTH_URL_INVALID / AUTH_URL_NOT_ALLOWED: `inviteUrl` is not an http(s) URL on an origin ' +
+              'this Application registered.',
             409: 'ORGANIZATION_ALREADY_MEMBER: that email is already a member of this organization.',
           }),
         },
@@ -501,23 +493,9 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         organizationId: id,
         email: body.email,
         ...(body.role !== undefined && { role: body.role }),
+        inviteUrl: body.inviteUrl,
       });
-      return reply.status(201).send({
-        success: true,
-        data: {
-          invitation: {
-            id: result.invitation.id,
-            organizationId: result.invitation.organizationId,
-            email: result.invitation.email,
-            role: result.invitation.role,
-            expiresAt: result.invitation.expiresAt.toISOString(),
-            createdAt: result.invitation.createdAt.toISOString(),
-          },
-          token: result.rawToken,
-          warning:
-            'Raw token shown ONCE. Share via your own channel. Rekey does not send organisation-invitation email at this time (planned).',
-        },
-      });
+      return reply.status(201).send({ success: true, data: invitationCreatedBody(result) });
     },
   );
 
@@ -723,6 +701,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         activeOrganizationId: id,
         impersonation: req.impersonation,
         sessionStamp: req.sessionStamp ?? null,
+        portalSession: req.portalSession === true,
         // Re-mint on the device the current session is bound to (the `dev`
         // claim), never a new one, switching teams is not a sign-in.
         device: {
@@ -758,6 +737,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         activeOrganizationId: null,
         impersonation: req.impersonation,
         sessionStamp: req.sessionStamp ?? null,
+        portalSession: req.portalSession === true,
         device: {
           userAgent: requestClient(req).userAgent,
           ip: req.ip,

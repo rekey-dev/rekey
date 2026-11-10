@@ -55,7 +55,8 @@ three `PORTAL_HOST` references, as the note on it in the compose file explains.
   self-apply on container start, a migration that needs an operator decision
   will have already run by the time you notice. Read
   [Upgrading: Application environments](#upgrading-application-environments)
-  **before** you deploy a version that contains it. For 2.2.0, read
+  **before** you deploy a version that contains it. For 2.4.0, read
+  [docs/migrating-to-2.4.md](docs/migrating-to-2.4.md) first. For 2.2.0, read
   [Upgrading: 2.2.0 migrations](#upgrading-220-migrations)
   first. It also lists the three proxy secrets `docker-compose.prod.yml`
   requires from 2.2.0 on, without which the stack will not start.

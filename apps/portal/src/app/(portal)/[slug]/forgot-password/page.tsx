@@ -1,5 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
+import { notFound, redirect } from 'next/navigation';
+import { getPortalConfig } from '@/lib/config';
 import { forgotPasswordAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
 import { SubmitButton } from '@/components/submit-button';
@@ -16,6 +18,11 @@ export default async function ForgotPasswordPage({
   const sp = await searchParams;
   const sent = sp.sent === '1';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  const config = await getPortalConfig(slug);
+  if (!config) notFound();
+  if (!config.auth.password) {
+    redirect(`/${slug}/login${error === 'AUTH_METHOD_DISABLED' ? '?reason=password_off' : ''}`);
+  }
 
   return (
     <div className="mx-auto max-w-sm space-y-5 pt-10">

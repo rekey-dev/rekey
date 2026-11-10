@@ -71,3 +71,20 @@ export function portalDomainUnverified(
     !app.portalDomainVerifiedAt
   );
 }
+
+export type PortalDomainState = 'not_set' | 'pending' | 'verified' | 'lapsed';
+
+/**
+ * Where the custom portal domain stands. `lapsed` is a domain that was
+ * verified until the API's DNS re-check stopped finding its record.
+ *
+ * @example
+ * portalDomainState({ portalDomain: 'billing.acme.com', portalDomainVerifiedAt: null, portalDomainLapsedAt: null }); // 'pending'
+ */
+export function portalDomainState(
+  app: Pick<ApplicationRow, 'portalDomain' | 'portalDomainVerifiedAt' | 'portalDomainLapsedAt'>,
+): PortalDomainState {
+  if (!app.portalDomain) return 'not_set';
+  if (app.portalDomainVerifiedAt) return 'verified';
+  return app.portalDomainLapsedAt ? 'lapsed' : 'pending';
+}

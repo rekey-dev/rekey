@@ -49,12 +49,17 @@ describe('signInErrorCopy', () => {
       'HTTP_502',
       'PUBLISHABLE_KEY_INVALID',
       'ORIGIN_NOT_ALLOWED',
-      'AUTH_METHOD_DISABLED',
     ]) {
       const copy = signInErrorCopy(code);
       expect(copy, code).not.toBe(CREDENTIALS);
       expect(copy, code).toContain('not a problem with your account');
     }
+  });
+
+  it('says a turned-off sign-in method is off, instead of calling the site broken', () => {
+    const copy = signInErrorCopy('AUTH_METHOD_DISABLED');
+    expect(copy).toMatch(/turned off/);
+    expect(copy).not.toContain('not working');
   });
 
   it('points an unconfirmed address at its inbox', () => {
@@ -67,6 +72,15 @@ describe('signInErrorCopy', () => {
       expect(copy).toMatch(/Contact the business/);
       expect(copy).not.toMatch(/password/);
     }
+  });
+
+  it('sends a customer of a device-bound app to the app instead of calling sign-in broken', () => {
+    for (const copy of [signInErrorCopy('DEVICE_FINGERPRINT_REQUIRED'), mfaErrorCopy('DEVICE_FINGERPRINT_REQUIRED')]) {
+      expect(copy).toBe(
+        'This account signs in through the app installed on your computer. Open the app to manage your account, or contact support for help with billing or devices.',
+      );
+    }
+    expect(signInErrorCopy('DEVICE_LIMIT_REACHED')).toMatch(/as many devices as its plan allows/);
   });
 
   it('never blames the password for a code it does not recognise', () => {

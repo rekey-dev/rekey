@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import * as OTPAuth from 'otpauth';
+import { prisma } from '../src/lib/prisma.js';
 import { operatorsConfirmTheirEmail, endUsersConfirmTheirEmail } from './confirmed-accounts.js';
 
 operatorsConfirmTheirEmail();
@@ -31,7 +32,7 @@ describe('end-user MFA enrolment', () => {
     await app.close();
   });
 
-  async function bootstrap(slug: string): Promise<Bootstrapped> {
+  async function bootstrap(slug: string, name = `App ${slug}`): Promise<Bootstrapped> {
     // Tenant operator path (4.0).
     const tenantSession = await app
       .inject({
@@ -51,7 +52,7 @@ describe('end-user MFA enrolment', () => {
         method: 'POST',
         url: '/api/v1/tenant/applications/',
         headers: { authorization: `Bearer ${tenantSession.accessToken}` },
-        payload: { name: `App ${slug}`, slug, enableBilling: true },
+        payload: { name, slug, enableBilling: true },
       })
       .then((r) => r.json().data as { id: string });
 
@@ -126,5 +127,33 @@ describe('end-user MFA enrolment', () => {
     const sd = status.json().data as { enabled: boolean; remainingBackupCodes: number };
     expect(sd.enabled).toBe(true);
     expect(sd.remainingBackupCodes).toBe(10);
+  });
+
+  async function setUpUrl(b: Bootstrapped): Promise<URL> {
+    const setup = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/mfa/setup',
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.endUserAccess },
+    });
+    expect(setup.statusCode).toBe(201);
+    return new URL((setup.json().data as { otpauthUrl: string }).otpauthUrl);
+  }
+
+  it('names the authenticator entry after the application, keeping a colon out of the label', async () => {
+    const url = await setUpUrl(await bootstrap('mfa-issuer', 'Acme: Tools & Co'));
+    expect(url.searchParams.get('issuer')).toBe('Acme Tools & Co');
+    expect(url.searchParams.get('secret')).toMatch(/^[A-Z2-7]+$/);
+    expect(decodeURIComponent(url.pathname.slice(1)).split(':')).toEqual(['Acme Tools & Co', 'eu-mfa-issuer@example.com']);
+  });
+
+  it('prefers the portal display name, the name the customer sees in the portal header', async () => {
+    const b = await bootstrap('mfa-display');
+    await prisma.application.update({
+      where: { id: b.applicationId },
+      data: { portalBranding: { displayName: 'Acme Portal' } },
+    });
+    const url = await setUpUrl(b);
+    expect(url.searchParams.get('issuer')).toBe('Acme Portal');
+    expect(decodeURIComponent(url.pathname.slice(1))).toBe('Acme Portal:eu-mfa-display@example.com');
   });
 });

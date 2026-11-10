@@ -18,11 +18,13 @@
     "@rekey.dev/react": "workspace:*",
     "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.28",
+    "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
+    "@types/qrcode": "^1.5.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.20",

@@ -497,7 +497,13 @@ services:
       REKEY_COOKIE_SECURE: ${REKEY_COOKIE_SECURE:-}
     labels:
       - traefik.enable=true
-      - traefik.http.routers.rekey-portal.rule=Host(`${PORTAL_HOST:?set PORTAL_HOST in .env, e.g. portal.example.com}`)
+      # PORTAL_EXTRA_HOST_RULES routes Applications' verified custom domains
+      # here too, and Traefik's certificate resolver then asks for a
+      # certificate for each Host() it names. Unset, only PORTAL_HOST is
+      # routed. Written as Traefik rule text that follows the first Host():
+      #   PORTAL_EXTRA_HOST_RULES= || Host(`billing.yourapp.com`) || Host(`account.other.com`)
+      # The portal answers 404 on any host that is not a verified domain.
+      - traefik.http.routers.rekey-portal.rule=Host(`${PORTAL_HOST:?set PORTAL_HOST in .env, e.g. portal.example.com}`)${PORTAL_EXTRA_HOST_RULES:-}
       - traefik.http.routers.rekey-portal.entrypoints=websecure
       - traefik.http.routers.rekey-portal.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-portal.loadbalancer.server.port=3050

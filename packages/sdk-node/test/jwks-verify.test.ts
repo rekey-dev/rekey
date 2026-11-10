@@ -172,6 +172,13 @@ describe('verifyAccessToken — rejections', () => {
     });
   });
 
+  it('rejects a portal session token, which holds no device slot and is only for the hosted portal', async () => {
+    const token = signRs256(claims({ typ: 'eu_portal' }), keyA.privateKey, keyA.kid);
+    await expect(verifyAccessToken(token, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
+      code: 'USER_TOKEN_INVALID',
+    });
+  });
+
   it('rejects an HS256 token outright (TOKEN_ALG_NOT_RS256) — even one HMAC-signed with the public key', async () => {
     // Classic alg-confusion attempt: HMAC the token with the PUBLIC key bytes.
     const publicPem = createPublicKey({ key: keyA.jwk as never, format: 'jwk' })

@@ -4,6 +4,202 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.4.0
+
+The hosted portal becomes your customers' account page: they can create an
+account, sign in by any method the application allows, set up two-factor,
+manage their profile, licences, devices and organizations, approve a desktop
+app, and do it on your own domain. `mfa: 'required'` is now enforced on every
+session. One migration, `20261110132835_portal_domain_verification`: run
+`prisma migrate deploy`, then deploy the API, panel and portal together,
+because the portal config response changed shape, and upgrade the
+`@rekey.dev/*` packages with them. The upgrade, step by step with commands
+and checks, is in [docs/migrating-to-2.4.md](docs/migrating-to-2.4.md).
+
+### Before you upgrade
+
+- **`mfa: 'required'` is enforced on the session, not only at sign-in.** A
+  user with no confirmed authenticator, passkey-only users included, gets
+  `403 MFA_ENROLLMENT_REQUIRED` on ordinary user-session routes, and so do
+  sessions issued before the upgrade. What stays open is what they need to
+  enrol or sign out: `GET /auth/mfa/status`, `POST /auth/mfa/setup`,
+  `POST /auth/mfa/setup-confirm`, `POST /auth/send-verification`,
+  `POST /auth/sign-out-everywhere`, and `GET /auth/me` and `GET /users/me`
+  without `include`. Impersonation sessions are not held back. Send such a
+  user through setup before anything else.
+- **Device-bound applications need `INTERNAL_CALLER_SECRET` on both the API
+  and the portal** for their customers to use the portal. Without it they
+  still get `DEVICE_FINGERPRINT_REQUIRED`. The portal's `PORTAL_BASE_URL` must
+  have the same origin as the API's `PUBLIC_PORTAL_URL`.
+- **Portal-enabled applications use the portal as their authorization page.**
+  An application with `oidcEnabled` or `mcpEnabled`, the portal on and no
+  `hostedAuthorizeUrl` of its own now sends the browser to the portal instead
+  of the built-in page.
+- **Organization invitations are emailed** to the invited address, on invite
+  and on resend, and the response gains `emailSent`. If your app mailed the
+  link itself, stop, or the invitee gets two.
+- **`GET /billing/plans` gains `defaultPlanSlug`**, the free plan
+  `POST /billing/subscribe` activates, or `null`. `billing.getPlans` in
+  `@rekey.dev/node` and `getPlans` in `@rekey.dev/react` now return
+  `PublicPlanPage` instead of `Paged<PublicPlanDto>`.
+- **Deleting an account with no password and no two-factor** from a browser
+  answers `401 EMAIL_CODE_REQUIRED` instead of `400 STEP_UP_UNAVAILABLE`.
+  Ask for an emailed code and send it as `emailCode` (below).
+- **A publishable key on authorization preview or grant** gets
+  `403 SESSION_HANDOFF_FORBIDDEN` instead of a 401.
+- **The new `DELETE` routes under `/users/me/licenses` need `billing:write`**
+  on a secret key; reads still need `billing:read`. The `license.deactivated`
+  webhook may carry `releasedBy: "end_user"`.
+- **Portal brand colours must be 3 or 6 digit hex.** `rgb()`, `hsl()`, named
+  colours, 8-digit hex and `transparent` fall back to the default, as does a
+  colour that would leave the text unreadable. Checkout and email were already
+  hex-only.
+- **Password reset emails sent before the upgrade** land on a page that asks
+  for a new link.
+- **Rotating `JWT_SECRET` lapses every verified custom domain** until its TXT
+  record is published again, because the record's value is derived from it.
+- **The portal's `Referrer-Policy` is `same-origin`**; it was `no-referrer`.
+
+### Hosted portal
+
+- **Sign-in follows the application's methods:** password, an emailed sign-in
+  link, both, or a note that sign-in happens in the app. Social sign-in is
+  opt-in per provider: register `<PUBLIC_PORTAL_URL>/<slug>/oauth/callback` in
+  the provider's console, then tick **Offer in the hosted portal** on the
+  provider (`hostedPortal`, off by default).
+- **Create an account** while `signupMode` is `public`, followed by a step for
+  the application's required profile fields. With sign-up open, an emailed
+  sign-in link for a new address creates the account, and the page says so.
+- **Email confirmation** with a resend control and its own landing page.
+- **Required two-factor setup** (QR code, setup key, backup codes) before the
+  dashboard when the application sets `mfa: 'required'`.
+- **Security page:** change a password, or set a first one with an emailed
+  code; turn two-factor on and off and replace backup codes; sessions with
+  "This session" marked, sign out one or everywhere; remove a linked provider.
+- **Profile page:** profile answers, change email (a link to the new address,
+  which ends every session once confirmed), and delete the account.
+- **Licenses and usage:** plan benefits, usage meters, credits, licence keys,
+  each licence's machines and freeing a seat, and **Start** on the
+  application's free default plan.
+- **Organization page:** list and switch, members and roles, invite, pending
+  invitations with revoke and resend, leave, create, and accept an invitation
+  from its link.
+- **Devices page** for device-bound applications: list, remove, and what the
+  device limit means. A desktop app at its limit can send the customer to
+  `/<slug>/login?return=devices`. On such an application the portal signs the
+  customer in with a portal session: it holds no device and no `max_devices`
+  slot, the API honours it only on requests that carry
+  `INTERNAL_CALLER_SECRET`, so it is useless outside the portal, and it cannot
+  approve another app.
+- **App authorization:** sign-in and consent for the authorization flow, then
+  a page that sends the user back to the app.
+- **Custom domains.** Enter a hostname in Panel, Application, Billing, Portal,
+  point a CNAME at the portal, publish the TXT record shown
+  (`_rekey-portal.<hostname>`), route the host to the portal over HTTPS, then
+  verify. Only a verified exact match is served, and verifying moves emailed
+  links, the authorization page and checkout returns to the domain at once,
+  so route it first. The API re-checks every six hours and lapses a domain
+  after three misses in a row (`app.portal_domain_lapsed`). Self-hosted with
+  `docker-compose.prod.yml`, add the domains to `PORTAL_EXTRA_HOST_RULES`.
+- **Navigation:** a header with Overview, Devices, Security, Profile and
+  Organization where they apply, and terms and privacy links. A signed-out
+  visit to a plan returns to that plan after sign-in.
+- **Dark mode** when the operator set no brand colours, 44px touch targets and
+  solid focus outlines. Dates and amounts are written in the visitor's locale.
+- **Emailed tokens are spent by a button.** Sign-in, confirmation, reset,
+  email change and invitation links move their token into a short httpOnly
+  cookie and open a token-free page, so a mail scanner cannot use one up.
+- The plan page states the renewal and cancel terms, the dashboard refreshes
+  after checkout until the subscription is active, and **Switch** is now
+  **Subscribe**: checkout starts a second subscription and cancels nothing.
+
+### API and SDK
+
+- **Auth:** `POST /auth/sign-up` takes `verifyUrl`. `GET /auth/sessions` marks
+  the caller's own session with `current`. With the portal on and no App URL
+  to link to (no `appUrl`, no redirect URL and no `DEFAULT_APP_URL`),
+  verification, reset, sign-in, email change and invitation emails link to
+  the portal, and `requireEmailVerification` can be turned on without
+  `appUrl`.
+- **Current user:** `GET /auth/me` and `GET /users/me` return `hasPassword`,
+  whether the user has a password (never the hash), so a client can offer
+  "change password" or "create a password". SDK: `CurrentUserDto` in
+  `@rekey.dev/shared-types`, returned by `getCurrentUser` (react).
+- **MFA:** `POST /auth/mfa/backup-codes` replaces the backup codes, with a
+  current authenticator code. SDK: `auth.replaceBackupCodes` (node),
+  `replaceBackupCodes` (react). Passkey sign-in now reports
+  `mfaEnrollmentRequired` too.
+- **Emailed codes and first password:** `POST /auth/email-code` emails a
+  six-digit code for `set_password` or `delete_account`;
+  `POST /auth/set-password` sets a first password with it, and
+  `DELETE /users/me` takes it as `emailCode`. SDK: `auth.requestEmailCode`,
+  `auth.setPassword` (node), `requestEmailCode`, `setPassword` and
+  `emailCode` on `deleteAccount` (react).
+- **Email change:** `POST /users/me/email` sends a link to the new address,
+  `POST /auth/email-change/confirm` spends it. SDK:
+  `auth.requestEmailChange`, `auth.confirmEmailChange` (node),
+  `requestEmailChange` (react).
+- **Organizations and invitations:**
+  `GET /users/me/organizations/:id/invitations` lists pending invitations,
+  `POST /users/me/organizations/:id/invitations/:invId/resend` emails a fresh
+  link, `POST /auth/organizations/invitation-preview` says what an invitation
+  offers before it is accepted, and the members list returns `baseRole`. SDK:
+  `organizations.listInvitations`, `organizations.resendInvitation`,
+  `organizations.previewInvitation` (node), `listOrganizationInvitations`,
+  `resendOrganizationInvitation`, `previewOrganizationInvitation` (react). A
+  new built-in `organization_invitation` email template.
+- **Licenses:** `GET /users/me/licenses/:licenseId/activations` lists a
+  licence's machines, `DELETE /users/me/licenses/:licenseId/activations/:activationId`
+  frees a seat. SDK: `licenses.listMyActivations`,
+  `licenses.releaseMyActivation` (node), `listLicenseActivations`,
+  `releaseLicenseActivation` (react).
+- **OAuth providers:** end-user `start` and `callback` take `redirectUri` for
+  the application's own portal page, and `GET /auth/oauth/providers` reports
+  `hostedPortal`.
+- **Portal config and domains:** `GET /portal/config/:slug` returns `auth`
+  (`password`, `magicLink`, `signup`, `emailVerificationRequired`,
+  `mfaRequired`, `devices`, `organizations`); `GET /portal/config?host=` finds
+  an application by its verified domain;
+  `POST /tenant/applications/:id/portal/domain/verify` checks the TXT record,
+  which `GET /tenant/applications/:id` returns as `portalDomainTxtRecord`.
+- **Authorization:** preview and grant accept the portal's credential, and
+  `POST /mcp/:slug/oauth/authorize/deny` lets the portal refuse a request.
+- **New error codes:** `MFA_ENROLLMENT_REQUIRED`, `MFA_NOT_ENROLLED`,
+  `PASSWORD_ALREADY_SET`, `EMAIL_CODE_INVALID`, `EMAIL_CODE_REQUIRED`,
+  `EMAIL_CODE_NOT_ACCEPTED`, `EMAIL_CODE_NOT_SENT`,
+  `EMAIL_CHANGE_SAME_ADDRESS`, `EMAIL_CHANGE_DOMAIN_NOT_ALLOWED`,
+  `EMAIL_CHANGE_URL_REQUIRED`, `EMAIL_CHANGE_NOT_SENT`,
+  `EMAIL_CHANGE_TOKEN_INVALID`, `EMAIL_CHANGE_PROOF_REQUIRED`,
+  `OAUTH_REDIRECT_URI_NOT_ALLOWED`, `OAUTH_PROVIDER_NOT_IN_PORTAL`,
+  `ORGANIZATION_INVITATION_UNAVAILABLE`, `ORGANIZATION_INVITATION_NOT_PENDING`,
+  `AUTHORIZATION_REQUEST_UNKNOWN`, `AUTHORIZATION_NEEDS_DEVICE_SESSION`, and
+  `PORTAL_DOMAIN_INVALID`, `PORTAL_DOMAIN_RESERVED`, `PORTAL_DOMAIN_NOT_SET`,
+  `PORTAL_DOMAIN_NOT_VERIFIED`, `PORTAL_DOMAIN_DNS_UNAVAILABLE` and
+  `PORTAL_DOMAIN_CHANGED`. See docs/errors.md.
+
+### Fixed
+
+- The portal sent no `Origin` on its publishable-key calls, so every
+  application with an origin allowlist got `403 ORIGIN_NOT_ALLOWED` on
+  sign-in, two-factor, refresh and password reset.
+- An end user's authenticator entry was named "Rekey". It now carries the
+  portal display name, else the application name.
+- The organization members list dropped `baseRole` on the wire.
+- A portal form posted before the page hydrated answered 500.
+- On an application without password sign-in, the portal's reset pages
+  offered a reset that could never work; they now send the customer to sign
+  in.
+- A real person's portal sign-up could be dropped as a bot when autofill
+  filled the hidden bot-trap field.
+
+### Security
+
+- A failed sign-in's typed address and the reset token no longer appear in
+  portal URLs.
+- On a custom domain the portal believes `X-Forwarded-Host` only with the
+  proxy secret, so a request around the proxy cannot pick an application.
+- The operator's logo is loaded with no referrer.
+
 ## 2.3.1
 
 Operator access tokens reach billing and analytics, the panel's navigation and

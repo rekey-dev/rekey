@@ -21,8 +21,8 @@
  *     for both audiences, and red here was a fright shown to someone whose card
  *     had merely expired.
  *   - The label rendered `past due` (lowercase) against `Past due` in the
- *     panel, via a NON-GLOBAL `replace('_', ' ')` that rewrites only the first
- *     underscore and so mangles any two-underscore enum.
+ *     panel. Labels now come from a copy map, so an enum name never reaches
+ *     the customer.
  */
 
 import type { ReactNode } from 'react';
@@ -34,7 +34,10 @@ const TONES: Record<Tone, { chip: string; dot: string }> = {
     chip: 'bg-[color-mix(in_srgb,var(--color-success)_10%,transparent)] text-[var(--color-success)]',
     dot: 'bg-[var(--color-success)]',
   },
-  warning: { chip: 'bg-amber-500/10 text-amber-700', dot: 'bg-amber-500' },
+  warning: {
+    chip: 'bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] text-[var(--color-warning)]',
+    dot: 'bg-[var(--color-warning)]',
+  },
   danger: {
     chip: 'bg-[color-mix(in_srgb,var(--color-danger)_10%,transparent)] text-[var(--color-danger)]',
     dot: 'bg-[var(--color-danger)]',
@@ -44,33 +47,34 @@ const TONES: Record<Tone, { chip: string; dot: string }> = {
 
 /**
  * Mirror of `TONES` in the panel's StatusPill, restricted to the statuses a
- * customer can actually be shown. `idle` is this file's name for the panel's
- * `neutral`: an ended or reversed state that is nobody's fault.
+ * customer can actually be shown, with the words a customer reads for each.
+ * `idle` is this file's name for the panel's `neutral`: an ended or reversed
+ * state that is nobody's fault.
  */
-const STATUS_TONE: Record<string, Tone> = {
+const STATUSES: Record<string, { tone: Tone; label: string }> = {
   // Subscription
-  ACTIVE: 'success',
-  PENDING: 'warning',
-  PROCESSING: 'warning',
-  PAST_DUE: 'warning',
-  CANCELED: 'idle',
-  CANCELLED: 'idle',
-  EXPIRED: 'idle',
-  SUSPENDED: 'danger',
+  ACTIVE: { tone: 'success', label: 'Active' },
+  TRIALING: { tone: 'success', label: 'Trial' },
+  PENDING: { tone: 'warning', label: 'Pending' },
+  PROCESSING: { tone: 'warning', label: 'Processing' },
+  PAST_DUE: { tone: 'warning', label: 'Past due' },
+  CANCELED: { tone: 'idle', label: 'Canceled' },
+  EXPIRED: { tone: 'idle', label: 'Expired' },
+  SUSPENDED: { tone: 'danger', label: 'Suspended' },
   // Payment
-  SUCCEEDED: 'success',
-  FAILED: 'danger',
-  REFUNDED: 'idle',
+  SUCCEEDED: { tone: 'success', label: 'Paid' },
+  FAILED: { tone: 'danger', label: 'Failed' },
+  REFUNDED: { tone: 'idle', label: 'Refunded' },
+  PARTIALLY_REFUNDED: { tone: 'idle', label: 'Partially refunded' },
 };
 
-/** `PAST_DUE` → `Past due`. Mirror of `statusLabel` in the panel's StatusPill. */
+/** The customer-facing word for a status. A status this list does not name reads as unknown, never as its enum. */
 export function statusLabel(status: string): string {
-  const words = status.replace(/_/g, ' ').toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  return STATUSES[status.toUpperCase()]?.label ?? 'Unknown';
 }
 
 export function StatusBadge({ status }: { status: string }): ReactNode {
-  const tone = TONES[STATUS_TONE[status.toUpperCase()] ?? 'idle'];
+  const tone = TONES[STATUSES[status.toUpperCase()]?.tone ?? 'idle'];
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${tone.chip}`}

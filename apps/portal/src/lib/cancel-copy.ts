@@ -46,7 +46,7 @@ export interface CancelCopyInput {
 
 export function cancelCopy(
   subscription: CancelCopyInput,
-  formatDate: (d: Date) => string = (d) => d.toLocaleDateString(),
+  formatDate: (d: Date) => string,
 ): CancelCopy {
   const schedules = cancelEffect(subscription) === 'period-end';
   if (!schedules) {
@@ -55,7 +55,7 @@ export function cancelCopy(
       label: 'Cancel subscription',
       confirmLabel: 'Yes, cancel now',
       message:
-        'This subscription has no renewal date left to run out, so cancelling takes effect ' +
+        'This subscription has no renewal date left to run out, so canceling takes effect ' +
         "straight away, access ends now and there's no refund for any unused time. " +
         'You can resubscribe any time.',
     };
@@ -68,7 +68,7 @@ export function cancelCopy(
     : 'the end of the period you have already paid for';
   return {
     schedules,
-    label: 'Cancel at period end',
+    label: 'Cancel subscription',
     confirmLabel: 'Cancel at period end',
     message: `Your plan stays active until ${until}, then won't renew. You can resubscribe any time.`,
   };

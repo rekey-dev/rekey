@@ -1,7 +1,7 @@
 /**
  * Section shell, the standard portal card used to group dashboard content.
  * Replaces the hand-rolled `rounded-xl border … p-5` string repeated across
- * [slug]/page.tsx. Defaults to <section> since every current usage is one.
+ * [slug]/(overview)/page.tsx. Defaults to <section> since every current usage is one.
  */
 
 import type { ReactNode } from 'react';
@@ -12,14 +12,17 @@ export function Card({
   children,
   className = '',
   as = 'section',
+  id,
 }: {
   children: ReactNode;
   className?: string;
   as?: CardElement;
+  id?: string;
 }): ReactNode {
   const Tag = as;
   return (
     <Tag
+      id={id}
       className={[
         'rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5',
         className,

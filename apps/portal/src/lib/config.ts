@@ -10,6 +10,7 @@ import 'server-only';
 import { cache } from 'react';
 import { rekeyApiUrl } from './env';
 import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
+import { readableAccent, readableSurface } from './checkout-format';
 
 export interface PortalBranding {
   /** Overrides the Application name in the portal header. */
@@ -28,6 +29,10 @@ export interface PortalBranding {
   supportEmail?: string;
   /** Support page URL, takes precedence over supportEmail when both are set. */
   supportUrl?: string;
+  /** Terms of service page, linked in the footer. */
+  termsUrl?: string;
+  /** Privacy policy page, linked in the footer. */
+  privacyUrl?: string;
 }
 
 export interface PortalConfig {
@@ -37,6 +42,21 @@ export interface PortalConfig {
   billingEnabled: boolean;
   billingSubject: 'user' | 'org';
   branding: PortalBranding;
+  auth: PortalAuthFacts;
+}
+
+/** Which sign-in paths the application allows, as the API enforces them. */
+export interface PortalAuthFacts {
+  password: boolean;
+  magicLink: boolean;
+  /** A browser may self sign-up (`signupMode: public`). */
+  signup: boolean;
+  emailVerificationRequired: boolean;
+  mfaRequired: boolean;
+  /** Sign-in is bound to a device, so customers can see and remove theirs. */
+  devices: boolean;
+  /** Customers may create organizations, so the organization page is for all of them. */
+  organizations: boolean;
 }
 
 /**
@@ -45,15 +65,52 @@ export interface PortalConfig {
  * there's no attribute breakout, but an unguarded value like `red;display:none`
  * would still inject extra declarations onto the element. Accept only hex,
  * rgb/rgba/hsl/hsla(), and bare named colors; anything else falls back to the
- * default token. Returns undefined for empty/invalid input.
+ * default token. CSS-wide keywords, `transparent` and `currentColor` are
+ * rejected because they paint nothing or inherit, leaving invisible buttons.
+ * Returns undefined for empty/invalid input.
  */
 export function safeCssColor(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const s = value.trim();
   if (/^#[0-9a-fA-F]{3,8}$/.test(s)) return s;
   if (/^(rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/i.test(s)) return s;
+  if (/^(transparent|currentcolor|inherit|initial|unset|revert|revert-layer)$/i.test(s)) return undefined;
   if (/^[a-zA-Z]+$/.test(s)) return s; // named color (e.g. rebeccapurple)
   return undefined;
+}
+
+/**
+ * The `--color-*` overrides for the operator's brand colours. A colour is kept
+ * only when the portal's text stays readable on it (see `readableSurface` and
+ * `readableAccent`); otherwise its token is left out and the default stands.
+ * The contrast check reads hex only, so `rgb()` and named colours fall back.
+ *
+ * @example
+ * brandTokens({ primaryColor: '#0f766e', backgroundColor: '#111111' });
+ * // { '--color-primary': '#0f766e', '--color-primary-hover': 'color-mix(in srgb, #0f766e 85%, black)' }
+ */
+export function brandTokens(branding: PortalBranding): Record<string, string> {
+  const vars: Record<string, string> = {};
+  const background = readableSurface(safeCssColor(branding.backgroundColor) ?? null);
+  const surface = readableSurface(safeCssColor(branding.surfaceColor) ?? null);
+  const primary = safeCssColor(branding.primaryColor);
+  if (primary && readableAccent(primary, [background, surface]) === primary) {
+    vars['--color-primary'] = primary;
+    // Darker, never lighter: the accent already passed 4.5:1 against white text.
+    vars['--color-primary-hover'] = `color-mix(in srgb, ${primary} 85%, black)`;
+  }
+  if (background) vars['--color-bg'] = background;
+  if (surface) vars['--color-surface'] = surface;
+  return vars;
+}
+
+/**
+ * Whether the portal may follow the visitor's dark preference. Only with no
+ * operator colour at all: a brand was chosen against a light page, and the
+ * contrast checks in `brandTokens` read the light tokens.
+ */
+export function followsColorScheme(branding: PortalBranding): boolean {
+  return !branding.primaryColor && !branding.backgroundColor && !branding.surfaceColor;
 }
 
 /**

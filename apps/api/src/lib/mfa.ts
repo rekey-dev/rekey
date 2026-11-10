@@ -38,7 +38,8 @@ export function generateSecret(issuer: string, label: string): GeneratedSecret {
   // 20 bytes = 160 bits, the RFC 6238 recommendation.
   const secret = new OTPAuth.Secret({ size: 20 });
   const totp = new OTPAuth.TOTP({
-    issuer,
+    // The key URI label is `issuer:account`, so a colon in the issuer would split it in the wrong place.
+    issuer: issuer.replace(/\s*:\s*/g, ' ').trim(),
     label,
     algorithm: 'SHA1',
     digits: 6,

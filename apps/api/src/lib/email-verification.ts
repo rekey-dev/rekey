@@ -32,15 +32,21 @@ export async function issueVerificationToken(args: {
   applicationId: string;
   endUserId: string;
   email: string;
+  /** Shorter for a token that changes the account's address. Defaults to 24 hours. */
+  lifetimeMs?: number;
 }): Promise<IssuedVerificationToken> {
   const raw = randomBytes(TOKEN_BYTES).toString('base64url');
+  const now = new Date();
   const record = await prisma.emailVerificationToken.create({
     data: {
       applicationId: args.applicationId,
       endUserId: args.endUserId,
       email: args.email.toLowerCase(),
       tokenHash: hashVerificationToken(raw),
-      expiresAt: new Date(Date.now() + LIFETIME_MS),
+      expiresAt: new Date(now.getTime() + (args.lifetimeMs ?? LIFETIME_MS)),
+      // This process's clock, the one `sessionsInvalidBefore` is written with:
+      // an email change compares the two.
+      createdAt: now,
     },
   });
   return { raw, record };

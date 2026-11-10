@@ -189,6 +189,7 @@ import { tenantBillingReportingRoutes } from "./modules/billing/reporting.routes
 import {
   organizationsAuthenticatedRoutes,
   organizationsAcceptInvitationRoutes,
+  organizationInvitationPreviewRoutes,
 } from "./modules/organizations/index.js";
 import { securityEventsRoutes } from "./modules/security-events/index.js";
 import { mcpRoutes, mcpWellKnownRoutes } from "./modules/mcp/index.js";
@@ -1116,6 +1117,9 @@ export async function buildApp(
     prefix: "/api/v1/users/me/organizations",
   });
   await app.register(organizationsAcceptInvitationRoutes, {
+    prefix: "/api/v1/auth/organizations",
+  });
+  await app.register(organizationInvitationPreviewRoutes, {
     prefix: "/api/v1/auth/organizations",
   });
   await app.register(billingRoutes, { prefix: "/api/v1/billing" });
